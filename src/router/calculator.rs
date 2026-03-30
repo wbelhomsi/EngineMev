@@ -1,7 +1,7 @@
 use solana_sdk::pubkey::Pubkey;
 use tracing::{debug, trace};
 
-use crate::router::pool::{ArbRoute, DetectedSwap, DexType, RouteHop};
+use crate::router::pool::{ArbRoute, DetectedSwap, RouteHop};
 use crate::state::StateCache;
 
 /// Finds profitable circular arbitrage routes after a detected swap.
@@ -75,7 +75,7 @@ impl RouteCalculator {
     fn find_2_hop_routes(
         &self,
         base_mint: &Pubkey,
-        trigger_pool: &Pubkey,
+        _trigger_pool: &Pubkey,
         routes: &mut Vec<ArbRoute>,
     ) {
         // Get all pools that contain our base token
@@ -128,7 +128,7 @@ impl RouteCalculator {
     fn find_3_hop_routes(
         &self,
         base_mint: &Pubkey,
-        trigger_pool: &Pubkey,
+        _trigger_pool: &Pubkey,
         routes: &mut Vec<ArbRoute>,
     ) {
         let base_pools = self.state_cache.pools_for_token(base_mint);

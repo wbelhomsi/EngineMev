@@ -1,4 +1,3 @@
-use anyhow::Result;
 use dashmap::DashMap;
 use solana_sdk::pubkey::Pubkey;
 use std::sync::Arc;

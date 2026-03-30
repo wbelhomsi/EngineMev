@@ -8,7 +8,7 @@ use solana_sdk::{
     system_instruction,
     transaction::Transaction,
 };
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::router::pool::{ArbRoute, DexType};
 

@@ -198,6 +198,7 @@ impl GeyserStream {
 
 /// Stats for monitoring Geyser stream health.
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct StreamStats {
     pub account_updates_received: u64,
     pub vault_changes_detected: u64,

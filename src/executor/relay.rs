@@ -3,9 +3,9 @@ use base64::{engine::general_purpose, Engine as _};
 use serde_json::json;
 use std::sync::Arc;
 use tokio::task::JoinSet;
-use tracing::{info, warn, error, debug};
+use tracing::{info, error, debug};
 
-use crate::config::{BotConfig, RelayEndpoints};
+use crate::config::BotConfig;
 
 /// Relay submission result for tracking which relay landed the bundle.
 #[derive(Debug)]
