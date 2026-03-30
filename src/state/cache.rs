@@ -30,6 +30,10 @@ pub struct StateCache {
     pools: Arc<DashMap<PoolKey, CacheEntry>>,
     /// Index: token_mint -> list of pools containing that token
     token_to_pools: Arc<DashMap<Pubkey, Vec<Pubkey>>>,
+    /// Index: vault_address -> (pool_address, is_token_a_vault)
+    /// Populated during pool bootstrapping. Geyser gives us vault updates —
+    /// this index tells us which pool was affected and which side changed.
+    vault_to_pool: Arc<DashMap<Pubkey, (Pubkey, bool)>>,
     ttl: Duration,
 }
 
@@ -38,6 +42,7 @@ impl StateCache {
         Self {
             pools: Arc::new(DashMap::with_capacity(10_000)),
             token_to_pools: Arc::new(DashMap::with_capacity(5_000)),
+            vault_to_pool: Arc::new(DashMap::with_capacity(20_000)),
             ttl,
         }
     }
@@ -123,6 +128,53 @@ impl StateCache {
     /// Evict all entries older than TTL.
     pub fn evict_stale(&self) {
         self.pools.retain(|_, entry| entry.last_updated.elapsed() < self.ttl * 10);
+    }
+
+    /// Register a vault address → pool mapping.
+    /// Called during pool bootstrapping so Geyser vault updates can be routed
+    /// to the correct pool.
+    ///
+    /// `vault_address` - the SPL Token account address of the pool's token vault
+    /// `pool_address` - the pool this vault belongs to
+    /// `is_token_a` - true if this is the token_a vault, false for token_b
+    pub fn register_vault(&self, vault_address: Pubkey, pool_address: Pubkey, is_token_a: bool) {
+        self.vault_to_pool.insert(vault_address, (pool_address, is_token_a));
+    }
+
+    /// Look up which pool a vault belongs to.
+    /// Returns (pool_address, is_token_a_vault) or None if unknown.
+    pub fn pool_for_vault(&self, vault_address: &Pubkey) -> Option<(Pubkey, bool)> {
+        self.vault_to_pool.get(vault_address).map(|v| *v.value())
+    }
+
+    /// Update a pool's reserve from a Geyser vault balance change.
+    /// Returns the pool address if the update was applied (for downstream routing).
+    pub fn update_vault_balance(
+        &self,
+        vault_address: &Pubkey,
+        new_balance: u64,
+        slot: u64,
+    ) -> Option<Pubkey> {
+        let (pool_address, is_token_a) = self.pool_for_vault(vault_address)?;
+
+        let key = PoolKey { address: pool_address };
+        let mut entry = self.pools.get_mut(&key)?;
+        let cache_entry = entry.value_mut();
+
+        // Only apply if this update is from a newer or equal slot
+        if slot < cache_entry.state.last_slot {
+            return None;
+        }
+
+        if is_token_a {
+            cache_entry.state.token_a_reserve = new_balance;
+        } else {
+            cache_entry.state.token_b_reserve = new_balance;
+        }
+        cache_entry.state.last_slot = slot;
+        cache_entry.last_updated = Instant::now();
+
+        Some(pool_address)
     }
 
     /// Get all pool addresses for a given DEX type.

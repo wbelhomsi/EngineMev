@@ -13,15 +13,16 @@ use tracing::{info, warn, error};
 
 use config::BotConfig;
 use executor::{BundleBuilder, MultiRelay};
-use mempool::MempoolStream;
+use mempool::{GeyserStream, PoolStateChange};
+use router::pool::DetectedSwap;
 use router::{RouteCalculator, ProfitSimulator};
 use router::simulator::SimulationResult;
 use state::StateCache;
 
-/// Channel capacity for detected swaps.
+/// Channel capacity for pool state changes from Geyser.
 /// Keep small — we want backpressure if the router can't keep up.
-/// A backed-up channel means we're too slow and opportunities are stale anyway.
-const SWAP_CHANNEL_CAPACITY: usize = 256;
+/// A backed-up channel means we're too slow and stale events are worthless anyway.
+const STATE_CHANGE_CHANNEL_CAPACITY: usize = 256;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -68,11 +69,11 @@ async fn main() -> Result<()> {
         let _ = shutdown_tx_clone.send(true);
     });
 
-    // Channel for detected swaps: mempool stream → router
-    let (swap_tx, swap_rx) = bounded(SWAP_CHANNEL_CAPACITY);
+    // Channel for pool state changes: Geyser stream → router
+    let (change_tx, change_rx) = bounded(STATE_CHANGE_CHANNEL_CAPACITY);
 
     // Initialize components
-    let mempool_stream = MempoolStream::new(config.clone(), state_cache.clone());
+    let geyser_stream = GeyserStream::new(config.clone(), state_cache.clone());
     let route_calculator = RouteCalculator::new(state_cache.clone(), config.max_hops);
     let profit_simulator = ProfitSimulator::new(
         state_cache.clone(),
@@ -83,23 +84,27 @@ async fn main() -> Result<()> {
 
     // Load searcher keypair
     let searcher_keypair = load_keypair(&config.searcher_keypair_path)?;
-    let bundle_builder = BundleBuilder::new(searcher_keypair);
+    let bundle_builder = Arc::new(BundleBuilder::new(searcher_keypair));
 
     info!("All components initialized, starting pipeline...");
 
-    // === Pipeline ===
+    // === Pipeline (post-mempool architecture) ===
     //
-    // Stream (async) → Channel → Router (sync, CPU-bound) → Simulator → Bundle → Relay (async)
+    // Geyser stream (async) → Channel → State update + Route calc (sync, CPU-bound)
+    //   → Simulate → Bundle → Multi-relay fan-out (async)
+    //
+    // Old flow (dead): Jito mempool → decode pending swap → backrun same bundle
+    // New flow: Geyser vault change → update reserves → detect price dislocation → arb next slot
     //
     // The router runs on a dedicated thread to avoid async overhead on
     // the hot path. Route calculation is pure CPU work — no I/O, no awaits.
 
-    // Task 1: Mempool streaming (async, I/O bound)
+    // Task 1: Geyser streaming (async, I/O bound)
     let stream_handle = {
         let shutdown_rx = shutdown_rx.clone();
         tokio::spawn(async move {
-            if let Err(e) = mempool_stream.start(swap_tx, shutdown_rx).await {
-                error!("Mempool stream error: {}", e);
+            if let Err(e) = geyser_stream.start(change_tx, shutdown_rx).await {
+                error!("Geyser stream error: {}", e);
             }
         })
     };
@@ -109,12 +114,18 @@ async fn main() -> Result<()> {
     let router_handle = {
         let shutdown_rx = shutdown_rx.clone();
         let multi_relay = multi_relay.clone();
+        let bundle_builder = bundle_builder.clone();
         let config = config.clone();
+        let state_cache = state_cache.clone();
 
         tokio::task::spawn_blocking(move || {
             info!("Router thread started");
             let mut opportunities_found: u64 = 0;
             let mut bundles_submitted: u64 = 0;
+
+            // Create a tokio runtime handle for async relay submission from sync context.
+            // The relay fan-out is async (HTTP calls), but the router loop is sync.
+            let rt = tokio::runtime::Handle::current();
 
             loop {
                 // Check shutdown
@@ -122,15 +133,62 @@ async fn main() -> Result<()> {
                     break;
                 }
 
-                // Receive detected swap (timeout to check shutdown periodically)
-                let swap = match swap_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                    Ok(swap) => swap,
+                // Receive pool state change from Geyser (timeout to check shutdown)
+                let change: PoolStateChange = match change_rx
+                    .recv_timeout(std::time::Duration::from_millis(100))
+                {
+                    Ok(c) => c,
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 };
 
-                // Find profitable routes
-                let routes = route_calculator.find_routes(&swap);
+                // Update the pool's reserve in the state cache.
+                // Returns the affected pool address, or None if vault is unknown.
+                let pool_address = match state_cache.update_vault_balance(
+                    &change.vault_address,
+                    change.new_balance,
+                    change.slot,
+                ) {
+                    Some(addr) => addr,
+                    None => continue, // Unknown vault — not a monitored pool
+                };
+
+                // Look up the pool to construct a trigger for route discovery.
+                let pool_state = match state_cache.get_any(&pool_address) {
+                    Some(s) => s,
+                    None => continue,
+                };
+
+                // Construct a DetectedSwap trigger from the state change.
+                // We don't know the exact swap direction, so we set output_mint
+                // to token_a — the route calculator will search both directions.
+                let trigger = DetectedSwap {
+                    signature: String::new(), // No tx sig in post-block model
+                    dex_type: pool_state.dex_type,
+                    pool_address,
+                    input_mint: pool_state.token_a_mint,
+                    output_mint: pool_state.token_b_mint,
+                    amount: None,
+                    observed_slot: change.slot,
+                };
+
+                // Also search with reversed direction for full coverage.
+                let trigger_reverse = DetectedSwap {
+                    signature: String::new(),
+                    dex_type: pool_state.dex_type,
+                    pool_address,
+                    input_mint: pool_state.token_b_mint,
+                    output_mint: pool_state.token_a_mint,
+                    amount: None,
+                    observed_slot: change.slot,
+                };
+
+                // Find profitable routes in both directions
+                let mut routes = route_calculator.find_routes(&trigger);
+                routes.extend(route_calculator.find_routes(&trigger_reverse));
+
+                // Deduplicate by sorting and taking best
+                routes.sort_by(|a, b| b.estimated_profit.cmp(&a.estimated_profit));
 
                 if routes.is_empty() {
                     continue;
@@ -149,12 +207,13 @@ async fn main() -> Result<()> {
                     } => {
                         opportunities_found += 1;
                         info!(
-                            "OPPORTUNITY #{}: {} hops, gross={}, tip={}, net={} lamports",
+                            "OPPORTUNITY #{}: {} hops, gross={}, tip={}, net={} lamports, pool={}",
                             opportunities_found,
                             route.hop_count(),
                             net_profit_lamports,
                             tip_lamports,
                             final_profit_lamports,
+                            pool_address,
                         );
 
                         if config.dry_run {
@@ -163,10 +222,29 @@ async fn main() -> Result<()> {
                         }
 
                         // Build and submit bundle
-                        // TODO: get recent blockhash from RPC
-                        // TODO: get target transaction bytes
-                        // For now, log the opportunity
-                        bundles_submitted += 1;
+                        // TODO: get recent blockhash from RPC (cache with ~2s TTL)
+                        let blockhash = solana_sdk::hash::Hash::default(); // placeholder
+
+                        match bundle_builder.build_arb_bundle(&route, tip_lamports, blockhash) {
+                            Ok(bundle_txs) => {
+                                let relay = multi_relay.clone();
+                                let tip = tip_lamports;
+                                // Fire-and-forget relay submission on async runtime.
+                                // We don't wait — next opportunity is more valuable than
+                                // tracking this bundle's fate.
+                                rt.spawn(async move {
+                                    let results = relay.submit_bundle(&bundle_txs, tip).await;
+                                    let landed = results.iter().filter(|r| r.success).count();
+                                    if landed > 0 {
+                                        info!("Bundle landed on {}/{} relays", landed, results.len());
+                                    }
+                                });
+                                bundles_submitted += 1;
+                            }
+                            Err(e) => {
+                                error!("Bundle build failed: {}", e);
+                            }
+                        }
                     }
                     SimulationResult::Unprofitable { reason } => {
                         tracing::trace!("Route rejected: {}", reason);

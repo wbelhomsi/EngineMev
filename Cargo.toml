@@ -10,9 +10,12 @@ solana-sdk = "2.2"
 solana-client = "2.2"
 solana-transaction-status = "2.2"
 
-# Jito
-jito-protos = "0.2"
-jito-searcher-client = "0.2"
+# Jito bundle submission is raw JSON-RPC via reqwest — no SDK dependency needed.
+# The jito-sdk-rust crate just wraps the same HTTP calls with extra overhead.
+
+# Yellowstone Geyser (replaces dead Jito mempool stream)
+yellowstone-grpc-client = "12.2"
+yellowstone-grpc-proto = "12.2"
 
 # gRPC / networking
 tonic = { version = "0.12", features = ["tls", "tls-webpki-roots"] }
