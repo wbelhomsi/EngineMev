@@ -1,2 +1,30 @@
+# Build
+/target/
+Cargo.lock
+
+# Environment & secrets
+.env
+*.json
+!.env.example
+
+# Keys — NEVER commit
+searcher.json
+keypair.json
 deploy_key_engineme
 deploy_key_engineme.pub
+*.pem
+*.key
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

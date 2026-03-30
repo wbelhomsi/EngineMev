@@ -90,16 +90,50 @@ cargo run             # Starts in DRY_RUN=true by default
 
 5. **SPL Token account layout:** Balance at bytes 64..72 (u64 LE). This is how we detect vault changes from Geyser.
 
-## What's TODO
+## Roadmap — Multi-Strategy Plan
 
+### Phase 1: EngineMev Core (Current — SVM)
+Get the base DEX↔DEX backrun arb working end to end on Solana mainnet.
+
+Remaining work:
 - Pool state bootstrapping on startup (RPC getProgramAccounts → populate cache + vault index)
 - CLMM tick-crossing math (current simulator uses constant-product approximation)
 - Real DEX swap instruction account lists (currently placeholder single-account)
 - Recent blockhash caching (~2s TTL via RPC)
 - Reconnect logic for Geyser stream disconnects
 - Metrics/Prometheus endpoint for monitoring
-- JIT liquidity provision (Phase 2)
-- Intent solving (Phase 3)
+
+### Phase 2: LST Rate Arb (SVM — bolt-on, ~50 lines of new code)
+Add jitoSOL, mSOL, bSOL pools to the monitored set. Same pipeline, just new token addresses. See `docs/STRATEGY-LST-ARB.md`.
+
+### Phase 3: CEX↔DEX Arb (SVM — new module)
+Binance websocket price feed + divergence detector. Inventory-based model (no CEX execution needed). Reuses existing BundleBuilder + MultiRelay. See `docs/STRATEGY-CEX-DEX-ARB.md`.
+
+### Phase 4: MEV-Share Backruns (EVM — separate binary)
+Flashbots MEV-Share on Ethereum. Separate Rust binary using `alloy`. SSE event stream → backrun detection → mev_sendBundle. See `docs/STRATEGY-MEVSHARE-ETH.md`.
+
+### All phases are Halal-compliant: spot arb only, no user fees, no borrowing, no liquidation.
+
+## Strategy Docs
+
+Architecture docs live in `docs/`:
+- `docs/STRATEGY-CEX-DEX-ARB.md` — CEX↔DEX arbitrage (Binance WS + on-chain, inventory model)
+- `docs/STRATEGY-LST-ARB.md` — LST rate arbitrage (jitoSOL/mSOL/bSOL cross-pool)
+- `docs/STRATEGY-MEVSHARE-ETH.md` — MEV-Share backruns on Ethereum (Flashbots, alloy, separate binary)
+
+## Known Pitfalls — Read Before Touching
+
+1. **Jito mempool is DEAD.** `subscribe_mempool` was killed March 2024. Any code referencing `SearcherServiceClient`, `jito-protos`, or `jito-searcher-client` crates is dead code. Don't revive it.
+2. **`jito-sdk-rust` is unnecessary.** We do raw JSON-RPC via reqwest. The SDK just wraps the same HTTP calls. Don't add it.
+3. **`solana-sdk` 2.x has breaking changes from 1.x.** `Keypair` moved modules, `Transaction` signing API changed. Verify imports if upgrading.
+4. **yellowstone-grpc-proto generated types** are sensitive to proto version. If upgrading `yellowstone-grpc-client`/`yellowstone-grpc-proto`, check field names in `SubscribeRequestFilterAccounts` and `SubscribeRequest` against the proto definition at `github.com/rpcpool/yellowstone-grpc`.
+5. **Base64 v0.22 API:** Uses `Engine` trait — `general_purpose::STANDARD.encode()`, not the old free function `base64::encode()`.
+6. **DashMap `get_mut` returns `RefMut`** — must call `.value_mut()` to get the inner reference. Don't try to deref directly.
+7. **`crossbeam_channel::Sender::try_send`** is non-blocking — correct for Geyser stream (stale events are worthless). Never use blocking `send` in the stream loop.
+
+## Compile Check Before Push
+
+Always run `cargo check` and `cargo clippy` before committing. The project should compile with zero warnings (we cleaned all unused imports and dead code).
 
 ## Environment Variables
 
