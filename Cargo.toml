@@ -1,0 +1,56 @@
+[package]
+name = "solana-mev-bot"
+version = "0.1.0"
+edition = "2021"
+description = "Halal-compliant Solana MEV backrun arbitrage engine"
+
+[dependencies]
+# Solana SDK
+solana-sdk = "2.2"
+solana-client = "2.2"
+solana-transaction-status = "2.2"
+
+# Jito
+jito-protos = "0.2"
+jito-searcher-client = "0.2"
+
+# gRPC / networking
+tonic = { version = "0.12", features = ["tls", "tls-webpki-roots"] }
+prost = "0.13"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+reqwest = { version = "0.12", features = ["json"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+borsh = "1"
+bs58 = "0.5"
+bincode = "1"
+
+# Math / numerics
+rust_decimal = "1"
+rust_decimal_macros = "1"
+
+# Data structures
+dashmap = "6"
+crossbeam-channel = "0.5"
+smallvec = "1"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Utils
+anyhow = "1"
+thiserror = "2"
+dotenv = "0.15"
+base64 = "0.22"
+chrono = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
