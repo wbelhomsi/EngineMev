@@ -1,8 +1,4 @@
-mod config;
-mod executor;
-mod mempool;
-mod router;
-mod state;
+use solana_mev_bot::{config, executor, mempool, router, state};
 
 use anyhow::Result;
 use crossbeam_channel::bounded;
@@ -57,6 +53,12 @@ async fn main() -> Result<()> {
 
     // Initialize shared state cache
     let state_cache = StateCache::new(config.pool_state_ttl);
+
+    // Bootstrap Sanctum virtual pools for LST arb
+    if config.lst_arb_enabled {
+        bootstrap_sanctum_pools(&state_cache);
+        info!("LST arb enabled: {} Sanctum virtual pools bootstrapped", config::lst_mints().len());
+    }
 
     // Shutdown signal
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -284,6 +286,65 @@ async fn main() -> Result<()> {
 
     info!("Engine shutdown complete");
     Ok(())
+}
+
+/// Create Sanctum virtual pools for each supported LST.
+///
+/// Each LST gets a virtual pool modeling the Sanctum Infinity oracle rate.
+/// Reserves are synthetic — large values that produce the correct exchange rate
+/// under constant-product math with negligible price impact.
+///
+/// Initial rates are hardcoded approximations. In production, these should be
+/// fetched from on-chain stake pool state at startup (total_lamports / pool_token_supply).
+/// The Geyser stream will keep them updated as Sanctum reserve ATAs change.
+fn bootstrap_sanctum_pools(state_cache: &state::StateCache) {
+    use router::pool::{DexType, PoolState};
+
+    let sol = config::sol_mint();
+    const SYNTHETIC_RESERVE_BASE: u64 = 1_000_000_000_000_000; // 1M SOL in lamports
+
+    // Approximate current exchange rates (SOL per LST).
+    // These get corrected as soon as the first Geyser update arrives.
+    let lst_rates: Vec<(solana_sdk::pubkey::Pubkey, &str, f64)> = config::lst_mints()
+        .into_iter()
+        .map(|(mint, name)| {
+            let rate = match name {
+                "jitoSOL" => 1.082,
+                "mSOL" => 1.075,
+                "bSOL" => 1.060,
+                _ => 1.050, // conservative default
+            };
+            (mint, name, rate)
+        })
+        .collect();
+
+    for (lst_mint, name, rate) in &lst_rates {
+        // Deterministic virtual pool address: PDA([b"sanctum-virtual", lst_mint], system_program)
+        let (virtual_pool_addr, _) = solana_sdk::pubkey::Pubkey::find_program_address(
+            &[b"sanctum-virtual", lst_mint.as_ref()],
+            &solana_sdk::system_program::id(),
+        );
+
+        let reserve_a = SYNTHETIC_RESERVE_BASE;
+        let reserve_b = (SYNTHETIC_RESERVE_BASE as f64 / rate) as u64;
+
+        let pool = PoolState {
+            address: virtual_pool_addr,
+            dex_type: DexType::SanctumInfinity,
+            token_a_mint: sol,
+            token_b_mint: *lst_mint,
+            token_a_reserve: reserve_a,
+            token_b_reserve: reserve_b,
+            fee_bps: 3, // Sanctum typical fee
+            current_tick: None,
+            sqrt_price_x64: None,
+            liquidity: None,
+            last_slot: 0,
+        };
+
+        state_cache.upsert(virtual_pool_addr, pool);
+        info!("Bootstrapped Sanctum virtual pool for {}: rate={}, addr={}", name, rate, virtual_pool_addr);
+    }
 }
 
 /// Load a Solana keypair from a JSON file.

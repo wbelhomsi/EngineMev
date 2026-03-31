@@ -7,6 +7,7 @@ pub enum DexType {
     RaydiumClmm,
     OrcaWhirlpool,
     MeteoraDlmm,
+    SanctumInfinity,
 }
 
 impl DexType {
@@ -18,6 +19,7 @@ impl DexType {
             DexType::RaydiumClmm => 1,     // varies, 0.01% - 1% depending on pool
             DexType::OrcaWhirlpool => 1,   // varies by fee tier
             DexType::MeteoraDlmm => 1,     // dynamic fees
+            DexType::SanctumInfinity => 3, // ~3bps flat fee
         }
     }
 }

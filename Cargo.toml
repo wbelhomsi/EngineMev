@@ -12,8 +12,8 @@ solana-sdk = "2.2"
 # The jito-sdk-rust crate just wraps the same HTTP calls with extra overhead.
 
 # Yellowstone Geyser (replaces dead Jito mempool stream)
-yellowstone-grpc-client = "12.2"
-yellowstone-grpc-proto = "12.2"
+yellowstone-grpc-client = "12.1"
+yellowstone-grpc-proto = "12.1"
 
 # gRPC / networking
 tonic = { version = "0.12", features = ["tls", "tls-webpki-roots"] }
@@ -40,6 +40,21 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
 thiserror = "2"
 dotenv = "0.15"
+
+[dev-dependencies]
+
+[features]
+default = []
+e2e = []
+
+[[test]]
+name = "unit"
+path = "tests/unit/mod.rs"
+
+[[test]]
+name = "e2e"
+path = "tests/e2e/mod.rs"
+required-features = ["e2e"]
 
 [profile.release]
 opt-level = 3

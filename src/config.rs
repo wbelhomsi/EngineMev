@@ -25,6 +25,47 @@ pub mod programs {
     pub fn jupiter_v6() -> Pubkey {
         Pubkey::from_str("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4").unwrap()
     }
+
+    pub fn sanctum_s_controller() -> Pubkey {
+        Pubkey::from_str("5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx").unwrap()
+    }
+
+    pub fn sanctum_flat_fee_pricing() -> Pubkey {
+        Pubkey::from_str("f1tUoNEKrDp1oeGn4zxr7bh41eN6VcfHjfrL3ZqQday").unwrap()
+    }
+}
+
+/// Supported LST mints and their human-readable names.
+pub fn lst_mints() -> Vec<(Pubkey, &'static str)> {
+    vec![
+        (Pubkey::from_str("J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn").unwrap(), "jitoSOL"),
+        (Pubkey::from_str("mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So").unwrap(), "mSOL"),
+        (Pubkey::from_str("bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1").unwrap(), "bSOL"),
+    ]
+}
+
+/// Native SOL mint (wrapped SOL).
+pub fn sol_mint() -> Pubkey {
+    Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap()
+}
+
+/// Map an LST mint to its Sanctum SOL Value Calculator program.
+/// Returns None for unknown mints.
+pub fn sanctum_sol_value_calculator(mint: &Pubkey) -> Option<Pubkey> {
+    let jitosol = Pubkey::from_str("J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn").unwrap();
+    let msol = Pubkey::from_str("mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So").unwrap();
+    let bsol = Pubkey::from_str("bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1").unwrap();
+
+    let spl_calc = Pubkey::from_str("sp1V4h2gWorkGhVcazBc22Hfo2f5sd7jcjT4EDPrWFF").unwrap();
+    let marinade_calc = Pubkey::from_str("mare3SCyfZkAndpBRBeonETmkCCB3TJTTrz8ZN2dnhP").unwrap();
+
+    if *mint == jitosol || *mint == bsol {
+        Some(spl_calc)
+    } else if *mint == msol {
+        Some(marinade_calc)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +96,10 @@ pub struct BotConfig {
     pub pool_state_ttl: Duration,
     /// Simulation mode — log opportunities without submitting
     pub dry_run: bool,
+    /// Enable LST rate arbitrage (jitoSOL, mSOL, bSOL cross-DEX + Sanctum)
+    pub lst_arb_enabled: bool,
+    /// Minimum spread in basis points for LST arb routes
+    pub lst_min_spread_bps: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -110,16 +155,26 @@ impl BotConfig {
             dry_run: std::env::var("DRY_RUN")
                 .unwrap_or_else(|_| "true".to_string())
                 .parse()?,
+            lst_arb_enabled: std::env::var("LST_ARB_ENABLED")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse()?,
+            lst_min_spread_bps: std::env::var("LST_MIN_SPREAD_BPS")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()?,
         })
     }
 
     /// DEX program IDs we monitor in the mempool
     pub fn monitored_programs(&self) -> Vec<Pubkey> {
-        vec![
+        let mut programs = vec![
             programs::raydium_amm(),
             programs::raydium_clmm(),
             programs::orca_whirlpool(),
             programs::meteora_dlmm(),
-        ]
+        ];
+        if self.lst_arb_enabled {
+            programs.push(programs::sanctum_s_controller());
+        }
+        programs
     }
 }

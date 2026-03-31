@@ -8,6 +8,7 @@ use solana_sdk::{
     system_instruction,
     transaction::Transaction,
 };
+use std::str::FromStr;
 use tracing::debug;
 
 use crate::router::pool::{ArbRoute, DexType};
@@ -68,32 +69,39 @@ impl BundleBuilder {
     ) -> Result<Vec<Vec<u8>>> {
         let mut bundle_txs: Vec<Vec<u8>> = Vec::with_capacity(2);
 
-        // 1. Arb transaction with tip included as last instruction
-        let arb_tx = self.build_arb_transaction_with_tip(route, tip_lamports, recent_blockhash)?;
+        // Calculate minimum output for profit enforcement on final hop
+        let min_final_output = route.input_amount + route.estimated_profit_lamports.saturating_sub(tip_lamports);
+
+        let arb_tx = self.build_arb_transaction_with_tip(route, tip_lamports, min_final_output, recent_blockhash)?;
         bundle_txs.push(bincode::serialize(&arb_tx)?);
 
         debug!(
-            "Built bundle: {} txs, tip={} lamports, route={} hops",
+            "Built bundle: {} txs, tip={} lamports, min_out={}, route={} hops",
             bundle_txs.len(),
             tip_lamports,
+            min_final_output,
             route.hop_count(),
         );
 
         Ok(bundle_txs)
     }
 
-    /// Build arb transaction with tip as last instruction (saves a tx in the bundle).
+    /// Build arb transaction with tip as last instruction.
+    /// `min_final_output` is set on the final hop to guarantee profit on-chain.
     fn build_arb_transaction_with_tip(
         &self,
         route: &ArbRoute,
         tip_lamports: u64,
+        min_final_output: u64,
         recent_blockhash: Hash,
     ) -> Result<Transaction> {
         let mut instructions = Vec::with_capacity(route.hop_count() + 1);
 
-        // Swap instructions
-        for hop in &route.hops {
-            let ix = self.build_swap_instruction(hop)?;
+        // Swap instructions — intermediate hops get min_out=0, final hop gets profit floor
+        let last_idx = route.hops.len() - 1;
+        for (i, hop) in route.hops.iter().enumerate() {
+            let min_out = if i == last_idx { min_final_output } else { 0 };
+            let ix = self.build_swap_instruction_with_min_out(hop, min_out)?;
             instructions.push(ix);
         }
 
@@ -111,16 +119,18 @@ impl BundleBuilder {
         Ok(tx)
     }
 
-    /// Build a single swap instruction for one hop.
-    fn build_swap_instruction(
+    /// Build a single swap instruction for one hop with minimum_amount_out.
+    fn build_swap_instruction_with_min_out(
         &self,
         hop: &crate::router::pool::RouteHop,
+        minimum_amount_out: u64,
     ) -> Result<Instruction> {
         match hop.dex_type {
-            DexType::RaydiumAmm => self.build_raydium_amm_swap(hop),
+            DexType::RaydiumAmm => self.build_raydium_amm_swap(hop, minimum_amount_out),
             DexType::RaydiumClmm => self.build_raydium_clmm_swap(hop),
             DexType::OrcaWhirlpool => self.build_orca_whirlpool_swap(hop),
             DexType::MeteoraDlmm => self.build_meteora_dlmm_swap(hop),
+            DexType::SanctumInfinity => self.build_sanctum_swap(hop, minimum_amount_out),
         }
     }
 
@@ -132,12 +142,12 @@ impl BundleBuilder {
     fn build_raydium_amm_swap(
         &self,
         hop: &crate::router::pool::RouteHop,
+        minimum_amount_out: u64,
     ) -> Result<Instruction> {
         // Swap V2 instruction data: discriminator + amount_in + minimum_amount_out
-        // minimum_amount_out = 0 for arb — bundle atomicity protects us
         let mut data = vec![9u8]; // swap discriminator (same for V1/V2)
         data.extend_from_slice(&hop.estimated_output.to_le_bytes());
-        data.extend_from_slice(&0u64.to_le_bytes());
+        data.extend_from_slice(&minimum_amount_out.to_le_bytes());
 
         // TODO: populate full account list from cached pool state
         // V2 accounts (8): token_program, amm_id, amm_authority, amm_open_orders,
@@ -193,6 +203,31 @@ impl BundleBuilder {
         })
     }
 
+    fn build_sanctum_swap(
+        &self,
+        hop: &crate::router::pool::RouteHop,
+        minimum_amount_out: u64,
+    ) -> Result<Instruction> {
+        let accounts = sanctum_swap_accounts(
+            &self.searcher_keypair.pubkey(),
+            &hop.input_mint,
+            &hop.output_mint,
+        );
+
+        // SwapExactIn instruction data: discriminator (8 bytes) + amount (u64) + min_out (u64)
+        let mut data = Vec::with_capacity(24);
+        // Anchor discriminator for "swap_exact_in": sha256("global:swap_exact_in")[..8]
+        data.extend_from_slice(&[0x0a, 0xd3, 0xc8, 0x1a, 0x3e, 0x4d, 0x2b, 0x1c]);
+        data.extend_from_slice(&hop.estimated_output.to_le_bytes()); // amount_in
+        data.extend_from_slice(&minimum_amount_out.to_le_bytes()); // profit enforcement on final hop
+
+        Ok(Instruction {
+            program_id: crate::config::programs::sanctum_s_controller(),
+            accounts,
+            data,
+        })
+    }
+
     /// Build tip instruction to a Jito tip account (rotated per bundle).
     fn build_tip_instruction(&self, tip_lamports: u64) -> Result<Instruction> {
         let idx = self.tip_account_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -231,4 +266,69 @@ impl BundleBuilder {
         debug!("Current Jito tip floor: {} lamports", tip_floor);
         Ok(tip_floor)
     }
+}
+
+/// Derive an Associated Token Account address.
+/// ATA = PDA([wallet, TOKEN_PROGRAM_ID, mint], ATA_PROGRAM_ID)
+fn derive_ata(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
+    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+    let ata_program = Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap();
+    let seeds = &[
+        wallet.as_ref(),
+        token_program.as_ref(),
+        mint.as_ref(),
+    ];
+    let (ata, _) = Pubkey::find_program_address(seeds, &ata_program);
+    ata
+}
+
+/// Build the account list for a Sanctum Infinity SwapExactIn instruction.
+pub fn sanctum_swap_accounts(
+    signer: &Pubkey,
+    input_mint: &Pubkey,
+    output_mint: &Pubkey,
+) -> Vec<AccountMeta> {
+    let s_controller = crate::config::programs::sanctum_s_controller();
+    let pricing_program = crate::config::programs::sanctum_flat_fee_pricing();
+
+    // PDAs
+    let (pool_state_pda, _) = Pubkey::find_program_address(&[b"state"], &s_controller);
+    let (lst_state_list_pda, _) = Pubkey::find_program_address(&[b"lst-state-list"], &s_controller);
+
+    // Reserve ATAs (owned by Pool State PDA)
+    let source_reserve_ata = derive_ata(&pool_state_pda, input_mint);
+    let dest_reserve_ata = derive_ata(&pool_state_pda, output_mint);
+
+    // User ATAs
+    let user_source_ata = derive_ata(signer, input_mint);
+    let user_dest_ata = derive_ata(signer, output_mint);
+
+    // SOL Value Calculators
+    let source_calc = crate::config::sanctum_sol_value_calculator(input_mint)
+        .unwrap_or_else(|| {
+            // For SOL (wSOL), use the wSOL calculator
+            Pubkey::from_str("wsoGmxQLSvwWpuaidCApxN5kEowLe2HLQLJhCQnj4bE").unwrap()
+        });
+    let dest_calc = crate::config::sanctum_sol_value_calculator(output_mint)
+        .unwrap_or_else(|| {
+            Pubkey::from_str("wsoGmxQLSvwWpuaidCApxN5kEowLe2HLQLJhCQnj4bE").unwrap()
+        });
+
+    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+    let system_program = solana_sdk::system_program::id();
+
+    vec![
+        AccountMeta::new_readonly(*signer, true),           // 1. Payer/signer
+        AccountMeta::new(pool_state_pda, false),             // 2. Pool State PDA
+        AccountMeta::new_readonly(lst_state_list_pda, false),// 3. LST State List PDA
+        AccountMeta::new(source_reserve_ata, false),         // 4. Source reserve ATA
+        AccountMeta::new(dest_reserve_ata, false),           // 5. Dest reserve ATA
+        AccountMeta::new_readonly(pricing_program, false),   // 6. Pricing program
+        AccountMeta::new_readonly(source_calc, false),       // 7. Source SOL Value Calc
+        AccountMeta::new_readonly(dest_calc, false),         // 8. Dest SOL Value Calc
+        AccountMeta::new(user_source_ata, false),            // 9. User source ATA
+        AccountMeta::new(user_dest_ata, false),              // 10. User dest ATA
+        AccountMeta::new_readonly(token_program, false),     // 11. Token Program
+        AccountMeta::new_readonly(system_program, false),    // 12. System Program
+    ]
 }
