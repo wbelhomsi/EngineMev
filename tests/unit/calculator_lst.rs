@@ -60,24 +60,27 @@ fn test_route_discovery_dex_to_sanctum() {
     let orca_addr = Pubkey::new_unique();
     let sanctum_addr = Pubkey::new_unique();
 
-    // Orca pool: 10000 SOL, ~9302 jitoSOL (effective rate ~1.075)
+    // Orca pool: 100K SOL, ~95238 jitoSOL (effective rate ~1.050 — cheap jitoSOL)
+    // Sanctum rate = 1.082 => ~3% spread. 1% of Orca reserves = 1K SOL auto-input,
+    // which is ~1% price impact — still profitable with 3% spread.
     let orca_pool = dex_pool(
         DexType::OrcaWhirlpool,
         orca_addr,
-        10_000_000_000_000, // 10000 SOL
-        9_302_325_581_395,  // ~9302 jitoSOL -> rate ~1.075
+        100_000_000_000_000, // 100K SOL
+        95_238_095_238_095,  // ~95238 jitoSOL -> rate ~1.050
     );
 
-    // Sanctum virtual pool at oracle rate 1.082
+    // Sanctum virtual pool at oracle rate 1.082 (huge reserves, negligible impact)
     let sanctum_pool = sanctum_virtual_pool(1.082, sanctum_addr);
 
     cache.upsert(orca_addr, orca_pool);
     cache.upsert(sanctum_addr, sanctum_pool);
 
-    let calculator = RouteCalculator::new(cache, 3);
+    let calculator = RouteCalculator::new(cache.clone(), 3);
 
-    // Trigger: someone just swapped on the Orca pool
-    let trigger = DetectedSwap {
+    // Trigger: someone just swapped on the Orca pool.
+    // main.rs searches both directions — do the same here.
+    let trigger_fwd = DetectedSwap {
         signature: String::new(),
         dex_type: DexType::OrcaWhirlpool,
         pool_address: orca_addr,
@@ -86,8 +89,20 @@ fn test_route_discovery_dex_to_sanctum() {
         amount: None,
         observed_slot: 100,
     };
+    let trigger_rev = DetectedSwap {
+        signature: String::new(),
+        dex_type: DexType::OrcaWhirlpool,
+        pool_address: orca_addr,
+        input_mint: jitosol_mint(),
+        output_mint: sol_mint(),
+        amount: None,
+        observed_slot: 100,
+    };
 
-    let routes = calculator.find_routes(&trigger);
+    let mut routes = calculator.find_routes(&trigger_fwd);
+    routes.extend(calculator.find_routes(&trigger_rev));
+    routes.sort_by(|a, b| b.estimated_profit.cmp(&a.estimated_profit));
+
     assert!(!routes.is_empty(), "Should find at least one LST arb route");
     assert!(routes[0].is_profitable(), "Best route should be profitable");
     assert_eq!(routes[0].hop_count(), 2, "Should be a 2-hop route");
@@ -113,7 +128,7 @@ fn test_no_route_when_no_spread() {
     cache.upsert(orca_addr, orca_pool);
     cache.upsert(sanctum_addr, sanctum_pool);
 
-    let calculator = RouteCalculator::new(cache, 3);
+    let calculator = RouteCalculator::new(cache.clone(), 3);
 
     let trigger = DetectedSwap {
         signature: String::new(),

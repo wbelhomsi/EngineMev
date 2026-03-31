@@ -138,7 +138,7 @@ impl GeyserStream {
 
     /// Extract next message from the gRPC stream.
     async fn next_message(
-        stream: &mut tonic::Streaming<yellowstone_grpc_proto::prelude::SubscribeUpdate>,
+        stream: &mut (impl tokio_stream::Stream<Item = Result<yellowstone_grpc_proto::prelude::SubscribeUpdate, yellowstone_grpc_proto::tonic::Status>> + Unpin),
     ) -> Option<yellowstone_grpc_proto::prelude::SubscribeUpdate> {
         use tokio_stream::StreamExt;
         stream.next().await?.ok()

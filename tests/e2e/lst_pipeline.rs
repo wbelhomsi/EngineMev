@@ -24,8 +24,8 @@ fn setup_cache_with_spread(orca_rate: f64, sanctum_rate: f64) -> (StateCache, Pu
     let orca_addr = Pubkey::new_unique();
     let sanctum_addr = Pubkey::new_unique();
 
-    // Orca pool
-    let orca_sol_reserve = 10_000_000_000_000u64;
+    // Orca pool — 100K SOL for reasonable auto-input (1% = 1K SOL)
+    let orca_sol_reserve = 100_000_000_000_000u64;
     let orca_jitosol_reserve = (orca_sol_reserve as f64 / orca_rate) as u64;
     cache.upsert(orca_addr, PoolState {
         address: orca_addr,
@@ -62,14 +62,15 @@ fn setup_cache_with_spread(orca_rate: f64, sanctum_rate: f64) -> (StateCache, Pu
 
 #[test]
 fn test_e2e_profitable_arb_pipeline() {
-    // Orca rate 1.075, Sanctum rate 1.082 -> ~0.65% spread -> should be profitable
-    let (cache, orca_addr, _sanctum_addr) = setup_cache_with_spread(1.075, 1.082);
+    // Orca rate 1.050, Sanctum rate 1.082 -> ~3% spread -> profitable after fees
+    let (cache, orca_addr, _sanctum_addr) = setup_cache_with_spread(1.050, 1.082);
 
     let calculator = RouteCalculator::new(cache.clone(), 3);
     let simulator = ProfitSimulator::new(cache.clone(), 0.50, 1000);
 
-    // Simulate Geyser event: vault balance changed on Orca pool
-    let trigger = DetectedSwap {
+    // Simulate Geyser event: vault balance changed on Orca pool.
+    // Search both directions like main.rs does.
+    let trigger_fwd = DetectedSwap {
         signature: String::new(),
         dex_type: DexType::OrcaWhirlpool,
         pool_address: orca_addr,
@@ -78,9 +79,20 @@ fn test_e2e_profitable_arb_pipeline() {
         amount: None,
         observed_slot: 100,
     };
+    let trigger_rev = DetectedSwap {
+        signature: String::new(),
+        dex_type: DexType::OrcaWhirlpool,
+        pool_address: orca_addr,
+        input_mint: config::lst_mints()[0].0,
+        output_mint: config::sol_mint(),
+        amount: None,
+        observed_slot: 100,
+    };
 
     // Route discovery
-    let routes = calculator.find_routes(&trigger);
+    let mut routes = calculator.find_routes(&trigger_fwd);
+    routes.extend(calculator.find_routes(&trigger_rev));
+    routes.sort_by(|a, b| b.estimated_profit.cmp(&a.estimated_profit));
     assert!(!routes.is_empty(), "Should find arb routes");
 
     // Simulation
