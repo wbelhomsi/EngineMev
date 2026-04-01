@@ -285,6 +285,17 @@ Fee applied to `amount_in` before the swap:
 amount_in_after_fee = amount_in * (fee_denominator - fee_numerator) / fee_denominator
 ```
 
+### CLMM Fee Model (Orca Whirlpool, Raydium CLMM)
+
+**IMPORTANT: CLMM fee denominator is 1,000,000, NOT 10,000 (basis points).**
+A pool with 0.3% fee has `feeRate = 3000`. Fee is applied to the INPUT:
+```
+input_after_fee = input * (1_000_000 - feeRate) / 1_000_000
+```
+If you store fees as `fee_bps` (basis points), convert: `feeRate = fee_bps * 100`.
+
+**Do NOT use f64 for CLMM math.** The `P * P_new` product of two Q64.64 values exceeds f64 precision. Use u128 with careful division ordering, or u256 for the b_to_a path.
+
 ### CLMM Tick-Crossing Math (Orca Whirlpool, Raydium CLMM)
 
 All use Q64.64 fixed-point sqrt prices.
@@ -316,15 +327,17 @@ nextSqrtPrice = sqrtPrice + (amount << 64) / liquidity
 
 **Tick-to-sqrt-price conversion:** Bitwise decomposition — precomputed constants for each bit of the tick index representing powers of `sqrt(1.0001)`.
 
-**Note:** Accurate simulation requires tick array account data (separate accounts, not in pool state). For route discovery, a constant-product approximation from sqrt_price works: `reserve_a ≈ liquidity / sqrt_price`, `reserve_b ≈ liquidity × sqrt_price`.
+**Note:** Accurate multi-tick simulation requires tick array account data (separate accounts, not in pool state). For route discovery, single-tick CLMM math is used: compute output within the current tick's liquidity range. This underestimates output for large trades (conservative) but eliminates the false positives from constant-product approximation on synthetic reserves.
 
 ### DLMM Bin-by-Bin Math (Meteora DLMM)
 
-**Price per bin:**
+**Price per bin (reference only — DO NOT compute at swap time):**
 ```
 price = (1 + binStep / 10000) ^ binId
 ```
-Stored as U128 with 64-bit scale.
+**WARNING:** This overflows for real bin IDs (max ~443636). Use arbitrary-precision math if needed.
+At swap time, use the **precomputed `bin.price` (u128)** stored in the on-chain bin array accounts.
+Each bin stores `{ amountX: i64, amountY: i64, price: u128 }`. Price is stored as U128 with 64-bit scale.
 
 **Per-bin swap (X for Y):**
 ```
