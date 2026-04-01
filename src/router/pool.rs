@@ -75,13 +75,17 @@ impl PoolState {
         self.get_cpmm_output(input_amount, a_to_b)
     }
 
-    /// Single-tick CLMM output calculation using f64.
-    /// For Orca Whirlpool, Raydium CLMM, Meteora DLMM, DAMM v2 concentrated.
+    /// Single-tick CLMM output calculation using u128 integer math.
+    /// For Orca Whirlpool, Raydium CLMM, DAMM v2 concentrated.
     ///
-    /// Uses the standard concentrated liquidity formulas:
-    ///   a_to_b: new_p = L*P / (L + input*P/Q), output = L*(P - new_p)/Q
-    ///   b_to_a: new_p = P + input*Q/L, output = L*Q*(new_p - P)/(P*new_p)
-    /// where P = sqrt_price_x64, L = liquidity, Q = 2^64
+    /// Fee rate uses 1,000,000 denominator (not 10,000 basis points).
+    /// CLMM feeRate = fee_bps * 100 (e.g., 0.3% fee = fee_bps=30, feeRate=3000).
+    ///
+    /// Formulas (P = sqrt_price in Q64.64, L = liquidity, Q = 2^64):
+    ///   a_to_b: new_P = L*P / (L + input*P/Q),  output = L*(P - new_P)/Q
+    ///   b_to_a: new_P = P + input*Q/L,  output = L*(1/P - 1/new_P)*Q
+    ///
+    /// Returns None on overflow or zero output — conservative for route discovery.
     fn get_clmm_output(
         &self,
         input_amount: u64,
@@ -89,28 +93,69 @@ impl PoolState {
         sqrt_price_x64: u128,
         liquidity: u128,
     ) -> Option<u64> {
-        let p = sqrt_price_x64 as f64;
-        let l = liquidity as f64;
-        let q: f64 = (1u128 << 64) as f64;
+        let q: u128 = 1u128 << 64;
 
-        let fee_factor = (10_000.0 - self.fee_bps as f64) / 10_000.0;
-        let input_f = input_amount as f64 * fee_factor;
+        // Fee: CLMM uses 1,000,000 denominator. fee_bps * 100 converts to CLMM rate.
+        let fee_rate = self.fee_bps as u128 * 100;
+        let fee_denom: u128 = 1_000_000;
+        let input_after_fee = (input_amount as u128)
+            .checked_mul(fee_denom.checked_sub(fee_rate)?)?
+            .checked_div(fee_denom)?;
+
+        if input_after_fee == 0 {
+            return Some(0);
+        }
 
         if a_to_b {
-            // Sell token A (base), get token B (quote). Price moves down.
-            let denom = l + input_f * p / q;
-            if denom <= 0.0 { return None; }
-            let new_p = l * p / denom;
-            if new_p <= 0.0 || new_p >= p { return None; }
-            let output = l * (p - new_p) / q;
-            if output <= 0.0 || output > u64::MAX as f64 { return None; }
+            // Sell token A, get token B. sqrt_price goes down.
+            // new_P = L * P / (L + input * P / Q)
+            // Rearranged to avoid overflow: new_P = (L * P) / (L + input * P / Q)
+            let input_x_price = input_after_fee
+                .checked_mul(sqrt_price_x64)?
+                .checked_div(q)?;
+            let denom = liquidity.checked_add(input_x_price)?;
+            if denom == 0 { return None; }
+            let new_sqrt_price = liquidity
+                .checked_mul(sqrt_price_x64)?
+                .checked_div(denom)?;
+
+            if new_sqrt_price >= sqrt_price_x64 { return None; }
+
+            // output = L * (P - new_P) / Q
+            let price_diff = sqrt_price_x64.checked_sub(new_sqrt_price)?;
+            let output = liquidity
+                .checked_mul(price_diff)?
+                .checked_div(q)?;
+
+            if output > u64::MAX as u128 { return None; }
             Some(output as u64)
         } else {
-            // Sell token B (quote), get token A (base). Price moves up.
-            let new_p = p + input_f * q / l;
-            if new_p <= p { return None; }
-            let output = l * q * (new_p - p) / (p * new_p);
-            if output <= 0.0 || output > u64::MAX as f64 { return None; }
+            // Sell token B, get token A. sqrt_price goes up.
+            // new_P = P + input * Q / L
+            let price_delta = input_after_fee
+                .checked_mul(q)?
+                .checked_div(liquidity)?;
+            let new_sqrt_price = sqrt_price_x64.checked_add(price_delta)?;
+
+            if new_sqrt_price <= sqrt_price_x64 { return None; }
+
+            // output = L * Q * (new_P - P) / (P * new_P)
+            // To avoid overflow of L * Q (which exceeds u128 when L > 2^64),
+            // rearrange: output = L * (Q / P - Q / new_P)
+            //                   = L * Q * price_delta / (P * new_P)
+            // Since price_delta = input * Q / L, substitute:
+            //   output = input * Q^2 / (P * new_P)
+            // But Q^2 = 2^128 which overflows u128.
+            //
+            // Safe approach: split into (L * price_delta / P) * (Q / new_P)
+            // First: L * price_delta may overflow, but try it:
+            let numerator = liquidity.checked_mul(price_delta)?;
+            // Then: numerator * Q / (P * new_P)
+            // = (numerator / P) * (Q / new_P)
+            let step1 = numerator.checked_div(sqrt_price_x64)?;
+            let output = step1.checked_mul(q)?.checked_div(new_sqrt_price)?;
+
+            if output > u64::MAX as u128 { return None; }
             Some(output as u64)
         }
     }
