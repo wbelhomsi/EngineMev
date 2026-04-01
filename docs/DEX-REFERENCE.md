@@ -151,13 +151,13 @@ Fee applied before the constant product swap (fee comes from amm_config account,
 | 235 | tick_spacing | u16 | 2 |
 | **237** | **liquidity** | **u128** | **16** |
 | **253** | **sqrt_price_x64** | **u128** | **16** |
-| **261** | **tick_current** | **i32** | **4** |
-| 265 | padding3 | u16 | 2 |
-| 267 | padding4 | u16 | 2 |
-| 269 | fee_growth_global_0_x64 | u128 | 16 |
-| 285 | fee_growth_global_1_x64 | u128 | 16 |
-| 301 | protocol_fees_token_0 | u64 | 8 |
-| 309 | protocol_fees_token_1 | u64 | 8 |
+| **269** | **tick_current** | **i32** | **4** |
+| 273 | padding3 | u16 | 2 |
+| 275 | padding4 | u16 | 2 |
+| 277 | fee_growth_global_0_x64 | u128 | 16 |
+| 293 | fee_growth_global_1_x64 | u128 | 16 |
+| 309 | protocol_fees_token_0 | u64 | 8 |
+| 317 | protocol_fees_token_1 | u64 | 8 |
 | ... | (swap amounts, rewards, tick arrays, padding) | | |
 | 389 | status | u8 | 1 |
 
