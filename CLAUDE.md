@@ -60,10 +60,15 @@ src/
 
 ## DEX Program IDs (verified current)
 
-- Raydium AMM v4: `675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8`
-- Raydium CLMM: `CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK`
-- Orca Whirlpool: `whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc`
-- Meteora DLMM: `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo`
+- Raydium AMM v4: `675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8` (752 bytes, no Anchor)
+- Raydium CP (CPMM): `CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C` (637 bytes, Anchor)
+- Raydium CLMM: `CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK` (1560 bytes, Anchor)
+- Orca Whirlpool: `whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc` (653 bytes, Anchor)
+- Meteora DLMM: `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo` (904 bytes, Anchor)
+- Meteora DAMM v2: `cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG` (1112 bytes, Anchor)
+- Sanctum S Controller: `5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx`
+
+See `docs/DEX-REFERENCE.md` for full account layouts and quoting math.
 
 ## Jito Tip Accounts (8 total, rotated per bundle)
 
@@ -120,6 +125,10 @@ Architecture docs live in `docs/`:
 - `docs/STRATEGY-CEX-DEX-ARB.md` — CEX↔DEX arbitrage (Binance WS + on-chain, inventory model)
 - `docs/STRATEGY-LST-ARB.md` — LST rate arbitrage (jitoSOL/mSOL/bSOL cross-pool)
 - `docs/STRATEGY-MEVSHARE-ETH.md` — MEV-Share backruns on Ethereum (Flashbots, alloy, separate binary)
+
+## DEX Reference
+
+**`docs/DEX-REFERENCE.md`** — Authoritative reference for all 7 supported DEX programs. Contains verified account layouts with byte offsets, quoting math (constant product, CLMM tick-crossing, DLMM bin simulation), SPL Token vault layout, Geyser subscription strategy, and getProgramAccounts filters. Read this before touching any DEX-specific code.
 
 ## Known Pitfalls — Read Before Touching
 
