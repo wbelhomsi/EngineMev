@@ -199,3 +199,307 @@ pub struct StreamStats {
     pub channel_full_drops: u64,
     pub reconnects: u64,
 }
+
+// ─── Per-DEX pool state parsers ───────────────────────────────────────────────
+
+use crate::router::pool::{DexType, PoolState};
+
+/// Approximate token reserves from a CLMM sqrt_price_x64 + liquidity.
+///
+/// reserve_a ≈ L / (sqrt_price / 2^64)  = L * 2^64 / sqrt_price
+/// reserve_b ≈ L * sqrt_price / 2^64
+fn approx_reserves_from_sqrt_price(sqrt_price_x64: u128, liquidity: u128) -> (u64, u64) {
+    if sqrt_price_x64 == 0 || liquidity == 0 {
+        return (0, 0);
+    }
+    let q64: u128 = 1u128 << 64;
+    let reserve_a = liquidity
+        .checked_mul(q64)
+        .and_then(|v| v.checked_div(sqrt_price_x64))
+        .unwrap_or(0);
+    let reserve_b = liquidity
+        .checked_mul(sqrt_price_x64)
+        .and_then(|v| v.checked_div(q64))
+        .unwrap_or(0);
+    let ra = if reserve_a > u64::MAX as u128 { u64::MAX } else { reserve_a as u64 };
+    let rb = if reserve_b > u64::MAX as u128 { u64::MAX } else { reserve_b as u64 };
+    (ra, rb)
+}
+
+// ─── Category A: reserves embedded in pool account ────────────────────────────
+
+/// Parse an Orca Whirlpool pool account (653 bytes).
+///
+/// Layout (byte offsets):
+///   8   discriminator
+///   8+1 whirlpools_config (32)
+///   49  liquidity (u128, 16 bytes)
+///   65  sqrt_price_x64 (u128, 16 bytes)
+///   81  tick_current_index (i32, 4 bytes)
+///   85  fee_rate (u16), protocol_fee_rate (u16) → 4 bytes
+///   89  token_a_protocol_fee (u64) + token_b_protocol_fee (u64) → 16 bytes skip
+///   (=105 token_a fees end; however mint_a lands at 101 in practice — use spec offsets)
+///   101 token_mint_a (Pubkey, 32 bytes)
+///   133 token_vault_a (Pubkey, 32 bytes)
+///   181 token_mint_b (Pubkey, 32 bytes)
+///   213 token_vault_b (Pubkey, 32 bytes)
+pub fn parse_orca_whirlpool(pool_address: &Pubkey, data: &[u8], slot: u64) -> Option<PoolState> {
+    const MIN_LEN: usize = 245;
+    if data.len() < MIN_LEN {
+        return None;
+    }
+
+    let liquidity = u128::from_le_bytes(data[49..65].try_into().ok()?);
+    let sqrt_price_x64 = u128::from_le_bytes(data[65..81].try_into().ok()?);
+    let tick = i32::from_le_bytes(data[81..85].try_into().ok()?);
+    let mint_a = Pubkey::new_from_array(data[101..133].try_into().ok()?);
+    let mint_b = Pubkey::new_from_array(data[181..213].try_into().ok()?);
+
+    let (reserve_a, reserve_b) = approx_reserves_from_sqrt_price(sqrt_price_x64, liquidity);
+
+    Some(PoolState {
+        address: *pool_address,
+        dex_type: DexType::OrcaWhirlpool,
+        token_a_mint: mint_a,
+        token_b_mint: mint_b,
+        token_a_reserve: reserve_a,
+        token_b_reserve: reserve_b,
+        fee_bps: DexType::OrcaWhirlpool.base_fee_bps(),
+        current_tick: Some(tick),
+        sqrt_price_x64: Some(sqrt_price_x64),
+        liquidity: Some(liquidity),
+        last_slot: slot,
+    })
+}
+
+/// Parse a Raydium CLMM pool account (1560 bytes).
+///
+/// Layout (byte offsets):
+///   8   discriminator
+///   8   bump + padding → 16 total before amm_config
+///   16  amm_config (32) → ends at 48
+///   48  owner (32) → ends at 80 ← but spec says mint_0 at 73 → use spec
+///   73  token_mint_0 (Pubkey, 32)
+///   105 token_mint_1 (Pubkey, 32)
+///   137 token_vault_0 (Pubkey, 32)
+///   169 token_vault_1 (Pubkey, 32)
+///   237 liquidity (u128, 16)
+///   253 sqrt_price_x64 (u128, 16)
+///   269 tick_current (i32, 4)
+pub fn parse_raydium_clmm(pool_address: &Pubkey, data: &[u8], slot: u64) -> Option<PoolState> {
+    const MIN_LEN: usize = 273;
+    if data.len() < MIN_LEN {
+        return None;
+    }
+
+    let mint_0 = Pubkey::new_from_array(data[73..105].try_into().ok()?);
+    let mint_1 = Pubkey::new_from_array(data[105..137].try_into().ok()?);
+    let liquidity = u128::from_le_bytes(data[237..253].try_into().ok()?);
+    let sqrt_price_x64 = u128::from_le_bytes(data[253..269].try_into().ok()?);
+    let tick = i32::from_le_bytes(data[269..273].try_into().ok()?);
+
+    let (reserve_a, reserve_b) = approx_reserves_from_sqrt_price(sqrt_price_x64, liquidity);
+
+    Some(PoolState {
+        address: *pool_address,
+        dex_type: DexType::RaydiumClmm,
+        token_a_mint: mint_0,
+        token_b_mint: mint_1,
+        token_a_reserve: reserve_a,
+        token_b_reserve: reserve_b,
+        fee_bps: DexType::RaydiumClmm.base_fee_bps(),
+        current_tick: Some(tick),
+        sqrt_price_x64: Some(sqrt_price_x64),
+        liquidity: Some(liquidity),
+        last_slot: slot,
+    })
+}
+
+/// Parse a Meteora DLMM pool account (904 bytes).
+///
+/// Layout (byte offsets):
+///   76  active_id (i32, 4)
+///   80  bin_step (u16, 2)
+///   88  token_x_mint (Pubkey, 32)
+///   120 token_y_mint (Pubkey, 32)
+///   152 reserve_x (Pubkey vault, 32)
+///   184 reserve_y (Pubkey vault, 32)
+///
+/// Price = (1 + bin_step/10000)^active_id. Synthetic reserves derived from
+/// this price and an assumed unit liquidity for route discovery.
+pub fn parse_meteora_dlmm(pool_address: &Pubkey, data: &[u8], slot: u64) -> Option<PoolState> {
+    const MIN_LEN: usize = 216;
+    if data.len() < MIN_LEN {
+        return None;
+    }
+
+    let active_id = i32::from_le_bytes(data[76..80].try_into().ok()?);
+    let bin_step = u16::from_le_bytes(data[80..82].try_into().ok()?);
+    let mint_x = Pubkey::new_from_array(data[88..120].try_into().ok()?);
+    let mint_y = Pubkey::new_from_array(data[120..152].try_into().ok()?);
+
+    // Synthetic reserves: price = (1 + bin_step/10000)^active_id
+    // Use integer approximation suitable for route discovery (not simulation).
+    // We represent price as a ratio with a fixed denominator of 1_000_000.
+    let bin_step_f = bin_step as f64 / 10_000.0;
+    let price = (1.0 + bin_step_f).powi(active_id);
+    let synthetic_reserve_a: u64 = 1_000_000_000; // 1 token reference amount
+    let synthetic_reserve_b: u64 = ((synthetic_reserve_a as f64) * price) as u64;
+
+    Some(PoolState {
+        address: *pool_address,
+        dex_type: DexType::MeteoraDlmm,
+        token_a_mint: mint_x,
+        token_b_mint: mint_y,
+        token_a_reserve: synthetic_reserve_a,
+        token_b_reserve: synthetic_reserve_b,
+        fee_bps: DexType::MeteoraDlmm.base_fee_bps(),
+        current_tick: Some(active_id),
+        sqrt_price_x64: None,
+        liquidity: None,
+        last_slot: slot,
+    })
+}
+
+/// Parse a Meteora DAMM v2 pool account (1112 bytes).
+///
+/// Layout (byte offsets):
+///   0   discriminator (8 bytes): [241, 154, 109, 4, 17, 177, 109, 188]
+///   168 token_a_mint (Pubkey, 32)
+///   200 token_b_mint (Pubkey, 32)
+///   232 a_vault (Pubkey, 32)
+///   264 b_vault (Pubkey, 32)
+///   360 liquidity (u128, 16)  — used for concentrated mode
+///   456 sqrt_price (u128, 16) — used for concentrated mode
+///   484 collect_fee_mode (u8): 4 = compounding (direct reserves), 0-3 = concentrated
+///   680 token_a_amount (u64, 8) — used when collect_fee_mode == 4
+///   688 token_b_amount (u64, 8) — used when collect_fee_mode == 4
+pub fn parse_meteora_damm_v2(pool_address: &Pubkey, data: &[u8], slot: u64) -> Option<PoolState> {
+    const MIN_LEN: usize = 696;
+    if data.len() < MIN_LEN {
+        return None;
+    }
+
+    let mint_a = Pubkey::new_from_array(data[168..200].try_into().ok()?);
+    let mint_b = Pubkey::new_from_array(data[200..232].try_into().ok()?);
+    let collect_fee_mode = data[484];
+
+    let (reserve_a, reserve_b, sqrt_price_x64, liquidity) = if collect_fee_mode == 4 {
+        // Compounding mode: direct reserves stored in account
+        let ra = u64::from_le_bytes(data[680..688].try_into().ok()?);
+        let rb = u64::from_le_bytes(data[688..696].try_into().ok()?);
+        (ra, rb, None, None)
+    } else {
+        // Concentrated mode: derive from sqrt_price + liquidity
+        // Both fields require data.len() >= 472
+        if data.len() < 472 {
+            return None;
+        }
+        let liq = u128::from_le_bytes(data[360..376].try_into().ok()?);
+        let sqrt_p = u128::from_le_bytes(data[456..472].try_into().ok()?);
+        let (ra, rb) = approx_reserves_from_sqrt_price(sqrt_p, liq);
+        (ra, rb, Some(sqrt_p), Some(liq))
+    };
+
+    Some(PoolState {
+        address: *pool_address,
+        dex_type: DexType::MeteoraDammV2,
+        token_a_mint: mint_a,
+        token_b_mint: mint_b,
+        token_a_reserve: reserve_a,
+        token_b_reserve: reserve_b,
+        fee_bps: DexType::MeteoraDammV2.base_fee_bps(),
+        current_tick: None,
+        sqrt_price_x64,
+        liquidity,
+        last_slot: slot,
+    })
+}
+
+// ─── Category B: vault addresses must be fetched separately ──────────────────
+
+/// Parse a Raydium AMM v4 pool account (752 bytes).
+///
+/// Returns (PoolState, (base_vault, quote_vault)). Reserves are set to 0 until
+/// the caller fetches the vault SPL Token accounts and populates them.
+///
+/// Layout (byte offsets):
+///   0   status (u64, first 8 bytes encode pool state; 6 = initialized)
+///   336 base_vault (Pubkey, 32)
+///   368 quote_vault (Pubkey, 32)
+///   400 base_mint (Pubkey, 32)
+///   432 quote_mint (Pubkey, 32)
+pub fn parse_raydium_amm_v4(
+    pool_address: &Pubkey,
+    data: &[u8],
+    slot: u64,
+) -> Option<(PoolState, (Pubkey, Pubkey))> {
+    const MIN_LEN: usize = 464;
+    if data.len() < MIN_LEN {
+        return None;
+    }
+
+    let base_vault = Pubkey::new_from_array(data[336..368].try_into().ok()?);
+    let quote_vault = Pubkey::new_from_array(data[368..400].try_into().ok()?);
+    let base_mint = Pubkey::new_from_array(data[400..432].try_into().ok()?);
+    let quote_mint = Pubkey::new_from_array(data[432..464].try_into().ok()?);
+
+    let pool = PoolState {
+        address: *pool_address,
+        dex_type: DexType::RaydiumAmm,
+        token_a_mint: base_mint,
+        token_b_mint: quote_mint,
+        token_a_reserve: 0, // populated after vault fetch
+        token_b_reserve: 0,
+        fee_bps: DexType::RaydiumAmm.base_fee_bps(),
+        current_tick: None,
+        sqrt_price_x64: None,
+        liquidity: None,
+        last_slot: slot,
+    };
+
+    Some((pool, (base_vault, quote_vault)))
+}
+
+/// Parse a Raydium CP (constant-product) pool account (637 bytes).
+///
+/// Returns (PoolState, (vault_0, vault_1)). Reserves are set to 0 until
+/// the caller fetches the vault SPL Token accounts.
+///
+/// Layout (byte offsets):
+///   0   discriminator (8 bytes): [247, 237, 227, 245, 215, 195, 222, 70]
+///   72  token_0_vault (Pubkey, 32)
+///   104 token_1_vault (Pubkey, 32)
+///   168 token_0_mint (Pubkey, 32)
+///   200 token_1_mint (Pubkey, 32)
+pub fn parse_raydium_cp(
+    pool_address: &Pubkey,
+    data: &[u8],
+    slot: u64,
+) -> Option<(PoolState, (Pubkey, Pubkey))> {
+    const MIN_LEN: usize = 232;
+    if data.len() < MIN_LEN {
+        return None;
+    }
+
+    let vault_0 = Pubkey::new_from_array(data[72..104].try_into().ok()?);
+    let vault_1 = Pubkey::new_from_array(data[104..136].try_into().ok()?);
+    let mint_0 = Pubkey::new_from_array(data[168..200].try_into().ok()?);
+    let mint_1 = Pubkey::new_from_array(data[200..232].try_into().ok()?);
+
+    let pool = PoolState {
+        address: *pool_address,
+        dex_type: DexType::RaydiumCp,
+        token_a_mint: mint_0,
+        token_b_mint: mint_1,
+        token_a_reserve: 0, // populated after vault fetch
+        token_b_reserve: 0,
+        fee_bps: DexType::RaydiumCp.base_fee_bps(),
+        current_tick: None,
+        sqrt_price_x64: None,
+        liquidity: None,
+        last_slot: slot,
+    };
+
+    Some((pool, (vault_0, vault_1)))
+}
