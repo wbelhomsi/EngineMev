@@ -5,8 +5,10 @@ use solana_sdk::pubkey::Pubkey;
 pub enum DexType {
     RaydiumAmm,
     RaydiumClmm,
+    RaydiumCp,
     OrcaWhirlpool,
     MeteoraDlmm,
+    MeteoraDammV2,
     SanctumInfinity,
 }
 
@@ -15,11 +17,13 @@ impl DexType {
     /// Used for rough profit estimation before precise simulation.
     pub fn base_fee_bps(&self) -> u64 {
         match self {
-            DexType::RaydiumAmm => 25,     // 0.25%
-            DexType::RaydiumClmm => 1,     // varies, 0.01% - 1% depending on pool
-            DexType::OrcaWhirlpool => 1,   // varies by fee tier
-            DexType::MeteoraDlmm => 1,     // dynamic fees
-            DexType::SanctumInfinity => 3, // ~3bps flat fee
+            DexType::RaydiumAmm => 25,      // 0.25%
+            DexType::RaydiumClmm => 1,      // varies, 0.01% - 1% depending on pool
+            DexType::RaydiumCp => 25,       // 0.25% constant product
+            DexType::OrcaWhirlpool => 1,    // varies by fee tier
+            DexType::MeteoraDlmm => 1,      // dynamic fees
+            DexType::MeteoraDammV2 => 15,   // 0.15%
+            DexType::SanctumInfinity => 3,  // ~3bps flat fee
         }
     }
 }
