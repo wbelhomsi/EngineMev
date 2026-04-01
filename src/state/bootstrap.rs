@@ -173,16 +173,11 @@ pub async fn bootstrap_pools(
         }
     }
 
-    let vault_pubkeys: Vec<Pubkey> = all_vaults.iter().map(|(v, _, _)| *v).collect();
-    match fetch_vault_balances(client, rpc_url, &vault_pubkeys, state_cache).await {
-        Ok(count) => {
-            stats.vaults_fetched = count;
-        }
-        Err(e) => {
-            error!("Vault balance fetch failed: {}", e);
-            stats.errors += 1;
-        }
-    }
+    // Skip vault balance fetch — Geyser will populate reserves as events arrive.
+    // With 1.5M+ vaults, fetching balances at startup would take 15K+ RPC calls.
+    // Pools start with reserve=0; the router handles this gracefully (skips routes
+    // with zero reserves). Active pools get populated within seconds via Geyser.
+    stats.vaults_fetched = 0;
 
     stats.total_pools = stats.raydium_pools + stats.orca_pools + stats.meteora_pools;
     info!(
@@ -293,7 +288,7 @@ async fn fetch_and_parse_meteora(
     // Try current LbPair size first (920 bytes), then legacy size (902 bytes)
     let mut all_accounts = Vec::new();
 
-    for size in [920u64, 902] {
+    for size in [904u64] {
         let payload = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,

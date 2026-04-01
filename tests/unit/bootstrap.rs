@@ -45,7 +45,7 @@ fn make_whirlpool_data(
     data
 }
 
-/// Helper: build a fake Meteora DLMM account data buffer (920 bytes).
+/// Helper: build a fake Meteora DLMM account data buffer (904 bytes).
 fn make_meteora_data(
     mint_x: &Pubkey,
     mint_y: &Pubkey,
@@ -54,7 +54,7 @@ fn make_meteora_data(
     active_id: i32,
     bin_step: u16,
 ) -> Vec<u8> {
-    let mut data = vec![0u8; 920];
+    let mut data = vec![0u8; 904];
     data[76..80].copy_from_slice(&active_id.to_le_bytes());
     data[80..82].copy_from_slice(&bin_step.to_le_bytes());
     data[88..120].copy_from_slice(mint_x.as_ref());
