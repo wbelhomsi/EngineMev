@@ -290,23 +290,39 @@ async fn fetch_and_parse_meteora(
 ) -> anyhow::Result<Vec<(Pubkey, Pubkey, bool)>> {
     let program_id = crate::config::programs::meteora_dlmm();
 
-    let payload = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getProgramAccounts",
-        "params": [
-            program_id.to_string(),
-            {
-                "encoding": "base64",
-                "filters": []
-            }
-        ]
-    });
+    // Try current LbPair size first (920 bytes), then legacy size (902 bytes)
+    let mut all_accounts = Vec::new();
 
-    let accounts = rpc_get_program_accounts(client, rpc_url, &payload).await?;
+    for size in [920u64, 902] {
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getProgramAccounts",
+            "params": [
+                program_id.to_string(),
+                {
+                    "encoding": "base64",
+                    "filters": [
+                        { "dataSize": size }
+                    ]
+                }
+            ]
+        });
+
+        match rpc_get_program_accounts(client, rpc_url, &payload).await {
+            Ok(accounts) => {
+                info!("Meteora: fetched {} accounts with dataSize={}", accounts.len(), size);
+                all_accounts.extend(accounts);
+            }
+            Err(e) => {
+                debug!("Meteora: no accounts with dataSize={}: {}", size, e);
+            }
+        }
+    }
+
     let mut vaults = Vec::new();
 
-    for (pubkey, data) in &accounts {
+    for (pubkey, data) in &all_accounts {
         if let Some((pool, vault_a, vault_b)) = parse_meteora_dlmm_pool(pubkey, data) {
             state_cache.upsert(*pubkey, pool);
             state_cache.register_vault(vault_a, *pubkey, true);
@@ -316,7 +332,7 @@ async fn fetch_and_parse_meteora(
         }
     }
 
-    info!("Meteora: parsed {} pools from {} accounts", vaults.len() / 2, accounts.len());
+    info!("Meteora: parsed {} pools from {} accounts", vaults.len() / 2, all_accounts.len());
     Ok(vaults)
 }
 

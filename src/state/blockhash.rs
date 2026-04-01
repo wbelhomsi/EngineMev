@@ -25,12 +25,17 @@ impl BlockhashCache {
     }
 
     pub fn update(&self, info: BlockhashInfo) {
-        let mut guard = self.inner.write().unwrap();
-        *guard = Some(info);
+        match self.inner.write() {
+            Ok(mut guard) => *guard = Some(info),
+            Err(poisoned) => *poisoned.into_inner() = Some(info),
+        }
     }
 
     pub fn get(&self) -> Option<Hash> {
-        let guard = self.inner.read().unwrap();
+        let guard = match self.inner.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         guard.as_ref().and_then(|info| {
             if info.fetched_at.elapsed() < STALE_THRESHOLD {
                 Some(info.blockhash)

@@ -155,6 +155,7 @@ async fn main() -> Result<()> {
                 match geyser_stream.start(change_tx.clone(), shutdown_rx.clone()).await {
                     Ok(()) => {
                         info!("Geyser stream ended cleanly");
+                        backoff = std::time::Duration::from_secs(1); // reset on clean exit
                     }
                     Err(e) => {
                         error!("Geyser stream error: {}", e);
