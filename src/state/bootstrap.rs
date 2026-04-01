@@ -1,6 +1,11 @@
+use std::str::FromStr;
+use std::time::Duration;
+
 use solana_sdk::pubkey::Pubkey;
+use tracing::{info, error, debug};
 
 use crate::router::pool::{DexType, PoolState};
+use crate::state::StateCache;
 
 /// Parse a Raydium AMM v4 pool account.
 /// Returns (PoolState, vault_a_pubkey, vault_b_pubkey) or None if data is invalid.
@@ -124,4 +129,314 @@ pub fn parse_meteora_dlmm_pool(
     };
 
     Some((pool, reserve_x, reserve_y))
+}
+
+/// Bootstrap pool state from on-chain data via RPC.
+pub async fn bootstrap_pools(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    state_cache: &StateCache,
+) -> anyhow::Result<BootstrapStats> {
+    let mut stats = BootstrapStats::default();
+    let mut all_vaults: Vec<(Pubkey, Pubkey, bool)> = Vec::new();
+
+    match fetch_and_parse_raydium(client, rpc_url, state_cache).await {
+        Ok(vaults) => {
+            stats.raydium_pools = vaults.len() / 2;
+            all_vaults.extend(vaults);
+        }
+        Err(e) => {
+            error!("Raydium bootstrap failed: {}", e);
+            stats.errors += 1;
+        }
+    }
+
+    match fetch_and_parse_orca(client, rpc_url, state_cache).await {
+        Ok(vaults) => {
+            stats.orca_pools = vaults.len() / 2;
+            all_vaults.extend(vaults);
+        }
+        Err(e) => {
+            error!("Orca bootstrap failed: {}", e);
+            stats.errors += 1;
+        }
+    }
+
+    match fetch_and_parse_meteora(client, rpc_url, state_cache).await {
+        Ok(vaults) => {
+            stats.meteora_pools = vaults.len() / 2;
+            all_vaults.extend(vaults);
+        }
+        Err(e) => {
+            error!("Meteora bootstrap failed: {}", e);
+            stats.errors += 1;
+        }
+    }
+
+    let vault_pubkeys: Vec<Pubkey> = all_vaults.iter().map(|(v, _, _)| *v).collect();
+    match fetch_vault_balances(client, rpc_url, &vault_pubkeys, state_cache).await {
+        Ok(count) => {
+            stats.vaults_fetched = count;
+        }
+        Err(e) => {
+            error!("Vault balance fetch failed: {}", e);
+            stats.errors += 1;
+        }
+    }
+
+    stats.total_pools = stats.raydium_pools + stats.orca_pools + stats.meteora_pools;
+    info!(
+        "Bootstrap complete: {} pools ({} Raydium, {} Orca, {} Meteora), {} vaults, {} errors",
+        stats.total_pools, stats.raydium_pools, stats.orca_pools, stats.meteora_pools,
+        stats.vaults_fetched, stats.errors,
+    );
+
+    Ok(stats)
+}
+
+#[derive(Debug, Default)]
+pub struct BootstrapStats {
+    pub raydium_pools: usize,
+    pub orca_pools: usize,
+    pub meteora_pools: usize,
+    pub total_pools: usize,
+    pub vaults_fetched: usize,
+    pub errors: usize,
+}
+
+async fn fetch_and_parse_raydium(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    state_cache: &StateCache,
+) -> anyhow::Result<Vec<(Pubkey, Pubkey, bool)>> {
+    let program_id = crate::config::programs::raydium_amm();
+
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getProgramAccounts",
+        "params": [
+            program_id.to_string(),
+            {
+                "encoding": "base64",
+                "filters": [
+                    { "dataSize": 752 },
+                    { "memcmp": { "offset": 0, "bytes": "BgAAAAAAAAA=", "encoding": "base64" } }
+                ]
+            }
+        ]
+    });
+
+    let accounts = rpc_get_program_accounts(client, rpc_url, &payload).await?;
+    let mut vaults = Vec::new();
+
+    for (pubkey, data) in &accounts {
+        if let Some((pool, vault_a, vault_b)) = parse_raydium_amm_pool(pubkey, data) {
+            state_cache.upsert(*pubkey, pool);
+            state_cache.register_vault(vault_a, *pubkey, true);
+            state_cache.register_vault(vault_b, *pubkey, false);
+            vaults.push((vault_a, *pubkey, true));
+            vaults.push((vault_b, *pubkey, false));
+        }
+    }
+
+    info!("Raydium: parsed {} pools from {} accounts", vaults.len() / 2, accounts.len());
+    Ok(vaults)
+}
+
+async fn fetch_and_parse_orca(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    state_cache: &StateCache,
+) -> anyhow::Result<Vec<(Pubkey, Pubkey, bool)>> {
+    let program_id = crate::config::programs::orca_whirlpool();
+
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getProgramAccounts",
+        "params": [
+            program_id.to_string(),
+            {
+                "encoding": "base64",
+                "filters": [
+                    { "dataSize": 653 }
+                ]
+            }
+        ]
+    });
+
+    let accounts = rpc_get_program_accounts(client, rpc_url, &payload).await?;
+    let mut vaults = Vec::new();
+
+    for (pubkey, data) in &accounts {
+        if let Some((pool, vault_a, vault_b)) = parse_orca_whirlpool_pool(pubkey, data) {
+            state_cache.upsert(*pubkey, pool);
+            state_cache.register_vault(vault_a, *pubkey, true);
+            state_cache.register_vault(vault_b, *pubkey, false);
+            vaults.push((vault_a, *pubkey, true));
+            vaults.push((vault_b, *pubkey, false));
+        }
+    }
+
+    info!("Orca: parsed {} pools from {} accounts", vaults.len() / 2, accounts.len());
+    Ok(vaults)
+}
+
+async fn fetch_and_parse_meteora(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    state_cache: &StateCache,
+) -> anyhow::Result<Vec<(Pubkey, Pubkey, bool)>> {
+    let program_id = crate::config::programs::meteora_dlmm();
+
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getProgramAccounts",
+        "params": [
+            program_id.to_string(),
+            {
+                "encoding": "base64",
+                "filters": []
+            }
+        ]
+    });
+
+    let accounts = rpc_get_program_accounts(client, rpc_url, &payload).await?;
+    let mut vaults = Vec::new();
+
+    for (pubkey, data) in &accounts {
+        if let Some((pool, vault_a, vault_b)) = parse_meteora_dlmm_pool(pubkey, data) {
+            state_cache.upsert(*pubkey, pool);
+            state_cache.register_vault(vault_a, *pubkey, true);
+            state_cache.register_vault(vault_b, *pubkey, false);
+            vaults.push((vault_a, *pubkey, true));
+            vaults.push((vault_b, *pubkey, false));
+        }
+    }
+
+    info!("Meteora: parsed {} pools from {} accounts", vaults.len() / 2, accounts.len());
+    Ok(vaults)
+}
+
+async fn rpc_get_program_accounts(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    payload: &serde_json::Value,
+) -> anyhow::Result<Vec<(Pubkey, Vec<u8>)>> {
+    use base64::{engine::general_purpose, Engine as _};
+
+    let resp = client
+        .post(rpc_url)
+        .json(payload)
+        .timeout(Duration::from_secs(60))
+        .send()
+        .await?
+        .json::<serde_json::Value>()
+        .await?;
+
+    let accounts = resp
+        .get("result")
+        .and_then(|r| r.as_array())
+        .ok_or_else(|| anyhow::anyhow!("Invalid getProgramAccounts response"))?;
+
+    let mut results = Vec::with_capacity(accounts.len());
+
+    for account in accounts {
+        let pubkey_str = account
+            .get("pubkey")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing pubkey in account"))?;
+
+        let pubkey = Pubkey::from_str(pubkey_str)?;
+
+        let data_b64 = account
+            .get("account")
+            .and_then(|a| a.get("data"))
+            .and_then(|d| d.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing account data"))?;
+
+        let data = general_purpose::STANDARD.decode(data_b64)?;
+        results.push((pubkey, data));
+    }
+
+    Ok(results)
+}
+
+async fn fetch_vault_balances(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    vault_pubkeys: &[Pubkey],
+    state_cache: &StateCache,
+) -> anyhow::Result<usize> {
+    use base64::{engine::general_purpose, Engine as _};
+
+    let mut total_updated = 0;
+
+    for chunk in vault_pubkeys.chunks(100) {
+        let keys: Vec<String> = chunk.iter().map(|p| p.to_string()).collect();
+
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getMultipleAccounts",
+            "params": [
+                keys,
+                { "encoding": "base64" }
+            ]
+        });
+
+        let resp = client
+            .post(rpc_url)
+            .json(&payload)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?;
+
+        let slot = resp
+            .get("result")
+            .and_then(|r| r.get("context"))
+            .and_then(|c| c.get("slot"))
+            .and_then(|s| s.as_u64())
+            .unwrap_or(0);
+
+        let values = resp
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Invalid getMultipleAccounts response"))?;
+
+        for (i, value) in values.iter().enumerate() {
+            if value.is_null() {
+                continue;
+            }
+
+            let data_b64 = value
+                .get("data")
+                .and_then(|d| d.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.as_str());
+
+            if let Some(b64) = data_b64 {
+                if let Ok(data) = general_purpose::STANDARD.decode(b64) {
+                    if data.len() >= 72 {
+                        let balance = u64::from_le_bytes(
+                            data[64..72].try_into().unwrap_or_default()
+                        );
+                        state_cache.update_vault_balance(&chunk[i], balance, slot);
+                        total_updated += 1;
+                    }
+                }
+            }
+        }
+
+        debug!("Fetched vault balances: batch of {}, {} updated so far", chunk.len(), total_updated);
+    }
+
+    Ok(total_updated)
 }
