@@ -74,29 +74,6 @@ async fn main() -> Result<()> {
         info!("LST arb enabled: {} Sanctum virtual pools bootstrapped", config::lst_mints().len());
     }
 
-    // Bootstrap DEX pool state in background (non-blocking).
-    // Geyser starts immediately — early events for unknown vaults are dropped,
-    // but within ~3 min all active pools are indexed.
-    {
-        let client = http_client.clone();
-        let rpc_url = config.rpc_url.clone();
-        let cache = state_cache.clone();
-        tokio::spawn(async move {
-            info!("Background pool bootstrap starting...");
-            match state::bootstrap::bootstrap_pools(&client, &rpc_url, &cache).await {
-                Ok(stats) => {
-                    info!(
-                        "Pool bootstrap complete: {} pools ({} Raydium, {} Orca, {} Meteora)",
-                        stats.total_pools, stats.raydium_pools, stats.orca_pools, stats.meteora_pools,
-                    );
-                }
-                Err(e) => {
-                    error!("Pool bootstrap failed: {}", e);
-                }
-            }
-        });
-    }
-
     // Shutdown signal
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -219,22 +196,13 @@ async fn main() -> Result<()> {
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 };
 
-                // Update the pool's reserve in the state cache.
-                // Returns the affected pool address, or None if vault is unknown.
-                let pool_address = match state_cache.update_vault_balance(
-                    &change.vault_address,
-                    change.new_balance,
-                    change.slot,
-                ) {
-                    Some(addr) => addr,
-                    None => continue, // Unknown vault — not a monitored pool
-                };
-
-                // Look up the pool to construct a trigger for route discovery.
-                let pool_state = match state_cache.get_any(&pool_address) {
+                // Pool state was already updated by the Geyser stream.
+                let pool_state = match state_cache.get_any(&change.pool_address) {
                     Some(s) => s,
                     None => continue,
                 };
+
+                let pool_address = change.pool_address;
 
                 // Construct a DetectedSwap trigger from the state change.
                 // We don't know the exact swap direction, so we set output_mint
