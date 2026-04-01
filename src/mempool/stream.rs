@@ -69,7 +69,7 @@ impl GeyserStream {
             programs.len()
         );
 
-        // Connect to Yellowstone gRPC endpoint
+        // Connect to Yellowstone gRPC endpoint with TLS (required for Helius LaserStream)
         let mut client = GeyserGrpcClient::build_from_shared(
             self.config.geyser_grpc_url.clone(),
         )?
@@ -78,6 +78,7 @@ impl GeyserStream {
         } else {
             Some(self.config.geyser_auth_token.clone())
         })?
+        .tls_config(yellowstone_grpc_client::ClientTlsConfig::new().with_native_roots())?
         .connect()
         .await?;
 
