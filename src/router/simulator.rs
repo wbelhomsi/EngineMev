@@ -110,6 +110,19 @@ impl ProfitSimulator {
 
         let gross_profit_u64 = gross_profit as u64;
 
+        // Sanity cap: no legitimate single arb produces > 10 SOL profit.
+        // If the simulator calculates more, it's a math artifact from
+        // approximate reserve calculations (CLMM single-tick, DLMM synthetic).
+        const MAX_SANE_PROFIT: u64 = 10_000_000_000; // 10 SOL
+        if gross_profit_u64 > MAX_SANE_PROFIT {
+            return SimulationResult::Unprofitable {
+                reason: format!(
+                    "Profit {} exceeds sanity cap (likely approximation artifact)",
+                    gross_profit_u64
+                ),
+            };
+        }
+
         // Step 4: Calculate Jito tip
         let tip_lamports = (gross_profit_u64 as f64 * self.tip_fraction) as u64;
 

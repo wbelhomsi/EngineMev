@@ -52,14 +52,71 @@ pub struct PoolState {
 }
 
 impl PoolState {
-    /// Compute output amount for a constant-product AMM swap.
-    /// For CLMM pools, this is a rough approximation — the simulator
-    /// does the precise tick-crossing math.
+    /// Compute output amount for a swap.
+    /// Uses CLMM single-tick math when sqrt_price + liquidity are available,
+    /// otherwise falls back to constant-product AMM math.
     pub fn get_output_amount(&self, input_amount: u64, a_to_b: bool) -> Option<u64> {
         if input_amount == 0 {
             return Some(0);
         }
 
+        // Use CLMM single-tick math if sqrt_price and liquidity are available.
+        // This is accurate for trades that don't cross a tick boundary.
+        // It's conservative (underestimates output for large trades) which is
+        // safer than overestimating — we'd rather miss an opportunity than
+        // submit a losing bundle.
+        if let (Some(sqrt_price_x64), Some(liquidity)) = (self.sqrt_price_x64, self.liquidity) {
+            if sqrt_price_x64 > 0 && liquidity > 0 {
+                return self.get_clmm_output(input_amount, a_to_b, sqrt_price_x64, liquidity);
+            }
+        }
+
+        // Constant-product AMM math (Raydium AMM v4, CP, DAMM v2 compounding)
+        self.get_cpmm_output(input_amount, a_to_b)
+    }
+
+    /// Single-tick CLMM output calculation using f64.
+    /// For Orca Whirlpool, Raydium CLMM, Meteora DLMM, DAMM v2 concentrated.
+    ///
+    /// Uses the standard concentrated liquidity formulas:
+    ///   a_to_b: new_p = L*P / (L + input*P/Q), output = L*(P - new_p)/Q
+    ///   b_to_a: new_p = P + input*Q/L, output = L*Q*(new_p - P)/(P*new_p)
+    /// where P = sqrt_price_x64, L = liquidity, Q = 2^64
+    fn get_clmm_output(
+        &self,
+        input_amount: u64,
+        a_to_b: bool,
+        sqrt_price_x64: u128,
+        liquidity: u128,
+    ) -> Option<u64> {
+        let p = sqrt_price_x64 as f64;
+        let l = liquidity as f64;
+        let q: f64 = (1u128 << 64) as f64;
+
+        let fee_factor = (10_000.0 - self.fee_bps as f64) / 10_000.0;
+        let input_f = input_amount as f64 * fee_factor;
+
+        if a_to_b {
+            // Sell token A (base), get token B (quote). Price moves down.
+            let denom = l + input_f * p / q;
+            if denom <= 0.0 { return None; }
+            let new_p = l * p / denom;
+            if new_p <= 0.0 || new_p >= p { return None; }
+            let output = l * (p - new_p) / q;
+            if output <= 0.0 || output > u64::MAX as f64 { return None; }
+            Some(output as u64)
+        } else {
+            // Sell token B (quote), get token A (base). Price moves up.
+            let new_p = p + input_f * q / l;
+            if new_p <= p { return None; }
+            let output = l * q * (new_p - p) / (p * new_p);
+            if output <= 0.0 || output > u64::MAX as f64 { return None; }
+            Some(output as u64)
+        }
+    }
+
+    /// Constant-product AMM output: output = (R_out * input) / (R_in + input)
+    fn get_cpmm_output(&self, input_amount: u64, a_to_b: bool) -> Option<u64> {
         let (reserve_in, reserve_out) = if a_to_b {
             (self.token_a_reserve, self.token_b_reserve)
         } else {
