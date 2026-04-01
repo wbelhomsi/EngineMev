@@ -408,7 +408,7 @@ use solana_mev_bot::state::bootstrap::{
 };
 
 /// Helper: build a fake Raydium AMM account data buffer (752 bytes).
-/// Sets status=6 at offset 0, vaults at 240/272, mints at 304/336.
+/// Sets status=6 at offset 0, vaults at 336/368, mints at 400/432.
 fn make_raydium_data(
     coin_vault: &Pubkey,
     pc_vault: &Pubkey,
@@ -418,10 +418,10 @@ fn make_raydium_data(
     let mut data = vec![0u8; 752];
     // status = 6 (active) at offset 0, u64 LE
     data[0..8].copy_from_slice(&6u64.to_le_bytes());
-    data[240..272].copy_from_slice(coin_vault.as_ref());
-    data[272..304].copy_from_slice(pc_vault.as_ref());
-    data[304..336].copy_from_slice(coin_mint.as_ref());
-    data[336..368].copy_from_slice(pc_mint.as_ref());
+    data[336..368].copy_from_slice(coin_vault.as_ref());
+    data[368..400].copy_from_slice(pc_vault.as_ref());
+    data[400..432].copy_from_slice(coin_mint.as_ref());
+    data[432..464].copy_from_slice(pc_mint.as_ref());
     data
 }
 
@@ -456,14 +456,14 @@ fn make_meteora_data(
     active_id: i32,
     bin_step: u16,
 ) -> Vec<u8> {
-    let mut data = vec![0u8; 902];
+    let mut data = vec![0u8; 920];
     // 8-byte Anchor discriminator at offset 0
-    data[74..78].copy_from_slice(&active_id.to_le_bytes());
-    data[78..80].copy_from_slice(&bin_step.to_le_bytes());
-    data[86..118].copy_from_slice(mint_x.as_ref());
-    data[118..150].copy_from_slice(mint_y.as_ref());
-    data[150..182].copy_from_slice(reserve_x.as_ref());
-    data[182..214].copy_from_slice(reserve_y.as_ref());
+    data[76..80].copy_from_slice(&active_id.to_le_bytes());
+    data[80..82].copy_from_slice(&bin_step.to_le_bytes());
+    data[88..120].copy_from_slice(mint_x.as_ref());
+    data[120..152].copy_from_slice(mint_y.as_ref());
+    data[152..184].copy_from_slice(reserve_x.as_ref());
+    data[184..216].copy_from_slice(reserve_y.as_ref());
     data
 }
 
@@ -570,22 +570,22 @@ use crate::state::StateCache;
 /// Returns (PoolState, vault_a_pubkey, vault_b_pubkey) or None if data is invalid.
 ///
 /// Layout (no Anchor discriminator, 752 bytes):
-///   offset 240: coin_vault (Pubkey, 32B)
-///   offset 272: pc_vault (Pubkey, 32B)
-///   offset 304: coin_vault_mint (Pubkey, 32B)
-///   offset 336: pc_vault_mint (Pubkey, 32B)
+///   offset 336: coin_vault (Pubkey, 32B)
+///   offset 368: pc_vault (Pubkey, 32B)
+///   offset 400: coin_vault_mint (Pubkey, 32B)
+///   offset 432: pc_vault_mint (Pubkey, 32B)
 pub fn parse_raydium_amm_pool(
     pool_address: &Pubkey,
     data: &[u8],
 ) -> Option<(PoolState, Pubkey, Pubkey)> {
-    if data.len() < 368 {
+    if data.len() < 464 {
         return None;
     }
 
-    let coin_vault = Pubkey::try_from(&data[240..272]).ok()?;
-    let pc_vault = Pubkey::try_from(&data[272..304]).ok()?;
-    let coin_mint = Pubkey::try_from(&data[304..336]).ok()?;
-    let pc_mint = Pubkey::try_from(&data[336..368]).ok()?;
+    let coin_vault = Pubkey::try_from(&data[336..368]).ok()?;
+    let pc_vault = Pubkey::try_from(&data[368..400]).ok()?;
+    let coin_mint = Pubkey::try_from(&data[400..432]).ok()?;
+    let pc_mint = Pubkey::try_from(&data[432..464]).ok()?;
 
     let pool = PoolState {
         address: *pool_address,
@@ -651,27 +651,27 @@ pub fn parse_orca_whirlpool_pool(
 /// Parse a Meteora DLMM LbPair account.
 /// Returns (PoolState, reserve_x_pubkey, reserve_y_pubkey) or None if data is invalid.
 ///
-/// Layout (8-byte Anchor discriminator, ~902 bytes):
-///   offset 74: active_id (i32 LE, 4B)
-///   offset 78: bin_step (u16 LE, 2B)
-///   offset 86: token_x_mint (Pubkey, 32B)
-///   offset 118: token_y_mint (Pubkey, 32B)
-///   offset 150: reserve_x (Pubkey, 32B)
-///   offset 182: reserve_y (Pubkey, 32B)
+/// Layout (8-byte Anchor discriminator, ~902-920 bytes depending on version):
+///   offset 76: active_id (i32 LE, 4B)
+///   offset 80: bin_step (u16 LE, 2B)
+///   offset 88: token_x_mint (Pubkey, 32B)
+///   offset 120: token_y_mint (Pubkey, 32B)
+///   offset 152: reserve_x (Pubkey, 32B)
+///   offset 184: reserve_y (Pubkey, 32B)
 pub fn parse_meteora_dlmm_pool(
     pool_address: &Pubkey,
     data: &[u8],
 ) -> Option<(PoolState, Pubkey, Pubkey)> {
-    if data.len() < 214 {
+    if data.len() < 216 {
         return None;
     }
 
-    let _active_id = i32::from_le_bytes(data[74..78].try_into().ok()?);
-    let _bin_step = u16::from_le_bytes(data[78..80].try_into().ok()?);
-    let mint_x = Pubkey::try_from(&data[86..118]).ok()?;
-    let mint_y = Pubkey::try_from(&data[118..150]).ok()?;
-    let reserve_x = Pubkey::try_from(&data[150..182]).ok()?;
-    let reserve_y = Pubkey::try_from(&data[182..214]).ok()?;
+    let _active_id = i32::from_le_bytes(data[76..80].try_into().ok()?);
+    let _bin_step = u16::from_le_bytes(data[80..82].try_into().ok()?);
+    let mint_x = Pubkey::try_from(&data[88..120]).ok()?;
+    let mint_y = Pubkey::try_from(&data[120..152]).ok()?;
+    let reserve_x = Pubkey::try_from(&data[152..184]).ok()?;
+    let reserve_y = Pubkey::try_from(&data[184..216]).ok()?;
 
     let pool = PoolState {
         address: *pool_address,
@@ -832,7 +832,7 @@ async fn fetch_and_parse_raydium(
                 "encoding": "base64",
                 "filters": [
                     { "dataSize": 752 },
-                    { "memcmp": { "offset": 0, "bytes": "BwAAAAAAAAA=", "encoding": "base64" } }
+                    { "memcmp": { "offset": 0, "bytes": "BgAAAAAAAAA=", "encoding": "base64" } }
                 ]
             }
         ]
@@ -909,9 +909,7 @@ async fn fetch_and_parse_meteora(
             program_id.to_string(),
             {
                 "encoding": "base64",
-                "filters": [
-                    { "dataSize": 902 }
-                ]
+                "filters": []
             }
         ]
     });

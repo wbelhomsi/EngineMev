@@ -30,19 +30,19 @@ One `getProgramAccounts` call per DEX, with `dataSize` filter and `dataSlice` to
 
 | DEX | Program ID | dataSize filter | dataSlice (offset, length) |
 |-----|-----------|----------------|---------------------------|
-| Raydium AMM v4 | `675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8` | 752 | (240, 128) — covers vaults + mints |
-| Orca Whirlpool | `whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc` | 653 | (49, 196) — covers liquidity through vault_b |
-| Meteora DLMM | `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo` | 902 | (74, 140) — covers active_id through reserve_y |
+| Raydium AMM v4 | `675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8` | 752 | full (no dataSlice) |
+| Orca Whirlpool | `whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc` | 653 | full (no dataSlice) |
+| Meteora DLMM | `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo` | none (validate in parser) | full (no dataSlice) |
 
-For Raydium, also filter `memcmp` at offset 0 with value `06 00 00 00 00 00 00 00` (status = 6, active pools only).
+For Raydium, also filter `memcmp` at offset 0 with base64 `BgAAAAAAAAA=` (status = 6 as u64 LE, active pools only). For Meteora, skip `dataSize` filter since the struct size has historically drifted — validate in the parser instead.
 
 ### Account Layouts — Vault + Mint Offsets
 
 **Raydium AMM v4** (no Anchor discriminator):
-- `coin_vault` (token A vault): offset 240, 32 bytes
-- `pc_vault` (token B vault): offset 272, 32 bytes
-- `coin_vault_mint` (token A mint): offset 304, 32 bytes
-- `pc_vault_mint` (token B mint): offset 336, 32 bytes
+- `coin_vault` (token A vault): offset 336, 32 bytes
+- `pc_vault` (token B vault): offset 368, 32 bytes
+- `coin_vault_mint` (token A mint): offset 400, 32 bytes
+- `pc_vault_mint` (token B mint): offset 432, 32 bytes
 
 **Orca Whirlpool** (8-byte Anchor discriminator):
 - `liquidity`: offset 49, 16 bytes (u128)
@@ -53,13 +53,13 @@ For Raydium, also filter `memcmp` at offset 0 with value `06 00 00 00 00 00 00 0
 - `token_mint_b`: offset 181, 32 bytes
 - `token_vault_b`: offset 213, 32 bytes
 
-**Meteora DLMM** (8-byte Anchor discriminator):
-- `active_id`: offset 74, 4 bytes (i32)
-- `bin_step`: offset 78, 2 bytes (u16)
-- `token_x_mint`: offset 86, 32 bytes
-- `token_y_mint`: offset 118, 32 bytes
-- `reserve_x` (vault X): offset 150, 32 bytes
-- `reserve_y` (vault Y): offset 182, 32 bytes
+**Meteora DLMM** (8-byte Anchor discriminator, ~920 bytes):
+- `active_id`: offset 76, 4 bytes (i32)
+- `bin_step`: offset 80, 2 bytes (u16)
+- `token_x_mint`: offset 88, 32 bytes
+- `token_y_mint`: offset 120, 32 bytes
+- `reserve_x` (vault X): offset 152, 32 bytes
+- `reserve_y` (vault Y): offset 184, 32 bytes
 
 ### Vault Balance Fetch
 
