@@ -146,7 +146,7 @@ pub async fn bootstrap_pools(
             all_vaults.extend(vaults);
         }
         Err(e) => {
-            error!("Raydium bootstrap failed: {}", e);
+            error!("Raydium bootstrap failed: {}", crate::config::redact_url(&e.to_string()));
             stats.errors += 1;
         }
     }
@@ -157,7 +157,7 @@ pub async fn bootstrap_pools(
             all_vaults.extend(vaults);
         }
         Err(e) => {
-            error!("Orca bootstrap failed: {}", e);
+            error!("Orca bootstrap failed: {}", crate::config::redact_url(&e.to_string()));
             stats.errors += 1;
         }
     }
@@ -168,7 +168,7 @@ pub async fn bootstrap_pools(
             all_vaults.extend(vaults);
         }
         Err(e) => {
-            error!("Meteora bootstrap failed: {}", e);
+            error!("Meteora bootstrap failed: {}", crate::config::redact_url(&e.to_string()));
             stats.errors += 1;
         }
     }

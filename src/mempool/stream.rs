@@ -81,7 +81,7 @@ impl GeyserStream {
         .connect()
         .await?;
 
-        info!("Connected to Geyser gRPC at {}", self.config.geyser_grpc_url);
+        info!("Connected to Geyser gRPC at {}", crate::config::redact_url(&self.config.geyser_grpc_url));
 
         // Build subscription: watch all accounts owned by target DEX programs.
         // When a swap happens, the pool's token vault accounts get updated.

@@ -119,10 +119,11 @@ pub async fn run_blockhash_loop(
                     }
                     Err(e) => {
                         consecutive_failures += 1;
+                        let redacted = crate::config::redact_url(&e.to_string());
                         if consecutive_failures >= 3 {
-                            error!("Blockhash fetch failed {} times: {}", consecutive_failures, e);
+                            error!("Blockhash fetch failed {} times: {}", consecutive_failures, redacted);
                         } else {
-                            warn!("Blockhash fetch failed ({}x): {}", consecutive_failures, e);
+                            warn!("Blockhash fetch failed ({}x): {}", consecutive_failures, redacted);
                         }
                     }
                 }

@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
     // Initialize blockhash cache and do first fetch
     let blockhash_cache = state::BlockhashCache::new();
     if let Err(e) = state::blockhash::fetch_and_update(&http_client, &config.rpc_url, &blockhash_cache).await {
-        warn!("Initial blockhash fetch failed (will retry in background): {}", e);
+        warn!("Initial blockhash fetch failed (will retry in background): {}", config::redact_url(&e.to_string()));
     } else {
         info!("Initial blockhash fetched");
     }
@@ -163,7 +163,7 @@ async fn main() -> Result<()> {
                         backoff = std::time::Duration::from_secs(1); // reset on clean exit
                     }
                     Err(e) => {
-                        error!("Geyser stream error: {}", e);
+                        error!("Geyser stream error: {}", config::redact_url(&e.to_string()));
                     }
                 }
 

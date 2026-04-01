@@ -2,6 +2,23 @@ use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use std::time::Duration;
 
+/// Redact API keys from URLs and error messages for safe logging.
+/// Replaces `api-key=...` and `api_key=...` query params with `REDACTED`.
+pub fn redact_url(s: &str) -> String {
+    let mut result = s.to_string();
+    // Redact api-key=VALUE patterns (stops at & or end of string)
+    for pattern in ["api-key=", "api_key=", "x-token=", "token="] {
+        if let Some(start) = result.find(pattern) {
+            let value_start = start + pattern.len();
+            let value_end = result[value_start..].find('&')
+                .map(|i| value_start + i)
+                .unwrap_or(result.len());
+            result.replace_range(value_start..value_end, "REDACTED");
+        }
+    }
+    result
+}
+
 /// Known DEX program IDs on Solana
 pub mod programs {
     use super::*;
