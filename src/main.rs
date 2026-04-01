@@ -74,22 +74,27 @@ async fn main() -> Result<()> {
         info!("LST arb enabled: {} Sanctum virtual pools bootstrapped", config::lst_mints().len());
     }
 
-    // Bootstrap DEX pool state from on-chain data
-    info!("Bootstrapping pool state from RPC...");
-    match state::bootstrap::bootstrap_pools(&http_client, &config.rpc_url, &state_cache).await {
-        Ok(stats) => {
-            info!(
-                "Pool bootstrap complete: {} pools, {} vaults",
-                stats.total_pools, stats.vaults_fetched
-            );
-            if stats.total_pools == 0 {
-                warn!("WARNING: Zero pools bootstrapped — Geyser events may all be dropped");
+    // Bootstrap DEX pool state in background (non-blocking).
+    // Geyser starts immediately — early events for unknown vaults are dropped,
+    // but within ~3 min all active pools are indexed.
+    {
+        let client = http_client.clone();
+        let rpc_url = config.rpc_url.clone();
+        let cache = state_cache.clone();
+        tokio::spawn(async move {
+            info!("Background pool bootstrap starting...");
+            match state::bootstrap::bootstrap_pools(&client, &rpc_url, &cache).await {
+                Ok(stats) => {
+                    info!(
+                        "Pool bootstrap complete: {} pools ({} Raydium, {} Orca, {} Meteora)",
+                        stats.total_pools, stats.raydium_pools, stats.orca_pools, stats.meteora_pools,
+                    );
+                }
+                Err(e) => {
+                    error!("Pool bootstrap failed: {}", e);
+                }
             }
-        }
-        Err(e) => {
-            error!("Pool bootstrap failed: {}", e);
-            warn!("Continuing without bootstrap — Geyser will have a cold start");
-        }
+        });
     }
 
     // Shutdown signal
