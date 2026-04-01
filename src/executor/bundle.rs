@@ -128,8 +128,10 @@ impl BundleBuilder {
         match hop.dex_type {
             DexType::RaydiumAmm => self.build_raydium_amm_swap(hop, minimum_amount_out),
             DexType::RaydiumClmm => self.build_raydium_clmm_swap(hop),
+            DexType::RaydiumCp => self.build_raydium_amm_swap(hop, minimum_amount_out),
             DexType::OrcaWhirlpool => self.build_orca_whirlpool_swap(hop),
             DexType::MeteoraDlmm => self.build_meteora_dlmm_swap(hop),
+            DexType::MeteoraDammV2 => self.build_meteora_dlmm_swap(hop),
             DexType::SanctumInfinity => self.build_sanctum_swap(hop, minimum_amount_out),
         }
     }

@@ -39,6 +39,14 @@ pub mod programs {
         Pubkey::from_str("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo").unwrap()
     }
 
+    pub fn raydium_cp() -> Pubkey {
+        Pubkey::from_str("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C").unwrap()
+    }
+
+    pub fn meteora_damm_v2() -> Pubkey {
+        Pubkey::from_str("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG").unwrap()
+    }
+
     pub fn jupiter_v6() -> Pubkey {
         Pubkey::from_str("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4").unwrap()
     }
@@ -186,8 +194,10 @@ impl BotConfig {
         let mut programs = vec![
             programs::raydium_amm(),
             programs::raydium_clmm(),
+            programs::raydium_cp(),
             programs::orca_whirlpool(),
             programs::meteora_dlmm(),
+            programs::meteora_damm_v2(),
         ];
         if self.lst_arb_enabled {
             programs.push(programs::sanctum_s_controller());
