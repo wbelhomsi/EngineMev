@@ -4,7 +4,7 @@ use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::watch;
-use tracing::{info, warn, error, debug};
+use tracing::{info, warn, debug};
 use yellowstone_grpc_client::GeyserGrpcClient;
 use yellowstone_grpc_proto::prelude::{
     subscribe_update::UpdateOneof,
@@ -41,13 +41,15 @@ pub struct PoolStateChange {
 pub struct GeyserStream {
     config: Arc<BotConfig>,
     state_cache: StateCache,
+    http_client: reqwest::Client,
 }
 
 impl GeyserStream {
-    pub fn new(config: Arc<BotConfig>, state_cache: StateCache) -> Self {
+    pub fn new(config: Arc<BotConfig>, state_cache: StateCache, http_client: reqwest::Client) -> Self {
         Self {
             config,
             state_cache,
+            http_client,
         }
     }
 
@@ -141,8 +143,9 @@ impl GeyserStream {
 
     /// Process a Geyser account update.
     ///
-    /// For SPL Token accounts (token vaults), the balance sits at bytes 64..72.
-    /// When this changes, a swap just happened on the parent pool.
+    /// Identifies DEX by account data size, dispatches to per-DEX parser,
+    /// updates the StateCache, and for Raydium AMM/CP pools triggers an async
+    /// vault balance fetch (since those pools don't embed reserves).
     fn process_update(
         &self,
         update: yellowstone_grpc_proto::prelude::SubscribeUpdate,
@@ -159,33 +162,56 @@ impl GeyserStream {
                 };
 
                 let slot = account_update.slot;
+                let data = &account_info.data;
 
-                // Parse account pubkey (32 bytes)
                 let pubkey_bytes: [u8; 32] = match account_info.pubkey.try_into() {
                     Ok(b) => b,
                     Err(_) => return,
                 };
-                let account_pubkey = Pubkey::new_from_array(pubkey_bytes);
+                let pool_address = Pubkey::new_from_array(pubkey_bytes);
 
-                // SPL Token account layout: balance (amount) is at offset 64, 8 bytes LE
-                let data = &account_info.data;
-                if data.len() >= 72 {
-                    // TODO(Task 5): Parse per-DEX pool state and update cache here.
-                    // For now, we emit the vault address as the pool address — this is
-                    // a temporary placeholder until process_update is rewritten to do
-                    // proper vault→pool resolution and cache updates.
-                    let event = PoolStateChange {
-                        pool_address: account_pubkey,
-                        slot,
-                    };
+                // Route to per-DEX parser based on account data size
+                let parsed = match data.len() {
+                    653 => parse_orca_whirlpool(&pool_address, data, slot).map(|p| (p, None)),
+                    1560 => parse_raydium_clmm(&pool_address, data, slot).map(|p| (p, None)),
+                    904 => parse_meteora_dlmm(&pool_address, data, slot).map(|p| (p, None)),
+                    1112 => parse_meteora_damm_v2(&pool_address, data, slot).map(|p| (p, None)),
+                    752 => parse_raydium_amm_v4(&pool_address, data, slot)
+                        .map(|(p, vaults)| (p, Some(vaults))),
+                    637 => parse_raydium_cp(&pool_address, data, slot)
+                        .map(|(p, vaults)| (p, Some(vaults))),
+                    _ => None,
+                };
 
-                    // Non-blocking send. If channel is full, drop — stale events are worthless.
-                    if let Err(e) = tx_sender.try_send(event) {
-                        debug!("Channel full, dropping state change: {}", e);
-                    }
+                let Some((pool_state, vault_info)) = parsed else {
+                    return;
+                };
+
+                // Update cache with parsed pool state
+                self.state_cache.upsert(pool_address, pool_state);
+
+                // For Category B (Raydium AMM/CP): trigger async vault balance fetch
+                if let Some((vault_a, vault_b)) = vault_info {
+                    let client = self.http_client.clone();
+                    let url = self.config.rpc_url.clone();
+                    let cache = self.state_cache.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = fetch_vault_balances_for_pool(
+                            &client, &url, &cache, pool_address, vault_a, vault_b,
+                        ).await {
+                            debug!("Vault fetch failed for {}: {}",
+                                pool_address, crate::config::redact_url(&e.to_string()));
+                        }
+                    });
+                }
+
+                // Notify router
+                let event = PoolStateChange { pool_address, slot };
+                if let Err(e) = tx_sender.try_send(event) {
+                    debug!("Channel full, dropping pool change: {}", e);
                 }
             }
-            _ => {} // Ignore slot/block/tx-level updates
+            _ => {}
         }
     }
 }
@@ -203,6 +229,65 @@ pub struct StreamStats {
 // ─── Per-DEX pool state parsers ───────────────────────────────────────────────
 
 use crate::router::pool::{DexType, PoolState};
+
+/// Fetch vault balances for a Raydium AMM/CP pool and update reserves in cache.
+/// Uses dataSlice to fetch only the 8-byte balance from each vault.
+async fn fetch_vault_balances_for_pool(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    cache: &crate::state::StateCache,
+    pool_address: Pubkey,
+    vault_a: Pubkey,
+    vault_b: Pubkey,
+) -> anyhow::Result<()> {
+    use base64::{engine::general_purpose, Engine as _};
+
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getMultipleAccounts",
+        "params": [
+            [vault_a.to_string(), vault_b.to_string()],
+            { "encoding": "base64", "dataSlice": { "offset": 64, "length": 8 } }
+        ]
+    });
+
+    let resp = client
+        .post(rpc_url)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await?
+        .json::<serde_json::Value>()
+        .await?;
+
+    let values = resp
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow::anyhow!("Invalid getMultipleAccounts response"))?;
+
+    let mut balances = [0u64; 2];
+    for (i, value) in values.iter().enumerate().take(2) {
+        if value.is_null() { continue; }
+        if let Some(b64) = value.get("data").and_then(|d| d.as_array()).and_then(|a| a.first()).and_then(|v| v.as_str()) {
+            if let Ok(data) = general_purpose::STANDARD.decode(b64) {
+                if data.len() >= 8 {
+                    balances[i] = u64::from_le_bytes(data[0..8].try_into().unwrap_or_default());
+                }
+            }
+        }
+    }
+
+    // Update pool reserves in cache
+    if let Some(mut pool) = cache.get_any(&pool_address) {
+        pool.token_a_reserve = balances[0];
+        pool.token_b_reserve = balances[1];
+        cache.upsert(pool_address, pool);
+    }
+
+    Ok(())
+}
 
 /// Approximate token reserves from a CLMM sqrt_price_x64 + liquidity.
 ///
