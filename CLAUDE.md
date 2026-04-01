@@ -145,6 +145,9 @@ Base DEX↔DEX backrun arb working in dry-run on mainnet.
 - Geyser streaming with per-DEX pool state parsing (6 DEXes)
 - Lazy pool discovery via Geyser (zero bootstrap)
 - Lazy vault fetch for Raydium AMM/CP
+- CLMM single-tick math using u128 integer arithmetic (Orca, Raydium CLMM, DAMM v2 concentrated)
+- CLMM fee rate uses 1,000,000 denominator (validated against production system)
+- Profit sanity cap (10 SOL max) catches approximation artifacts
 - Route calculator (2-hop and 3-hop)
 - Profit simulator with fresh-state validation
 - Bundle builder with minimum_amount_out enforcement
@@ -155,10 +158,11 @@ Base DEX↔DEX backrun arb working in dry-run on mainnet.
 - API key redaction in all logs
 - LST rate arb (Phase 2 bolt-on, Sanctum virtual pools)
 - 26 unit tests + 4 e2e tests passing
+- Tested on mainnet: ~300 realistic opportunities in 5 min, ~0.000189 SOL avg profit per opp
 
 **Remaining:**
-- CLMM tick-crossing math (current: constant-product approximation from sqrt_price)
-- DLMM bin-by-bin simulation (current: synthetic reserves from active_id + bin_step)
+- CLMM multi-tick crossing (current: single-tick only, underestimates large swaps — conservative)
+- DLMM bin-by-bin simulation (current: synthetic reserves from active_id — needs bin array accounts for accuracy)
 - Real DEX swap instruction account lists (currently placeholder single-account)
 - Deduplication of repeated opportunities on same pool pair
 - Metrics/Prometheus endpoint
@@ -199,6 +203,11 @@ Flashbots MEV-Share on Ethereum. See `docs/STRATEGY-MEVSHARE-ETH.md`.
 11. **Raydium CP discriminator:** `[247, 237, 227, 245, 215, 195, 222, 70]`.
 12. **Meteora DAMM v2 discriminator:** `[241, 154, 109, 4, 17, 177, 109, 188]`.
 13. **RwLock in BlockhashCache is poison-tolerant** — uses `match` + `into_inner()`, not `unwrap()`.
+14. **CLMM fee denominator is 1,000,000, NOT 10,000.** A 0.3% pool has feeRate=3000. Convert from fee_bps: `fee_rate = fee_bps * 100`.
+15. **Never use f64 for CLMM math.** The `P * P_new` product overflows f64 precision. Use u128 with careful division ordering to avoid overflow.
+16. **DLMM bin prices are precomputed on-chain.** Don't compute `(1+binStep/10000)^binId` — it overflows for real bin IDs. Parse `bin.price` (u128) from bin array accounts instead.
+17. **DLMM active_id max is ~443636** (not 2^23). Values like 8388608 are garbage — skip those pools.
+18. **Profit sanity cap: 10 SOL.** Any route showing >10 SOL profit is an approximation artifact. The simulator rejects these automatically.
 
 ## Environment Variables
 
