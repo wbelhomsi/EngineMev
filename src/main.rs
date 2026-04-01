@@ -74,6 +74,24 @@ async fn main() -> Result<()> {
         info!("LST arb enabled: {} Sanctum virtual pools bootstrapped", config::lst_mints().len());
     }
 
+    // Bootstrap DEX pool state from on-chain data
+    info!("Bootstrapping pool state from RPC...");
+    match state::bootstrap::bootstrap_pools(&http_client, &config.rpc_url, &state_cache).await {
+        Ok(stats) => {
+            info!(
+                "Pool bootstrap complete: {} pools, {} vaults",
+                stats.total_pools, stats.vaults_fetched
+            );
+            if stats.total_pools == 0 {
+                warn!("WARNING: Zero pools bootstrapped — Geyser events may all be dropped");
+            }
+        }
+        Err(e) => {
+            error!("Pool bootstrap failed: {}", e);
+            warn!("Continuing without bootstrap — Geyser will have a cold start");
+        }
+    }
+
     // Shutdown signal
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -126,12 +144,37 @@ async fn main() -> Result<()> {
     // The router runs on a dedicated thread to avoid async overhead on
     // the hot path. Route calculation is pure CPU work — no I/O, no awaits.
 
-    // Task 1: Geyser streaming (async, I/O bound)
+    // Task 1: Geyser streaming with reconnect (async, I/O bound)
     let stream_handle = {
         let shutdown_rx = shutdown_rx.clone();
         tokio::spawn(async move {
-            if let Err(e) = geyser_stream.start(change_tx, shutdown_rx).await {
-                error!("Geyser stream error: {}", e);
+            let mut backoff = std::time::Duration::from_secs(1);
+            const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+
+            loop {
+                match geyser_stream.start(change_tx.clone(), shutdown_rx.clone()).await {
+                    Ok(()) => {
+                        info!("Geyser stream ended cleanly");
+                    }
+                    Err(e) => {
+                        error!("Geyser stream error: {}", e);
+                    }
+                }
+
+                if *shutdown_rx.borrow() {
+                    info!("Geyser: shutdown requested, not reconnecting");
+                    break;
+                }
+
+                warn!("Geyser disconnected, reconnecting in {:?}...", backoff);
+                tokio::time::sleep(backoff).await;
+
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+
+                info!("Geyser: attempting reconnect (backoff {:?})...", backoff);
+                backoff = std::cmp::min(backoff * 2, MAX_BACKOFF);
             }
         })
     };
