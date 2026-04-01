@@ -54,6 +54,20 @@ async fn main() -> Result<()> {
     // Initialize shared state cache
     let state_cache = StateCache::new(config.pool_state_ttl);
 
+    // Initialize HTTP client (shared for RPC calls)
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .pool_max_idle_per_host(4)
+        .build()?;
+
+    // Initialize blockhash cache and do first fetch
+    let blockhash_cache = state::BlockhashCache::new();
+    if let Err(e) = state::blockhash::fetch_and_update(&http_client, &config.rpc_url, &blockhash_cache).await {
+        warn!("Initial blockhash fetch failed (will retry in background): {}", e);
+    } else {
+        info!("Initial blockhash fetched");
+    }
+
     // Bootstrap Sanctum virtual pools for LST arb
     if config.lst_arb_enabled {
         bootstrap_sanctum_pools(&state_cache);
@@ -70,6 +84,17 @@ async fn main() -> Result<()> {
         info!("Shutdown signal received");
         let _ = shutdown_tx_clone.send(true);
     });
+
+    // Task: Blockhash refresh (async, 2s interval)
+    let blockhash_handle = {
+        let client = http_client.clone();
+        let rpc_url = config.rpc_url.clone();
+        let cache = blockhash_cache.clone();
+        let shutdown_rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            state::blockhash::run_blockhash_loop(client, rpc_url, cache, shutdown_rx).await;
+        })
+    };
 
     // Channel for pool state changes: Geyser stream → router
     let (change_tx, change_rx) = bounded(STATE_CHANGE_CHANNEL_CAPACITY);
@@ -119,6 +144,7 @@ async fn main() -> Result<()> {
         let bundle_builder = bundle_builder.clone();
         let config = config.clone();
         let state_cache = state_cache.clone();
+        let blockhash_cache = blockhash_cache.clone();
 
         tokio::task::spawn_blocking(move || {
             info!("Router thread started");
@@ -223,9 +249,14 @@ async fn main() -> Result<()> {
                             continue;
                         }
 
-                        // Build and submit bundle
-                        // TODO: get recent blockhash from RPC (cache with ~2s TTL)
-                        let blockhash = solana_sdk::hash::Hash::default(); // placeholder
+                        // Get recent blockhash from cache
+                        let blockhash = match blockhash_cache.get() {
+                            Some(h) => h,
+                            None => {
+                                warn!("Stale or missing blockhash, skipping opportunity");
+                                continue;
+                            }
+                        };
 
                         match bundle_builder.build_arb_bundle(&route, tip_lamports, blockhash) {
                             Ok(bundle_txs) => {
@@ -281,7 +312,7 @@ async fn main() -> Result<()> {
     };
 
     // Wait for all tasks
-    let _ = tokio::try_join!(stream_handle, cache_handle);
+    let _ = tokio::try_join!(stream_handle, cache_handle, blockhash_handle);
     let _ = router_handle.await;
 
     info!("Engine shutdown complete");
