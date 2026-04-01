@@ -100,7 +100,7 @@ async fn main() -> Result<()> {
     let (change_tx, change_rx) = bounded(STATE_CHANGE_CHANNEL_CAPACITY);
 
     // Initialize components
-    let geyser_stream = GeyserStream::new(config.clone(), state_cache.clone());
+    let geyser_stream = GeyserStream::new(config.clone(), state_cache.clone(), http_client.clone());
     let route_calculator = RouteCalculator::new(state_cache.clone(), config.max_hops);
     let profit_simulator = ProfitSimulator::new(
         state_cache.clone(),
