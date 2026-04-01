@@ -14,18 +14,12 @@ use yellowstone_grpc_proto::prelude::{
 use crate::config::BotConfig;
 use crate::state::StateCache;
 
-/// Event emitted when a pool's on-chain state changes.
-///
-/// This replaces the old DetectedSwap from the dead Jito mempool API.
-/// We no longer see pending transactions — we see the *result* of swaps
-/// via account state changes pushed by Yellowstone Geyser.
+/// Notification that a pool's on-chain state was updated.
+/// The actual state is already in the StateCache — this is just a signal
+/// telling the router which pool to re-evaluate.
 #[derive(Debug, Clone)]
 pub struct PoolStateChange {
-    /// Token vault account that changed
-    pub vault_address: Pubkey,
-    /// New vault balance (token amount)
-    pub new_balance: u64,
-    /// Slot this change was observed in
+    pub pool_address: Pubkey,
     pub slot: u64,
 }
 
@@ -176,13 +170,12 @@ impl GeyserStream {
                 // SPL Token account layout: balance (amount) is at offset 64, 8 bytes LE
                 let data = &account_info.data;
                 if data.len() >= 72 {
-                    let balance = u64::from_le_bytes(
-                        data[64..72].try_into().unwrap_or_default()
-                    );
-
+                    // TODO(Task 5): Parse per-DEX pool state and update cache here.
+                    // For now, we emit the vault address as the pool address — this is
+                    // a temporary placeholder until process_update is rewritten to do
+                    // proper vault→pool resolution and cache updates.
                     let event = PoolStateChange {
-                        vault_address: account_pubkey,
-                        new_balance: balance,
+                        pool_address: account_pubkey,
                         slot,
                     };
 

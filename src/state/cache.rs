@@ -124,9 +124,13 @@ impl StateCache {
         self.pools.is_empty()
     }
 
-    /// Evict all entries older than TTL.
+    /// Evict pools that haven't been updated in 10 minutes.
+    /// This is intentionally lenient — bootstrapped pools start with stale timestamps
+    /// but remain valid for route discovery and vault indexing until Geyser updates arrive.
+    /// The strict TTL (400ms) is enforced in `get()` for the simulator's fresh-state check.
     pub fn evict_stale(&self) {
-        self.pools.retain(|_, entry| entry.last_updated.elapsed() < self.ttl * 10);
+        const EVICTION_AGE: Duration = Duration::from_secs(600);
+        self.pools.retain(|_, entry| entry.last_updated.elapsed() < EVICTION_AGE);
     }
 
     /// Register a vault address → pool mapping.
