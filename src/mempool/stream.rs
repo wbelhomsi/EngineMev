@@ -192,7 +192,20 @@ impl GeyserStream {
                 };
 
                 // Update cache with parsed pool state
+                let pool_mints = (pool_state.token_a_mint, pool_state.token_b_mint);
                 self.state_cache.upsert(pool_address, pool_state);
+
+                // Fetch token program for each mint (async, cached)
+                for mint in [pool_mints.0, pool_mints.1] {
+                    if self.state_cache.get_mint_program(&mint).is_none() {
+                        let client = self.http_client.clone();
+                        let url = self.config.rpc_url.clone();
+                        let cache = self.state_cache.clone();
+                        tokio::spawn(async move {
+                            let _ = fetch_mint_program(&client, &url, &cache, &mint).await;
+                        });
+                    }
+                }
 
                 // For Category B (Raydium AMM/CP): trigger async vault balance fetch
                 if let Some((vault_a, vault_b)) = vault_info {
@@ -297,6 +310,47 @@ async fn check_account_exists(
         .unwrap_or(false);
 
     Ok(exists)
+}
+
+/// Fetch a mint's token program (SPL Token or Token-2022) via getAccountInfo.
+/// Returns the owner of the mint account. Caches result in StateCache.
+async fn fetch_mint_program(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    cache: &crate::state::StateCache,
+    mint: &Pubkey,
+) -> anyhow::Result<Pubkey> {
+    // Check cache first
+    if let Some(prog) = cache.get_mint_program(mint) {
+        return Ok(prog);
+    }
+
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "getAccountInfo",
+        "params": [mint.to_string(), {"encoding": "base64", "dataSlice": {"offset": 0, "length": 0}}]
+    });
+
+    let resp = client
+        .post(rpc_url)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await?
+        .json::<serde_json::Value>()
+        .await?;
+
+    let owner_str = resp
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.get("owner"))
+        .and_then(|o| o.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Missing owner in getAccountInfo response"))?;
+
+    let owner = Pubkey::from_str(owner_str)?;
+    cache.set_mint_program(*mint, owner);
+    debug!("Cached mint program: {} → {}", mint, owner);
+    Ok(owner)
 }
 
 /// Fetch vault balances for a Raydium AMM/CP pool and update reserves in cache.
