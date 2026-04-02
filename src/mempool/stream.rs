@@ -534,10 +534,19 @@ pub fn parse_meteora_dlmm(pool_address: &Pubkey, data: &[u8], slot: u64) -> Opti
         sqrt_price_x64: None,
         liquidity: None,
         last_slot: slot,
-        extra: PoolExtra {
-            vault_a: Some(Pubkey::new_from_array(data[152..184].try_into().ok()?)),
-            vault_b: Some(Pubkey::new_from_array(data[184..216].try_into().ok()?)),
-            ..Default::default()
+        extra: {
+            let spl_token = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+            let token_2022 = Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb").unwrap();
+            // token_mint_x_program_flag at offset 878, y at 879 (0=SPL Token, 1=Token-2022)
+            let prog_x = if data.len() > 878 && data[878] == 1 { token_2022 } else { spl_token };
+            let prog_y = if data.len() > 879 && data[879] == 1 { token_2022 } else { spl_token };
+            PoolExtra {
+                vault_a: Some(Pubkey::new_from_array(data[152..184].try_into().ok()?)),
+                vault_b: Some(Pubkey::new_from_array(data[184..216].try_into().ok()?)),
+                token_program_a: Some(prog_x),
+                token_program_b: Some(prog_y),
+                ..Default::default()
+            }
         },
         best_bid_price: None,
         best_ask_price: None,
