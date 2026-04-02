@@ -29,14 +29,20 @@ fn make_orderbook_pool(
 
 #[test]
 fn test_orderbook_output_a_to_b_sell_into_bids() {
-    let pool = make_orderbook_pool(DexType::Manifest, 150, 160, 1000, 1000, 0);
+    // Manifest uses D18 prices: 150 * 10^18
+    let d18: u128 = 1_000_000_000_000_000_000;
+    let pool = make_orderbook_pool(DexType::Manifest, 150 * d18, 160 * d18, 1000, 1000, 0);
+    // output = 100 * 150e18 / 1e18 = 15000
     let output = pool.get_output_amount(100, true);
     assert_eq!(output, Some(15000));
 }
 
 #[test]
 fn test_orderbook_output_b_to_a_buy_from_asks() {
-    let pool = make_orderbook_pool(DexType::Manifest, 150, 160, 1000, 1000, 0);
+    // Manifest uses D18 prices: 160 * 10^18
+    let d18: u128 = 1_000_000_000_000_000_000;
+    let pool = make_orderbook_pool(DexType::Manifest, 150 * d18, 160 * d18, 1000, 1000, 0);
+    // output = 1600 * 1e18 / 160e18 = 10
     let output = pool.get_output_amount(1600, false);
     assert_eq!(output, Some(10));
 }
@@ -50,14 +56,17 @@ fn test_orderbook_output_with_phoenix_taker_fee() {
 
 #[test]
 fn test_orderbook_output_capped_by_depth() {
-    let pool = make_orderbook_pool(DexType::Manifest, 150, 160, 50, 1000, 0);
+    let d18: u128 = 1_000_000_000_000_000_000;
+    let pool = make_orderbook_pool(DexType::Manifest, 150 * d18, 160 * d18, 50, 1000, 0);
+    // input 100 capped to 50 by bid depth, output = 50 * 150e18 / 1e18 = 7500
     let output = pool.get_output_amount(100, true);
     assert_eq!(output, Some(7500));
 }
 
 #[test]
 fn test_orderbook_output_zero_input() {
-    let pool = make_orderbook_pool(DexType::Manifest, 150, 160, 1000, 1000, 0);
+    let d18: u128 = 1_000_000_000_000_000_000;
+    let pool = make_orderbook_pool(DexType::Manifest, 150 * d18, 160 * d18, 1000, 1000, 0);
     assert_eq!(pool.get_output_amount(0, true), Some(0));
 }
 

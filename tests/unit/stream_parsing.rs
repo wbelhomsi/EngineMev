@@ -209,7 +209,12 @@ fn test_parse_phoenix_market_extracts_mints() {
     assert_eq!(pool.token_b_mint, quote_mint);
     assert_eq!(pool.extra.vault_a, Some(base_vault));
     assert_eq!(pool.extra.vault_b, Some(quote_vault));
-    assert_eq!(pool.fee_bps, 2);
+    // Data is only 700 bytes — not enough for FIFOMarket taker_fee_bps at 624+288=912
+    // so fee falls back to default
+    assert_eq!(pool.fee_bps, DexType::Phoenix.base_fee_bps());
+    // No orderbook data → empty trees → None pricing
+    assert_eq!(pool.best_bid_price, None);
+    assert_eq!(pool.best_ask_price, None);
 }
 
 #[test]
@@ -257,4 +262,170 @@ fn test_parse_manifest_market_extracts_mints() {
 fn test_parse_manifest_rejects_zero_mints() {
     let data = vec![0u8; 300];
     assert!(parse_manifest_market(&Pubkey::new_unique(), &data, 100).is_none());
+}
+
+// ─── Phoenix top-of-book extraction tests ───────────────────────────────────
+
+#[test]
+fn test_parse_phoenix_market_with_orderbook() {
+    let base_mint = Pubkey::new_unique();
+    let quote_mint = Pubkey::new_unique();
+
+    // Layout sizes:
+    // Header: 624 bytes
+    // FIFOMarket padding+fields: 304 bytes (up to bids tree start)
+    // Bids tree: 32 (header) + bids_size*64 (nodes)
+    // Asks tree: 32 (header) + asks_size*64 (nodes)
+    let bids_size: u64 = 1;
+    let asks_size: u64 = 1;
+    // bids tree at 928, size = 32 + 64 = 96 → asks at 1024, size = 96
+    // Total: 1024 + 96 = 1120, plus some padding
+    let mut data = vec![0u8; 1200];
+
+    // MarketHeader fields
+    data[16..24].copy_from_slice(&bids_size.to_le_bytes());
+    data[24..32].copy_from_slice(&asks_size.to_le_bytes());
+    data[48..80].copy_from_slice(base_mint.as_ref());
+    data[80..112].copy_from_slice(Pubkey::new_unique().as_ref()); // base_vault
+    data[136..144].copy_from_slice(&1u64.to_le_bytes()); // base_lot_size = 1
+    data[152..184].copy_from_slice(quote_mint.as_ref());
+    data[184..216].copy_from_slice(Pubkey::new_unique().as_ref()); // quote_vault
+    data[240..248].copy_from_slice(&1u64.to_le_bytes()); // quote_lot_size = 1
+    data[248..256].copy_from_slice(&100u64.to_le_bytes()); // tick_size = 100
+
+    // FIFOMarket taker_fee_bps at 624+280 = 904
+    data[904..912].copy_from_slice(&3u64.to_le_bytes()); // 3 bps taker fee
+
+    // Bids tree at offset 928:
+    // root = 1 (first node, 1-based)
+    data[928..932].copy_from_slice(&1u32.to_le_bytes());
+    // Node 0 at offset 928 + 32 = 960:
+    // left=0 (SENTINEL), right=0 (leaf)
+    data[960..964].copy_from_slice(&0u32.to_le_bytes()); // left
+    data[964..968].copy_from_slice(&0u32.to_le_bytes()); // right
+    // price_in_ticks at +16 = 976
+    data[976..984].copy_from_slice(&50u64.to_le_bytes());
+    // num_base_lots at +40 = 1000
+    data[1000..1008].copy_from_slice(&200u64.to_le_bytes());
+
+    // Asks tree at offset 928 + 32 + 1*64 = 1024:
+    data[1024..1028].copy_from_slice(&1u32.to_le_bytes()); // root = 1
+    // Node 0 at 1024 + 32 = 1056:
+    data[1056..1060].copy_from_slice(&0u32.to_le_bytes()); // left
+    data[1060..1064].copy_from_slice(&0u32.to_le_bytes()); // right
+    // price_in_ticks at +16 = 1072
+    data[1072..1080].copy_from_slice(&55u64.to_le_bytes());
+    // num_base_lots at +40 = 1096
+    data[1096..1104].copy_from_slice(&150u64.to_le_bytes());
+
+    let result = parse_phoenix_market(&Pubkey::new_unique(), &data, 100);
+    assert!(result.is_some());
+    let pool = result.unwrap();
+    assert_eq!(pool.dex_type, DexType::Phoenix);
+    // best_bid = 50 ticks * 100 tick_size = 5000
+    assert_eq!(pool.best_bid_price, Some(5000));
+    // best_ask = 55 ticks * 100 tick_size = 5500
+    assert_eq!(pool.best_ask_price, Some(5500));
+    // bid depth = 200 lots * 1 base_lot_size = 200
+    assert_eq!(pool.token_a_reserve, 200);
+    // ask depth = 150 lots * 1 base_lot_size = 150
+    assert_eq!(pool.token_b_reserve, 150);
+    // taker fee read from data
+    assert_eq!(pool.fee_bps, 3);
+}
+
+#[test]
+fn test_parse_phoenix_empty_trees() {
+    let base_mint = Pubkey::new_unique();
+    let quote_mint = Pubkey::new_unique();
+    let bids_size: u64 = 1;
+    let asks_size: u64 = 1;
+    let mut data = vec![0u8; 1200];
+
+    data[16..24].copy_from_slice(&bids_size.to_le_bytes());
+    data[24..32].copy_from_slice(&asks_size.to_le_bytes());
+    data[48..80].copy_from_slice(base_mint.as_ref());
+    data[80..112].copy_from_slice(Pubkey::new_unique().as_ref());
+    data[136..144].copy_from_slice(&1u64.to_le_bytes());
+    data[152..184].copy_from_slice(quote_mint.as_ref());
+    data[184..216].copy_from_slice(Pubkey::new_unique().as_ref());
+    data[240..248].copy_from_slice(&1u64.to_le_bytes());
+    data[248..256].copy_from_slice(&100u64.to_le_bytes());
+
+    // Trees have root=0 (SENTINEL) → empty
+    // (data is zeroed, so root is already 0)
+
+    let result = parse_phoenix_market(&Pubkey::new_unique(), &data, 100);
+    assert!(result.is_some());
+    let pool = result.unwrap();
+    assert_eq!(pool.best_bid_price, None);
+    assert_eq!(pool.best_ask_price, None);
+    assert_eq!(pool.token_a_reserve, 0);
+    assert_eq!(pool.token_b_reserve, 0);
+}
+
+// ─── Manifest top-of-book extraction tests ──────────────────────────────────
+
+#[test]
+fn test_parse_manifest_market_with_orderbook() {
+    let base_mint = Pubkey::new_unique();
+    let quote_mint = Pubkey::new_unique();
+
+    // Header (256) + dynamic data for two nodes (each 80 bytes)
+    let mut data = vec![0u8; 500];
+    data[16..48].copy_from_slice(base_mint.as_ref());
+    data[48..80].copy_from_slice(quote_mint.as_ref());
+    data[80..112].copy_from_slice(Pubkey::new_unique().as_ref()); // base_vault
+    data[112..144].copy_from_slice(Pubkey::new_unique().as_ref()); // quote_vault
+
+    // bids_best_index = 0 (byte offset 0 in dynamic section → absolute 256)
+    data[160..164].copy_from_slice(&0u32.to_le_bytes());
+    // asks_best_index = 80 (second node, byte offset 80 → absolute 336)
+    data[168..172].copy_from_slice(&80u32.to_le_bytes());
+
+    // Best bid node at absolute offset 256:
+    // price (u128 D18) at +16 = offset 272
+    let bid_price: u128 = 150_000_000_000_000_000_000; // 150 in D18
+    data[272..288].copy_from_slice(&bid_price.to_le_bytes());
+    // num_base_atoms at +32 = offset 288
+    data[288..296].copy_from_slice(&1000u64.to_le_bytes());
+
+    // Best ask node at absolute offset 336:
+    // price at +16 = 352
+    let ask_price: u128 = 160_000_000_000_000_000_000; // 160 in D18
+    data[352..368].copy_from_slice(&ask_price.to_le_bytes());
+    // num_base_atoms at +32 = 368
+    data[368..376].copy_from_slice(&500u64.to_le_bytes());
+
+    let result = parse_manifest_market(&Pubkey::new_unique(), &data, 100);
+    assert!(result.is_some());
+    let pool = result.unwrap();
+    assert_eq!(pool.dex_type, DexType::Manifest);
+    assert_eq!(pool.best_bid_price, Some(bid_price));
+    assert_eq!(pool.best_ask_price, Some(ask_price));
+    assert_eq!(pool.token_a_reserve, 1000);
+    assert_eq!(pool.token_b_reserve, 500);
+}
+
+#[test]
+fn test_parse_manifest_empty_book() {
+    let base_mint = Pubkey::new_unique();
+    let quote_mint = Pubkey::new_unique();
+    let mut data = vec![0u8; 300];
+    data[16..48].copy_from_slice(base_mint.as_ref());
+    data[48..80].copy_from_slice(quote_mint.as_ref());
+    data[80..112].copy_from_slice(Pubkey::new_unique().as_ref());
+    data[112..144].copy_from_slice(Pubkey::new_unique().as_ref());
+
+    // Set both indices to u32::MAX (sentinel for empty)
+    data[160..164].copy_from_slice(&u32::MAX.to_le_bytes());
+    data[168..172].copy_from_slice(&u32::MAX.to_le_bytes());
+
+    let result = parse_manifest_market(&Pubkey::new_unique(), &data, 100);
+    assert!(result.is_some());
+    let pool = result.unwrap();
+    assert_eq!(pool.best_bid_price, None);
+    assert_eq!(pool.best_ask_price, None);
+    assert_eq!(pool.token_a_reserve, 0);
+    assert_eq!(pool.token_b_reserve, 0);
 }

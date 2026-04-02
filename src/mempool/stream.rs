@@ -668,22 +668,95 @@ fn try_parse_orderbook(pool_address: &Pubkey, data: &[u8], slot: u64) -> Option<
     None
 }
 
+/// Walk a Phoenix sokoban RedBlackTree to find the best (minimum/leftmost) order.
+/// Returns (Some(price_in_ticks), depth_base_atoms) or (None, 0) if tree is empty.
+///
+/// Tree layout at `tree_start`:
+///   +0:  root (u32, 1-based index; 0 = SENTINEL = empty)
+///   +4:  12 bytes padding
+///   +16: NodeAllocator header: size (u64), bump_index (u32), free_list_head (u32)
+///   +32: nodes array, each node 64 bytes
+///
+/// Node layout (64 bytes):
+///   +0:  left (u32), right (u32), parent (u32), color (u32) — 16 bytes registers
+///   +16: price_in_ticks (u64)
+///   +24: order_sequence_number (u64)
+///   +32: trader_index (u64)
+///   +40: num_base_lots (u64)
+///   +48: last_valid_slot (u64)
+///   +56: last_valid_unix_timestamp (u64)
+fn phoenix_tree_best(data: &[u8], tree_start: usize, base_lot_size: u64) -> (Option<u64>, u64) {
+    if data.len() < tree_start + 32 {
+        return (None, 0);
+    }
+
+    let root = u32::from_le_bytes(
+        data[tree_start..tree_start + 4].try_into().unwrap_or([0; 4]),
+    );
+    if root == 0 {
+        return (None, 0);
+    }
+
+    let nodes_start = tree_start + 32;
+
+    // Follow left children from root to find minimum (leftmost) node
+    let mut current = root;
+    for _ in 0..1000 {
+        // safety limit against corrupt data
+        if current == 0 {
+            return (None, 0);
+        }
+        let node_off = nodes_start + (current as usize - 1) * 64;
+        if node_off + 64 > data.len() {
+            return (None, 0);
+        }
+
+        let left =
+            u32::from_le_bytes(data[node_off..node_off + 4].try_into().unwrap_or([0; 4]));
+        if left == 0 {
+            // Found the minimum node
+            let price_in_ticks = u64::from_le_bytes(
+                data[node_off + 16..node_off + 24]
+                    .try_into()
+                    .unwrap_or([0; 8]),
+            );
+            let num_base_lots = u64::from_le_bytes(
+                data[node_off + 40..node_off + 48]
+                    .try_into()
+                    .unwrap_or([0; 8]),
+            );
+            return (
+                Some(price_in_ticks),
+                num_base_lots.saturating_mul(base_lot_size),
+            );
+        }
+        current = left;
+    }
+    (None, 0)
+}
+
 /// Parse a Phoenix V1 market account (header >= 624 bytes, variable total size).
 ///
 /// Layout (byte offsets from MarketHeader):
+///   16  bids_size (u64) — number of nodes allocated for bids tree
+///   24  asks_size (u64) — number of nodes allocated for asks tree
 ///   48  base_mint (Pubkey, 32)
 ///   80  base_vault (Pubkey, 32)
 ///   136 base_lot_size (u64, 8)
 ///   152 quote_mint (Pubkey, 32)
 ///   184 quote_vault (Pubkey, 32)
 ///   240 quote_lot_size (u64, 8)
+///   248 tick_size_in_quote_atoms_per_base_unit (u64, 8)
 ///
-/// Top-of-book extraction deferred — requires walking the Red-Black tree.
-/// For now we discover the pool and index it by token pair; reserves and
-/// prices are set to zero/None.
+/// FIFOMarket starts at offset 624:
+///   +280 taker_fee_bps (u64)
+///   +304 bids RedBlackTree starts (offset 928 absolute)
+///   asks tree starts at 928 + 32 + bids_size * 64
 pub fn parse_phoenix_market(pool_address: &Pubkey, data: &[u8], slot: u64) -> Option<PoolState> {
     const HEADER_LEN: usize = 624;
-    if data.len() < HEADER_LEN { return None; }
+    if data.len() < HEADER_LEN {
+        return None;
+    }
 
     let base_mint = Pubkey::new_from_array(data[48..80].try_into().ok()?);
     let quote_mint = Pubkey::new_from_array(data[152..184].try_into().ok()?);
@@ -692,17 +765,48 @@ pub fn parse_phoenix_market(pool_address: &Pubkey, data: &[u8], slot: u64) -> Op
     let base_lot_size = u64::from_le_bytes(data[136..144].try_into().ok()?);
     let quote_lot_size = u64::from_le_bytes(data[240..248].try_into().ok()?);
 
-    if base_lot_size == 0 || quote_lot_size == 0 { return None; }
-    if base_mint == Pubkey::default() || quote_mint == Pubkey::default() { return None; }
+    if base_lot_size == 0 || quote_lot_size == 0 {
+        return None;
+    }
+    if base_mint == Pubkey::default() || quote_mint == Pubkey::default() {
+        return None;
+    }
+
+    // Read tick_size for price conversion: price = price_in_ticks * tick_size
+    let tick_size = u64::from_le_bytes(data[248..256].try_into().ok()?);
+
+    // Read taker fee from FIFOMarket header (offset 624 + 280 = 904)
+    let fee_bps = if data.len() > 624 + 288 {
+        u64::from_le_bytes(data[624 + 280..624 + 288].try_into().ok()?)
+    } else {
+        DexType::Phoenix.base_fee_bps()
+    };
+
+    // Extract top-of-book from bids and asks RedBlackTrees
+    let bids_size = u64::from_le_bytes(data[16..24].try_into().ok()?) as usize;
+    let asks_size = u64::from_le_bytes(data[24..32].try_into().ok()?) as usize;
+
+    // Bids tree starts at offset 928
+    const BIDS_TREE_START: usize = 928;
+    let (best_bid_ticks, bid_depth) = phoenix_tree_best(data, BIDS_TREE_START, base_lot_size);
+
+    // Asks tree starts after bids: 928 + 32 (header) + bids_size * 64 (nodes)
+    let asks_tree_start = BIDS_TREE_START + 32 + bids_size * 64;
+    let (best_ask_ticks, ask_depth) = phoenix_tree_best(data, asks_tree_start, base_lot_size);
+    let _ = asks_size; // used implicitly via tree root/nodes
+
+    // Convert price_in_ticks to quote atoms per base unit
+    let best_bid_price = best_bid_ticks.map(|ticks| (ticks as u128) * (tick_size as u128));
+    let best_ask_price = best_ask_ticks.map(|ticks| (ticks as u128) * (tick_size as u128));
 
     Some(PoolState {
         address: *pool_address,
         dex_type: DexType::Phoenix,
         token_a_mint: base_mint,
         token_b_mint: quote_mint,
-        token_a_reserve: 0,
-        token_b_reserve: 0,
-        fee_bps: DexType::Phoenix.base_fee_bps(),
+        token_a_reserve: bid_depth,
+        token_b_reserve: ask_depth,
+        fee_bps,
         current_tick: None,
         sqrt_price_x64: None,
         liquidity: None,
@@ -712,9 +816,49 @@ pub fn parse_phoenix_market(pool_address: &Pubkey, data: &[u8], slot: u64) -> Op
             vault_b: Some(quote_vault),
             ..Default::default()
         },
-        best_bid_price: None,
-        best_ask_price: None,
+        best_bid_price,
+        best_ask_price,
     })
+}
+
+/// Read a Manifest RestingOrder at the given DataIndex (byte offset into dynamic section).
+/// Returns (price_d18: Option<u128>, num_base_atoms: u64).
+///
+/// DataIndex is a byte offset; absolute position = 256 (MarketFixed header) + index.
+/// u32::MAX (0xFFFFFFFF) is the sentinel for an empty book side.
+///
+/// RBNode<RestingOrder> layout (80 bytes per node):
+///   +0:  left (u32), right (u32), parent (u32), color+type+pad — 16 bytes
+///   +16: price (u128, LE) — QuoteAtomsPerBaseAtom, D18 fixed-point (scaled by 10^18)
+///   +32: num_base_atoms (u64)
+///   +40: sequence_number (u64)
+///   +48: trader_index (u32)
+///   ...
+fn manifest_read_order(data: &[u8], index: u32) -> (Option<u128>, u64) {
+    if index == u32::MAX {
+        return (None, 0);
+    }
+    let abs_offset = 256 + index as usize;
+    // Need at least up to +40 (price u128 at +16..+32, num_base_atoms u64 at +32..+40)
+    if abs_offset + 40 > data.len() {
+        return (None, 0);
+    }
+
+    let price = u128::from_le_bytes(
+        data[abs_offset + 16..abs_offset + 32]
+            .try_into()
+            .unwrap_or([0; 16]),
+    );
+    let num_base_atoms = u64::from_le_bytes(
+        data[abs_offset + 32..abs_offset + 40]
+            .try_into()
+            .unwrap_or([0; 8]),
+    );
+
+    if price == 0 {
+        return (None, 0);
+    }
+    (Some(price), num_base_atoms)
 }
 
 /// Parse a Manifest market account (fixed header = 256 bytes, variable total size).
@@ -724,27 +868,40 @@ pub fn parse_phoenix_market(pool_address: &Pubkey, data: &[u8], slot: u64) -> Op
 ///   48  quote_mint (Pubkey, 32)
 ///   80  base_vault (Pubkey, 32)
 ///   112 quote_vault (Pubkey, 32)
+///   160 bids_best_index (u32) — DataIndex (byte offset into dynamic section)
+///   168 asks_best_index (u32)
 ///
-/// Top-of-book extraction deferred — tree node layout in the dynamic section
-/// needs careful verification. For now we discover the pool and index by pair.
+/// Prices are D18 fixed-point (scaled by 10^18). The `get_orderbook_output()`
+/// method in pool.rs handles the D18 division for Manifest pools.
 pub fn parse_manifest_market(pool_address: &Pubkey, data: &[u8], slot: u64) -> Option<PoolState> {
     const HEADER_LEN: usize = 256;
-    if data.len() < HEADER_LEN { return None; }
+    if data.len() < HEADER_LEN {
+        return None;
+    }
 
     let base_mint = Pubkey::new_from_array(data[16..48].try_into().ok()?);
     let quote_mint = Pubkey::new_from_array(data[48..80].try_into().ok()?);
     let base_vault = Pubkey::new_from_array(data[80..112].try_into().ok()?);
     let quote_vault = Pubkey::new_from_array(data[112..144].try_into().ok()?);
 
-    if base_mint == Pubkey::default() || quote_mint == Pubkey::default() { return None; }
+    if base_mint == Pubkey::default() || quote_mint == Pubkey::default() {
+        return None;
+    }
+
+    // Extract top-of-book from best bid/ask indices
+    let bids_best_idx = u32::from_le_bytes(data[160..164].try_into().ok()?);
+    let asks_best_idx = u32::from_le_bytes(data[168..172].try_into().ok()?);
+
+    let (best_bid_price, bid_depth) = manifest_read_order(data, bids_best_idx);
+    let (best_ask_price, ask_depth) = manifest_read_order(data, asks_best_idx);
 
     Some(PoolState {
         address: *pool_address,
         dex_type: DexType::Manifest,
         token_a_mint: base_mint,
         token_b_mint: quote_mint,
-        token_a_reserve: 0,
-        token_b_reserve: 0,
+        token_a_reserve: bid_depth,
+        token_b_reserve: ask_depth,
         fee_bps: 0,
         current_tick: None,
         sqrt_price_x64: None,
@@ -755,7 +912,7 @@ pub fn parse_manifest_market(pool_address: &Pubkey, data: &[u8], slot: u64) -> O
             vault_b: Some(quote_vault),
             ..Default::default()
         },
-        best_bid_price: None,
-        best_ask_price: None,
+        best_bid_price,
+        best_ask_price,
     })
 }
