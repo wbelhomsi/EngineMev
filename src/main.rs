@@ -186,8 +186,6 @@ async fn main() -> Result<()> {
             let rt = tokio::runtime::Handle::current();
 
             let mut recent_pools: std::collections::HashMap<solana_sdk::pubkey::Pubkey, u64> = std::collections::HashMap::new();
-            let mut last_submission = std::time::Instant::now() - std::time::Duration::from_secs(5); // allow first immediately
-            const MIN_SUBMISSION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500); // Jito rate limit: 1/sec + safety margin
 
             loop {
                 // Check shutdown
@@ -291,12 +289,6 @@ async fn main() -> Result<()> {
                             continue;
                         }
 
-                        // Rate limit: Jito allows 1 bundle/sec for unauthenticated access
-                        if last_submission.elapsed() < MIN_SUBMISSION_INTERVAL {
-                            tracing::trace!("Rate limited, skipping ({}ms since last)", last_submission.elapsed().as_millis());
-                            continue;
-                        }
-
                         // Get recent blockhash from cache
                         let blockhash = match blockhash_cache.get() {
                             Some(h) => h,
@@ -321,7 +313,6 @@ async fn main() -> Result<()> {
                                     }
                                 });
                                 bundles_submitted += 1;
-                                last_submission = std::time::Instant::now();
                             }
                             Err(e) => {
                                 error!("Bundle build failed: {}", e);
