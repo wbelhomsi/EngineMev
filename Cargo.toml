@@ -28,6 +28,12 @@ bs58 = "0.5"
 bincode = "1"
 base64 = "0.22"
 
+# Orderbook DEX SDKs (Phoenix + Manifest)
+# NOTE: phoenix-sdk-core, manifest-dex, and phoenix-v1 all require solana-program 1.18.x
+# which conflicts with our solana-sdk 2.2 + yellowstone-grpc-client 12.1 stack.
+# We use bytemuck for raw byte parsing of Phoenix/Manifest market accounts instead.
+bytemuck = { version = "1", features = ["derive"] }
+
 # Data structures
 dashmap = "6"
 crossbeam-channel = "0.5"
