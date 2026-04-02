@@ -109,48 +109,36 @@ impl BundleBuilder {
         let ata_program = Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap();
         let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
 
-        // Collect unique mints we need ATAs for, with their token program
-        let token_2022 = Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb").unwrap();
-        let mut ata_mints: Vec<(Pubkey, Pubkey)> = Vec::new(); // (mint, token_program)
+        // Collect unique mints and resolve their token program from cache.
+        // The Geyser stream fetches mint owners (SPL Token vs Token-2022) asynchronously
+        // and caches them in StateCache.mint_programs. This is the authoritative source.
+        let wsol = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
+        let mut ata_mints: Vec<(Pubkey, Pubkey)> = Vec::new();
         for hop in &route.hops {
-            // Look up the pool to find token programs
-            let pool = self.state_cache.get_any(&hop.pool_address);
-            let (prog_a, prog_b) = pool.as_ref()
-                .map(|p| (
-                    p.extra.token_program_a.unwrap_or(token_program),
-                    p.extra.token_program_b.unwrap_or(token_program),
-                ))
-                .unwrap_or((token_program, token_program));
-
-            let input_prog = if hop.input_mint == pool.as_ref().map(|p| p.token_a_mint).unwrap_or_default() { prog_a } else { prog_b };
-            let output_prog = if hop.output_mint == pool.as_ref().map(|p| p.token_a_mint).unwrap_or_default() { prog_a } else { prog_b };
-
-            // Insert or upgrade: if mint already exists with SPL Token but this pool says Token-2022, upgrade
-            for (mint, prog) in [(hop.input_mint, input_prog), (hop.output_mint, output_prog)] {
-                if let Some(existing) = ata_mints.iter_mut().find(|(m, _)| *m == mint) {
-                    // Upgrade to Token-2022 if any pool says so (more specific than default SPL Token)
-                    if prog == token_2022 {
-                        existing.1 = token_2022;
-                    }
-                } else {
+            for mint in [hop.input_mint, hop.output_mint] {
+                if !ata_mints.iter().any(|(m, _)| *m == mint) {
+                    let prog = if mint == wsol {
+                        token_program // wSOL is always SPL Token
+                    } else {
+                        match self.state_cache.get_mint_program(&mint) {
+                            Some(p) => p,
+                            None => {
+                                // Mint program not cached yet — skip this opportunity.
+                                // The async fetch will populate it for next time.
+                                return Err(anyhow::anyhow!(
+                                    "Mint program not cached for {}, skipping (will retry)",
+                                    mint
+                                ));
+                            }
+                        }
+                    };
                     ata_mints.push((mint, prog));
                 }
             }
         }
 
-        // Resolve token programs: if pool data says SPL Token but mint is actually Token-2022,
-        // the ATA creation and swap IX will fail. Check wSOL (always SPL Token) and use
-        // the pool's stored token_program for the rest. This covers DLMM/DAMM v2/CP pools
-        // which store the flag. For Orca/CLMM pools (no flag), we default to SPL Token
-        // which is correct for 99% of their tokens.
-        let wsol = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
-
         // Create ATAs idempotently (no-op if they already exist)
-        for (mint, mint_token_program) in &mut ata_mints {
-            // wSOL is always SPL Token — no need to check
-            if *mint == wsol {
-                *mint_token_program = token_program;
-            }
+        for (mint, mint_token_program) in &ata_mints {
             debug!("ATA create: mint={}, program={}", mint, mint_token_program);
             let ata = derive_ata_with_program(&signer_pubkey, mint, mint_token_program);
             let create_ata_ix = Instruction {

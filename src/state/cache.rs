@@ -33,6 +33,9 @@ pub struct StateCache {
     /// Populated during pool bootstrapping. Geyser gives us vault updates —
     /// this index tells us which pool was affected and which side changed.
     vault_to_pool: Arc<DashMap<Pubkey, (Pubkey, bool)>>,
+    /// Mint address → token program (SPL Token or Token-2022).
+    /// Populated by async getAccountInfo lookups, read by bundle builder.
+    mint_programs: Arc<DashMap<Pubkey, Pubkey>>,
     ttl: Duration,
 }
 
@@ -42,6 +45,7 @@ impl StateCache {
             pools: Arc::new(DashMap::with_capacity(10_000)),
             token_to_pools: Arc::new(DashMap::with_capacity(5_000)),
             vault_to_pool: Arc::new(DashMap::with_capacity(20_000)),
+            mint_programs: Arc::new(DashMap::with_capacity(1_000)),
             ttl,
         }
     }
@@ -122,6 +126,16 @@ impl StateCache {
 
     pub fn is_empty(&self) -> bool {
         self.pools.is_empty()
+    }
+
+    /// Get the token program for a mint (SPL Token or Token-2022).
+    pub fn get_mint_program(&self, mint: &Pubkey) -> Option<Pubkey> {
+        self.mint_programs.get(mint).map(|v| *v.value())
+    }
+
+    /// Set the token program for a mint.
+    pub fn set_mint_program(&self, mint: Pubkey, program: Pubkey) {
+        self.mint_programs.insert(mint, program);
     }
 
     /// Evict pools that haven't been updated in 10 minutes.
