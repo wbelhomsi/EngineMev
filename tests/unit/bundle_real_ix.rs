@@ -311,8 +311,8 @@ fn test_meteora_dlmm_swap_ix_account_count() {
     let ix = build_meteora_dlmm_swap_ix(&signer, &pool, pool.token_a_mint, 2000, 1800);
     assert!(ix.is_some(), "Should produce an instruction with bitmap_extension");
     let ix = ix.unwrap();
-    // 15 fixed + 3 bin arrays = 18
-    assert_eq!(ix.accounts.len(), 18, "DLMM swap2 needs 15 fixed + 3 bin arrays");
+    // 16 fixed + 3 bin arrays = 19 (includes memo program)
+    assert_eq!(ix.accounts.len(), 19, "DLMM swap2 needs 16 fixed + 3 bin arrays");
 }
 
 #[test]

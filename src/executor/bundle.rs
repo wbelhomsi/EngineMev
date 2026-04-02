@@ -103,7 +103,53 @@ impl BundleBuilder {
         min_final_output: u64,
         recent_blockhash: Hash,
     ) -> Result<Transaction> {
-        let mut instructions = Vec::with_capacity(route.hop_count() + 1);
+        let mut instructions = Vec::with_capacity(route.hop_count() * 3 + 2);
+
+        let signer_pubkey = self.searcher_keypair.pubkey();
+        let ata_program = Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap();
+        let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+
+        // Collect unique mints we need ATAs for, with their token program
+        let token_2022 = Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb").unwrap();
+        let mut ata_mints: Vec<(Pubkey, Pubkey)> = Vec::new(); // (mint, token_program)
+        for hop in &route.hops {
+            // Look up the pool to find token programs
+            let pool = self.state_cache.get_any(&hop.pool_address);
+            let (prog_a, prog_b) = pool.as_ref()
+                .map(|p| (
+                    p.extra.token_program_a.unwrap_or(token_program),
+                    p.extra.token_program_b.unwrap_or(token_program),
+                ))
+                .unwrap_or((token_program, token_program));
+
+            let input_prog = if hop.input_mint == pool.as_ref().map(|p| p.token_a_mint).unwrap_or_default() { prog_a } else { prog_b };
+            let output_prog = if hop.output_mint == pool.as_ref().map(|p| p.token_a_mint).unwrap_or_default() { prog_a } else { prog_b };
+
+            if !ata_mints.iter().any(|(m, _)| *m == hop.input_mint) {
+                ata_mints.push((hop.input_mint, input_prog));
+            }
+            if !ata_mints.iter().any(|(m, _)| *m == hop.output_mint) {
+                ata_mints.push((hop.output_mint, output_prog));
+            }
+        }
+
+        // Create ATAs idempotently (no-op if they already exist)
+        for (mint, mint_token_program) in &ata_mints {
+            let ata = derive_ata(&signer_pubkey, mint);
+            let create_ata_ix = Instruction {
+                program_id: ata_program,
+                accounts: vec![
+                    AccountMeta::new(signer_pubkey, true),
+                    AccountMeta::new(ata, false),
+                    AccountMeta::new_readonly(signer_pubkey, false),
+                    AccountMeta::new_readonly(*mint, false),
+                    AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                    AccountMeta::new_readonly(*mint_token_program, false),
+                ],
+                data: vec![1], // 1 = CreateIdempotent
+            };
+            instructions.push(create_ata_ix);
+        }
 
         // Swap instructions — intermediate hops get min_out=0, final hop gets profit floor
         let last_idx = route.hops.len() - 1;
@@ -615,6 +661,7 @@ pub fn build_meteora_dlmm_swap_ix(
 
     let dlmm_program = Pubkey::from_str("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo").unwrap();
     let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+    let memo_program = Pubkey::from_str("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr").unwrap();
 
     let a_to_b = input_mint == pool.token_a_mint; // X -> Y
     let active_id = pool.current_tick.unwrap_or(0);
@@ -686,12 +733,13 @@ pub fn build_meteora_dlmm_swap_ix(
         AccountMeta::new_readonly(pool.token_a_mint, false),// 6: token_x_mint
         AccountMeta::new_readonly(pool.token_b_mint, false),// 7: token_y_mint
         AccountMeta::new(oracle, false),                    // 8: oracle
-        AccountMeta::new(*signer, true),                    // 9: host_fee_in
+        AccountMeta::new_readonly(dlmm_program, false),     // 9: host_fee_in (None — pass program ID for Option)
         AccountMeta::new(*signer, true),                    // 10: user (signer)
         AccountMeta::new_readonly(token_program, false),    // 11: token_x_program
         AccountMeta::new_readonly(token_program, false),    // 12: token_y_program
-        AccountMeta::new_readonly(event_authority, false),  // 13: event_authority
-        AccountMeta::new_readonly(dlmm_program, false),     // 14: program
+        AccountMeta::new_readonly(memo_program, false),       // 13: memo_program
+        AccountMeta::new_readonly(event_authority, false),   // 14: event_authority
+        AccountMeta::new_readonly(dlmm_program, false),      // 15: program
     ];
 
     // Append bin arrays as remaining accounts
