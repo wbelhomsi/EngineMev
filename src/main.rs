@@ -114,6 +114,9 @@ async fn main() -> Result<()> {
     let searcher_keypair = load_keypair(&config.searcher_keypair_path)?;
     let bundle_builder = Arc::new(BundleBuilder::new(searcher_keypair, state_cache.clone()));
 
+    // Warm up relay connections (pre-establish TCP+TLS+HTTP2)
+    multi_relay.warmup().await;
+
     info!("All components initialized, starting pipeline...");
 
     // === Pipeline (post-mempool architecture) ===
