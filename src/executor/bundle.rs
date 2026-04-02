@@ -46,13 +46,15 @@ pub struct BundleBuilder {
     searcher_keypair: Keypair,
     /// Index into tip accounts, rotated per bundle
     tip_account_index: std::sync::atomic::AtomicUsize,
+    state_cache: crate::state::StateCache,
 }
 
 impl BundleBuilder {
-    pub fn new(searcher_keypair: Keypair) -> Self {
+    pub fn new(searcher_keypair: Keypair, state_cache: crate::state::StateCache) -> Self {
         Self {
             searcher_keypair,
             tip_account_index: std::sync::atomic::AtomicUsize::new(0),
+            state_cache,
         }
     }
 
@@ -128,10 +130,24 @@ impl BundleBuilder {
         match hop.dex_type {
             DexType::RaydiumAmm => self.build_raydium_amm_swap(hop, minimum_amount_out),
             DexType::RaydiumClmm => self.build_raydium_clmm_swap(hop),
-            DexType::RaydiumCp => self.build_raydium_amm_swap(hop, minimum_amount_out),
+            DexType::RaydiumCp => {
+                let pool = self.state_cache.get_any(&hop.pool_address)
+                    .ok_or_else(|| anyhow::anyhow!("Pool not found for Raydium CP: {}", hop.pool_address))?;
+                build_raydium_cp_swap_ix(
+                    &self.searcher_keypair.pubkey(), &pool, hop.input_mint,
+                    hop.estimated_output, minimum_amount_out,
+                ).ok_or_else(|| anyhow::anyhow!("Missing pool data for Raydium CP"))
+            }
             DexType::OrcaWhirlpool => self.build_orca_whirlpool_swap(hop),
             DexType::MeteoraDlmm => self.build_meteora_dlmm_swap(hop),
-            DexType::MeteoraDammV2 => self.build_meteora_dlmm_swap(hop),
+            DexType::MeteoraDammV2 => {
+                let pool = self.state_cache.get_any(&hop.pool_address)
+                    .ok_or_else(|| anyhow::anyhow!("Pool not found for DAMM v2: {}", hop.pool_address))?;
+                build_damm_v2_swap_ix(
+                    &self.searcher_keypair.pubkey(), &pool, hop.input_mint,
+                    hop.estimated_output, minimum_amount_out,
+                ).ok_or_else(|| anyhow::anyhow!("Missing pool data for DAMM v2"))
+            }
             DexType::SanctumInfinity => self.build_sanctum_swap(hop, minimum_amount_out),
         }
     }
@@ -282,6 +298,114 @@ fn derive_ata(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
     ];
     let (ata, _) = Pubkey::find_program_address(seeds, &ata_program);
     ata
+}
+
+/// Build a Raydium CP-Swap instruction with the full 13-account layout.
+///
+/// Program: CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C
+/// Discriminator: [0x8f, 0xbe, 0x5a, 0xda, 0xc4, 0x1e, 0x33, 0xde] (swap_base_in)
+pub fn build_raydium_cp_swap_ix(
+    signer: &Pubkey,
+    pool: &crate::router::pool::PoolState,
+    input_mint: Pubkey,
+    amount_in: u64,
+    minimum_amount_out: u64,
+) -> Option<Instruction> {
+    let extra = &pool.extra;
+    let vault_a = extra.vault_a?;
+    let vault_b = extra.vault_b?;
+    let amm_config = extra.config?;
+    let token_prog_a = extra.token_program_a?;
+    let token_prog_b = extra.token_program_b?;
+
+    let cp_program = Pubkey::from_str("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C").unwrap();
+    let (authority, _) = Pubkey::find_program_address(&[], &cp_program);
+    let (observation, _) = Pubkey::find_program_address(
+        &[b"observation", pool.address.as_ref()], &cp_program,
+    );
+
+    let a_to_b = input_mint == pool.token_a_mint;
+    let (input_vault, output_vault) = if a_to_b { (vault_a, vault_b) } else { (vault_b, vault_a) };
+    let (input_token_prog, output_token_prog) = if a_to_b { (token_prog_a, token_prog_b) } else { (token_prog_b, token_prog_a) };
+    let output_mint = if a_to_b { pool.token_b_mint } else { pool.token_a_mint };
+
+    let user_input_ata = derive_ata(signer, &input_mint);
+    let user_output_ata = derive_ata(signer, &output_mint);
+
+    let mut data = Vec::with_capacity(24);
+    data.extend_from_slice(&[0x8f, 0xbe, 0x5a, 0xda, 0xc4, 0x1e, 0x33, 0xde]);
+    data.extend_from_slice(&amount_in.to_le_bytes());
+    data.extend_from_slice(&minimum_amount_out.to_le_bytes());
+
+    let accounts = vec![
+        AccountMeta::new(*signer, true),
+        AccountMeta::new_readonly(authority, false),
+        AccountMeta::new_readonly(amm_config, false),
+        AccountMeta::new(pool.address, false),
+        AccountMeta::new(user_input_ata, false),
+        AccountMeta::new(user_output_ata, false),
+        AccountMeta::new(input_vault, false),
+        AccountMeta::new(output_vault, false),
+        AccountMeta::new_readonly(input_token_prog, false),
+        AccountMeta::new_readonly(output_token_prog, false),
+        AccountMeta::new_readonly(input_mint, false),
+        AccountMeta::new_readonly(output_mint, false),
+        AccountMeta::new(observation, false),
+    ];
+
+    Some(Instruction { program_id: cp_program, accounts, data })
+}
+
+/// Build a Meteora DAMM v2 swap instruction with the full 12-account layout.
+///
+/// Program: cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG
+/// Discriminator: [0x41, 0x4b, 0x3f, 0x4c, 0xeb, 0x5b, 0x5b, 0x88] (swap)
+pub fn build_damm_v2_swap_ix(
+    signer: &Pubkey,
+    pool: &crate::router::pool::PoolState,
+    input_mint: Pubkey,
+    amount_in: u64,
+    minimum_amount_out: u64,
+) -> Option<Instruction> {
+    let extra = &pool.extra;
+    let vault_a = extra.vault_a?;
+    let vault_b = extra.vault_b?;
+
+    let damm_program = Pubkey::from_str("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG").unwrap();
+    let (pool_authority, _) = Pubkey::find_program_address(&[], &damm_program);
+    let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &damm_program);
+
+    let a_to_b = input_mint == pool.token_a_mint;
+    let (input_vault, output_vault) = if a_to_b { (vault_a, vault_b) } else { (vault_b, vault_a) };
+    let output_mint = if a_to_b { pool.token_b_mint } else { pool.token_a_mint };
+
+    let user_input_ata = derive_ata(signer, &input_mint);
+    let user_output_ata = derive_ata(signer, &output_mint);
+
+    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+
+    let mut data = Vec::with_capacity(25);
+    data.extend_from_slice(&[0x41, 0x4b, 0x3f, 0x4c, 0xeb, 0x5b, 0x5b, 0x88]);
+    data.extend_from_slice(&amount_in.to_le_bytes());
+    data.extend_from_slice(&minimum_amount_out.to_le_bytes());
+    data.push(0u8); // swap_mode = 0 (ExactIn)
+
+    let accounts = vec![
+        AccountMeta::new(pool.address, false),
+        AccountMeta::new_readonly(pool_authority, false),
+        AccountMeta::new(input_vault, false),
+        AccountMeta::new(output_vault, false),
+        AccountMeta::new(user_input_ata, false),
+        AccountMeta::new(user_output_ata, false),
+        AccountMeta::new_readonly(input_mint, false),
+        AccountMeta::new_readonly(output_mint, false),
+        AccountMeta::new_readonly(token_program, false),
+        AccountMeta::new_readonly(event_authority, false),
+        AccountMeta::new_readonly(damm_program, false),
+        AccountMeta::new(*signer, true),
+    ];
+
+    Some(Instruction { program_id: damm_program, accounts, data })
 }
 
 /// Build the account list for a Sanctum Infinity SwapExactIn instruction.
