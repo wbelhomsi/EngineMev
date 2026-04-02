@@ -24,8 +24,8 @@ fn setup_cache_with_spread(orca_rate: f64, sanctum_rate: f64) -> (StateCache, Pu
     let orca_addr = Pubkey::new_unique();
     let sanctum_addr = Pubkey::new_unique();
 
-    // Orca pool — 100K SOL for reasonable auto-input (1% = 1K SOL)
-    let orca_sol_reserve = 100_000_000_000_000u64;
+    // Orca pool — 1K SOL reserves (1% auto-input = 10 SOL, keeps profit under sanity cap)
+    let orca_sol_reserve = 1_000_000_000_000u64;
     let orca_jitosol_reserve = (orca_sol_reserve as f64 / orca_rate) as u64;
     cache.upsert(orca_addr, PoolState {
         address: orca_addr,
@@ -64,8 +64,10 @@ fn setup_cache_with_spread(orca_rate: f64, sanctum_rate: f64) -> (StateCache, Pu
 
 #[test]
 fn test_e2e_profitable_arb_pipeline() {
-    // Orca rate 1.050, Sanctum rate 1.082 -> ~3% spread -> profitable after fees
-    let (cache, orca_addr, _sanctum_addr) = setup_cache_with_spread(1.050, 1.082);
+    // Orca rate 1.070, Sanctum rate 1.082 -> ~1.1% spread -> profitable but under sanity cap
+    // Orca pool has 100K SOL reserves, 1% auto-input = 1K SOL, profit ~11 SOL.
+    // Reduce Orca pool size to keep profit under 10 SOL cap.
+    let (cache, orca_addr, _sanctum_addr) = setup_cache_with_spread(1.070, 1.082);
 
     let calculator = RouteCalculator::new(cache.clone(), 3);
     let simulator = ProfitSimulator::new(cache.clone(), 0.50, 1000);
