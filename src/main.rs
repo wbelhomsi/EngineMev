@@ -181,6 +181,8 @@ async fn main() -> Result<()> {
             // The relay fan-out is async (HTTP calls), but the router loop is sync.
             let rt = tokio::runtime::Handle::current();
 
+            let mut recent_pools: std::collections::HashMap<solana_sdk::pubkey::Pubkey, u64> = std::collections::HashMap::new();
+
             loop {
                 // Check shutdown
                 if *shutdown_rx.borrow() {
@@ -195,6 +197,18 @@ async fn main() -> Result<()> {
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 };
+
+                // Dedup: skip if we already processed this pool in this slot
+                if recent_pools.get(&change.pool_address) == Some(&change.slot) {
+                    continue;
+                }
+                recent_pools.insert(change.pool_address, change.slot);
+
+                // Evict old entries periodically
+                if recent_pools.len() > 10_000 {
+                    let current_slot = change.slot;
+                    recent_pools.retain(|_, slot| current_slot.saturating_sub(*slot) < 10);
+                }
 
                 // Pool state was already updated by the Geyser stream.
                 let pool_state = match state_cache.get_any(&change.pool_address) {
@@ -266,6 +280,11 @@ async fn main() -> Result<()> {
                             continue;
                         }
 
+                        if !can_submit_route(&route) {
+                            tracing::debug!("Route has unsupported DEX, skipping submission");
+                            continue;
+                        }
+
                         // Get recent blockhash from cache
                         let blockhash = match blockhash_cache.get() {
                             Some(h) => h,
@@ -334,6 +353,15 @@ async fn main() -> Result<()> {
 
     info!("Engine shutdown complete");
     Ok(())
+}
+
+/// Check if all hops in a route use DEXes with real swap IX builders.
+/// Only Raydium CP and Meteora DAMM v2 have real IXs — others use placeholders.
+fn can_submit_route(route: &router::pool::ArbRoute) -> bool {
+    route.hops.iter().all(|hop| matches!(
+        hop.dex_type,
+        router::pool::DexType::RaydiumCp | router::pool::DexType::MeteoraDammV2
+    ))
 }
 
 /// Create Sanctum virtual pools for each supported LST.
