@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use solana_mev_bot::config;
 use solana_mev_bot::mempool::PoolStateChange;
-use solana_mev_bot::router::pool::{DexType, DetectedSwap, PoolState};
+use solana_mev_bot::router::pool::{DexType, DetectedSwap, PoolExtra, PoolState};
 use solana_mev_bot::router::{RouteCalculator, ProfitSimulator};
 use solana_mev_bot::state::StateCache;
 
@@ -39,6 +39,7 @@ fn setup_cache_with_spread(orca_rate: f64, sanctum_rate: f64) -> (StateCache, Pu
         sqrt_price_x64: None,
         liquidity: None,
         last_slot: 100,
+        extra: PoolExtra::default(),
     });
 
     // Sanctum virtual pool
@@ -55,6 +56,7 @@ fn setup_cache_with_spread(orca_rate: f64, sanctum_rate: f64) -> (StateCache, Pu
         sqrt_price_x64: None,
         liquidity: None,
         last_slot: 100,
+        extra: PoolExtra::default(),
     });
 
     (cache, orca_addr, sanctum_addr)

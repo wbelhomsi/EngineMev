@@ -2,7 +2,7 @@ use solana_sdk::pubkey::Pubkey;
 use std::time::Duration;
 
 use solana_mev_bot::config;
-use solana_mev_bot::router::pool::{ArbRoute, DexType, PoolState, RouteHop};
+use solana_mev_bot::router::pool::{ArbRoute, DexType, PoolExtra, PoolState, RouteHop};
 use solana_mev_bot::router::ProfitSimulator;
 use solana_mev_bot::state::StateCache;
 
@@ -30,6 +30,7 @@ fn make_cache_with_pools(orca_addr: Pubkey, sanctum_addr: Pubkey) -> StateCache 
         sqrt_price_x64: None,
         liquidity: None,
         last_slot: 100,
+        extra: PoolExtra::default(),
     });
 
     // Sanctum virtual pool: rate 1.082
@@ -46,6 +47,7 @@ fn make_cache_with_pools(orca_addr: Pubkey, sanctum_addr: Pubkey) -> StateCache 
         sqrt_price_x64: None,
         liquidity: None,
         last_slot: 100,
+        extra: PoolExtra::default(),
     });
 
     cache

@@ -1,6 +1,6 @@
 use solana_sdk::pubkey::Pubkey;
 
-use solana_mev_bot::router::pool::{DexType, PoolState};
+use solana_mev_bot::router::pool::{DexType, PoolExtra, PoolState};
 
 #[test]
 fn test_sanctum_infinity_base_fee() {
@@ -27,6 +27,7 @@ fn test_sanctum_virtual_pool_rate() {
         sqrt_price_x64: None,
         liquidity: None,
         last_slot: 100,
+        extra: PoolExtra::default(),
     };
 
     // Swap 1_000_000_000 lamports (1 jitoSOL) worth of jitoSOL -> SOL
@@ -63,6 +64,7 @@ fn test_sanctum_virtual_pool_fee_deduction() {
         sqrt_price_x64: None,
         liquidity: None,
         last_slot: 100,
+        extra: PoolExtra::default(),
     };
 
     let pool_no_fee = PoolState {

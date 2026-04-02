@@ -28,6 +28,16 @@ impl DexType {
     }
 }
 
+/// Extra pool data needed for building swap instructions.
+#[derive(Debug, Clone, Default)]
+pub struct PoolExtra {
+    pub vault_a: Option<Pubkey>,
+    pub vault_b: Option<Pubkey>,
+    pub config: Option<Pubkey>,
+    pub token_program_a: Option<Pubkey>,
+    pub token_program_b: Option<Pubkey>,
+}
+
 /// Represents the on-chain state of an AMM pool.
 /// This is the core data structure — route calculation and profit
 /// simulation both read from this.
@@ -49,6 +59,8 @@ pub struct PoolState {
     pub liquidity: Option<u128>,
     /// Slot when this state was last observed
     pub last_slot: u64,
+    /// Extra data for building swap instructions (vaults, config, token programs)
+    pub extra: PoolExtra,
 }
 
 impl PoolState {
