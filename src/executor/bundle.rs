@@ -633,11 +633,11 @@ pub fn build_meteora_dlmm_swap_ix(
         &[b"__event_authority"], &dlmm_program,
     );
 
-    // Bitmap extension PDA — may not exist for all pools.
-    // If uninitialized (owned by System Program), the DLMM program rejects it.
-    // Use the pool address as fallback (owned by DLMM program, passes ownership check).
-    // TODO: check on-chain existence and only pass real bitmap extension when it exists.
-    let bitmap_extension = pool.address; // safe fallback — pool is owned by DLMM program
+    // Bitmap extension: only needed when active_id is near the edge of internal bitmap range
+    // (±512 bin array indices). Most pools don't need it. If the PDA doesn't exist on-chain,
+    // just don't include it — the swap can't traverse beyond the internal bitmap but that's fine
+    // for single-bin arbs. To properly support it, we'd need to check on-chain existence at
+    // pool discovery time and store in PoolExtra.
 
     // Bin array PDAs: compute the current bin array index and get a few in the swap direction
     let bin_array_index = if active_id >= 0 {
@@ -668,8 +668,13 @@ pub fn build_meteora_dlmm_swap_ix(
     data.extend_from_slice(&[0x41, 0x4b, 0x3f, 0x4c, 0xeb, 0x5b, 0x5b, 0x88]);
     data.extend_from_slice(&amount_in.to_le_bytes());
     data.extend_from_slice(&minimum_amount_out.to_le_bytes());
-    // remaining_accounts_info: Vec length = 0 (Borsh: 4 bytes of 0)
+    // remaining_accounts_info: empty Vec (Borsh: 4 bytes of 0)
     data.extend_from_slice(&0u32.to_le_bytes());
+
+    // Bitmap extension — required by Anchor deserialization for swap2.
+    // Must be a real on-chain account owned by DLMM program. If pool doesn't
+    // have one (most don't), we can't build the IX. Checked at pool discovery.
+    let bitmap_extension = extra.bitmap_extension?;
 
     let mut accounts = vec![
         AccountMeta::new(pool.address, false),              // 0: lb_pair
@@ -681,7 +686,7 @@ pub fn build_meteora_dlmm_swap_ix(
         AccountMeta::new_readonly(pool.token_a_mint, false),// 6: token_x_mint
         AccountMeta::new_readonly(pool.token_b_mint, false),// 7: token_y_mint
         AccountMeta::new(oracle, false),                    // 8: oracle
-        AccountMeta::new(*signer, true),                    // 9: host_fee_in (using signer as placeholder)
+        AccountMeta::new(*signer, true),                    // 9: host_fee_in
         AccountMeta::new(*signer, true),                    // 10: user (signer)
         AccountMeta::new_readonly(token_program, false),    // 11: token_x_program
         AccountMeta::new_readonly(token_program, false),    // 12: token_y_program
