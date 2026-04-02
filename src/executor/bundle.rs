@@ -671,10 +671,10 @@ pub fn build_meteora_dlmm_swap_ix(
     // remaining_accounts_info: empty Vec (Borsh: 4 bytes of 0)
     data.extend_from_slice(&0u32.to_le_bytes());
 
-    // Bitmap extension — required by Anchor deserialization for swap2.
-    // Must be a real on-chain account owned by DLMM program. If pool doesn't
-    // have one (most don't), we can't build the IX. Checked at pool discovery.
-    let bitmap_extension = extra.bitmap_extension?;
+    // Bitmap extension — Option<UncheckedAccount> in the DLMM program.
+    // If the pool doesn't have one, pass the DLMM program ID itself.
+    // Anchor interprets the executing program ID as None for Option accounts.
+    let bitmap_extension = extra.bitmap_extension.unwrap_or(dlmm_program);
 
     let mut accounts = vec![
         AccountMeta::new(pool.address, false),              // 0: lb_pair
