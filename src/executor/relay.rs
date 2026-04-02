@@ -166,13 +166,6 @@ impl MultiRelay {
                             relay_result.bundle_id,
                             relay_result.latency_us,
                         );
-                    } else if let Some(ref err) = relay_result.error {
-                        debug!(
-                            "Bundle rejected by {}: {} (latency={}us)",
-                            relay_result.relay_name,
-                            err,
-                            relay_result.latency_us,
-                        );
                     }
                     results.push(relay_result);
                 }
