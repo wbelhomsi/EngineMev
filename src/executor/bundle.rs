@@ -125,17 +125,28 @@ impl BundleBuilder {
             let input_prog = if hop.input_mint == pool.as_ref().map(|p| p.token_a_mint).unwrap_or_default() { prog_a } else { prog_b };
             let output_prog = if hop.output_mint == pool.as_ref().map(|p| p.token_a_mint).unwrap_or_default() { prog_a } else { prog_b };
 
-            if !ata_mints.iter().any(|(m, _)| *m == hop.input_mint) {
-                ata_mints.push((hop.input_mint, input_prog));
-            }
-            if !ata_mints.iter().any(|(m, _)| *m == hop.output_mint) {
-                ata_mints.push((hop.output_mint, output_prog));
+            // Insert or upgrade: if mint already exists with SPL Token but this pool says Token-2022, upgrade
+            for (mint, prog) in [(hop.input_mint, input_prog), (hop.output_mint, output_prog)] {
+                if let Some(existing) = ata_mints.iter_mut().find(|(m, _)| *m == mint) {
+                    // Upgrade to Token-2022 if any pool says so (more specific than default SPL Token)
+                    if prog == token_2022 {
+                        existing.1 = token_2022;
+                    }
+                } else {
+                    ata_mints.push((mint, prog));
+                }
             }
         }
 
         // Create ATAs idempotently (no-op if they already exist)
-        for (mint, mint_token_program) in &ata_mints {
-            let ata = derive_ata(&signer_pubkey, mint);
+        for (mint, mint_token_program) in &mut ata_mints {
+            // Heuristic: pump.fun tokens (vanity addresses ending in "pump") are Token-2022
+            let mint_str = mint.to_string();
+            if mint_str.ends_with("pump") && *mint_token_program != token_2022 {
+                *mint_token_program = token_2022;
+            }
+            debug!("ATA create: mint={}, program={}", mint, mint_token_program);
+            let ata = derive_ata_with_program(&signer_pubkey, mint, mint_token_program);
             let create_ata_ix = Instruction {
                 program_id: ata_program,
                 accounts: vec![
@@ -336,7 +347,10 @@ impl BundleBuilder {
 /// Derive an Associated Token Account address.
 /// ATA = PDA([wallet, TOKEN_PROGRAM_ID, mint], ATA_PROGRAM_ID)
 fn derive_ata(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
-    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+    derive_ata_with_program(wallet, mint, &Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap())
+}
+
+fn derive_ata_with_program(wallet: &Pubkey, mint: &Pubkey, token_program: &Pubkey) -> Pubkey {
     let ata_program = Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap();
     let seeds = &[
         wallet.as_ref(),
@@ -666,9 +680,14 @@ pub fn build_meteora_dlmm_swap_ix(
     let a_to_b = input_mint == pool.token_a_mint; // X -> Y
     let active_id = pool.current_tick.unwrap_or(0);
 
-    let user_input_ata = derive_ata(signer, &input_mint);
+    // Determine token programs for correct ATA derivation
+    let prog_a = extra.token_program_a.unwrap_or(token_program);
+    let prog_b = extra.token_program_b.unwrap_or(token_program);
+    let (input_prog, output_prog) = if a_to_b { (prog_a, prog_b) } else { (prog_b, prog_a) };
     let output_mint = if a_to_b { pool.token_b_mint } else { pool.token_a_mint };
-    let user_output_ata = derive_ata(signer, &output_mint);
+
+    let user_input_ata = derive_ata_with_program(signer, &input_mint, &input_prog);
+    let user_output_ata = derive_ata_with_program(signer, &output_mint, &output_prog);
 
     // Oracle PDA
     let (oracle, _) = Pubkey::find_program_address(
@@ -735,8 +754,8 @@ pub fn build_meteora_dlmm_swap_ix(
         AccountMeta::new(oracle, false),                    // 8: oracle
         AccountMeta::new_readonly(dlmm_program, false),     // 9: host_fee_in (None — pass program ID for Option)
         AccountMeta::new(*signer, true),                    // 10: user (signer)
-        AccountMeta::new_readonly(token_program, false),    // 11: token_x_program
-        AccountMeta::new_readonly(token_program, false),    // 12: token_y_program
+        AccountMeta::new_readonly(prog_a, false),             // 11: token_x_program
+        AccountMeta::new_readonly(prog_b, false),            // 12: token_y_program
         AccountMeta::new_readonly(memo_program, false),       // 13: memo_program
         AccountMeta::new_readonly(event_authority, false),   // 14: event_authority
         AccountMeta::new_readonly(dlmm_program, false),      // 15: program
