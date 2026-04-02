@@ -2,7 +2,7 @@ use solana_sdk::pubkey::Pubkey;
 use std::time::Duration;
 
 use solana_mev_bot::config;
-use solana_mev_bot::router::pool::{DexType, DetectedSwap, PoolState};
+use solana_mev_bot::router::pool::{DexType, DetectedSwap, PoolExtra, PoolState};
 use solana_mev_bot::router::RouteCalculator;
 use solana_mev_bot::state::StateCache;
 
@@ -30,6 +30,7 @@ fn sanctum_virtual_pool(rate: f64, address: Pubkey) -> PoolState {
         sqrt_price_x64: None,
         liquidity: None,
         last_slot: 100,
+        extra: PoolExtra::default(),
     }
 }
 
@@ -47,6 +48,7 @@ fn dex_pool(dex_type: DexType, address: Pubkey, sol_reserve: u64, jitosol_reserv
         sqrt_price_x64: None,
         liquidity: None,
         last_slot: 100,
+        extra: PoolExtra::default(),
     }
 }
 

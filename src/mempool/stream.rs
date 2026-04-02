@@ -228,7 +228,7 @@ pub struct StreamStats {
 
 // ─── Per-DEX pool state parsers ───────────────────────────────────────────────
 
-use crate::router::pool::{DexType, PoolState};
+use crate::router::pool::{DexType, PoolExtra, PoolState};
 
 /// Fetch vault balances for a Raydium AMM/CP pool and update reserves in cache.
 /// Uses dataSlice to fetch only the 8-byte balance from each vault.
@@ -354,6 +354,11 @@ pub fn parse_orca_whirlpool(pool_address: &Pubkey, data: &[u8], slot: u64) -> Op
         sqrt_price_x64: Some(sqrt_price_x64),
         liquidity: Some(liquidity),
         last_slot: slot,
+        extra: PoolExtra {
+            vault_a: Some(Pubkey::new_from_array(data[133..165].try_into().ok()?)),
+            vault_b: Some(Pubkey::new_from_array(data[213..245].try_into().ok()?)),
+            ..Default::default()
+        },
     })
 }
 
@@ -397,6 +402,11 @@ pub fn parse_raydium_clmm(pool_address: &Pubkey, data: &[u8], slot: u64) -> Opti
         sqrt_price_x64: Some(sqrt_price_x64),
         liquidity: Some(liquidity),
         last_slot: slot,
+        extra: PoolExtra {
+            vault_a: Some(Pubkey::new_from_array(data[137..169].try_into().ok()?)),
+            vault_b: Some(Pubkey::new_from_array(data[169..201].try_into().ok()?)),
+            ..Default::default()
+        },
     })
 }
 
@@ -443,6 +453,11 @@ pub fn parse_meteora_dlmm(pool_address: &Pubkey, data: &[u8], slot: u64) -> Opti
         sqrt_price_x64: None,
         liquidity: None,
         last_slot: slot,
+        extra: PoolExtra {
+            vault_a: Some(Pubkey::new_from_array(data[152..184].try_into().ok()?)),
+            vault_b: Some(Pubkey::new_from_array(data[184..216].try_into().ok()?)),
+            ..Default::default()
+        },
     })
 }
 
@@ -498,6 +513,11 @@ pub fn parse_meteora_damm_v2(pool_address: &Pubkey, data: &[u8], slot: u64) -> O
         sqrt_price_x64,
         liquidity,
         last_slot: slot,
+        extra: PoolExtra {
+            vault_a: Some(Pubkey::new_from_array(data[232..264].try_into().ok()?)),
+            vault_b: Some(Pubkey::new_from_array(data[264..296].try_into().ok()?)),
+            ..Default::default()
+        },
     })
 }
 
@@ -541,6 +561,11 @@ pub fn parse_raydium_amm_v4(
         sqrt_price_x64: None,
         liquidity: None,
         last_slot: slot,
+        extra: PoolExtra {
+            vault_a: Some(base_vault),
+            vault_b: Some(quote_vault),
+            ..Default::default()
+        },
     };
 
     Some((pool, (base_vault, quote_vault)))
@@ -553,24 +578,30 @@ pub fn parse_raydium_amm_v4(
 ///
 /// Layout (byte offsets):
 ///   0   discriminator (8 bytes): [247, 237, 227, 245, 215, 195, 222, 70]
+///   8   amm_config (Pubkey, 32)
 ///   72  token_0_vault (Pubkey, 32)
 ///   104 token_1_vault (Pubkey, 32)
 ///   168 token_0_mint (Pubkey, 32)
 ///   200 token_1_mint (Pubkey, 32)
+///   232 token_0_program (Pubkey, 32)
+///   264 token_1_program (Pubkey, 32)
 pub fn parse_raydium_cp(
     pool_address: &Pubkey,
     data: &[u8],
     slot: u64,
 ) -> Option<(PoolState, (Pubkey, Pubkey))> {
-    const MIN_LEN: usize = 232;
+    const MIN_LEN: usize = 296;
     if data.len() < MIN_LEN {
         return None;
     }
 
+    let amm_config = Pubkey::new_from_array(data[8..40].try_into().ok()?);
     let vault_0 = Pubkey::new_from_array(data[72..104].try_into().ok()?);
     let vault_1 = Pubkey::new_from_array(data[104..136].try_into().ok()?);
     let mint_0 = Pubkey::new_from_array(data[168..200].try_into().ok()?);
     let mint_1 = Pubkey::new_from_array(data[200..232].try_into().ok()?);
+    let token_0_program = Pubkey::new_from_array(data[232..264].try_into().ok()?);
+    let token_1_program = Pubkey::new_from_array(data[264..296].try_into().ok()?);
 
     let pool = PoolState {
         address: *pool_address,
@@ -584,6 +615,13 @@ pub fn parse_raydium_cp(
         sqrt_price_x64: None,
         liquidity: None,
         last_slot: slot,
+        extra: PoolExtra {
+            vault_a: Some(vault_0),
+            vault_b: Some(vault_1),
+            config: Some(amm_config),
+            token_program_a: Some(token_0_program),
+            token_program_b: Some(token_1_program),
+        },
     };
 
     Some((pool, (vault_0, vault_1)))

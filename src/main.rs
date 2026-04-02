@@ -346,7 +346,7 @@ async fn main() -> Result<()> {
 /// fetched from on-chain stake pool state at startup (total_lamports / pool_token_supply).
 /// The Geyser stream will keep them updated as Sanctum reserve ATAs change.
 fn bootstrap_sanctum_pools(state_cache: &state::StateCache) {
-    use router::pool::{DexType, PoolState};
+    use router::pool::{DexType, PoolExtra, PoolState};
 
     let sol = config::sol_mint();
     const SYNTHETIC_RESERVE_BASE: u64 = 1_000_000_000_000_000; // 1M SOL in lamports
@@ -388,6 +388,7 @@ fn bootstrap_sanctum_pools(state_cache: &state::StateCache) {
             sqrt_price_x64: None,
             liquidity: None,
             last_slot: 0,
+            extra: PoolExtra::default(),
         };
 
         state_cache.upsert(virtual_pool_addr, pool);
