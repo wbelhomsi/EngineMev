@@ -77,13 +77,19 @@ impl BundleBuilder {
         let arb_tx = self.build_arb_transaction_with_tip(route, tip_lamports, min_final_output, recent_blockhash)?;
         bundle_txs.push(bincode::serialize(&arb_tx)?);
 
-        debug!(
-            "Built bundle: {} txs, tip={} lamports, min_out={}, route={} hops",
-            bundle_txs.len(),
-            tip_lamports,
-            min_final_output,
-            route.hop_count(),
-        );
+        // Log the base64 transaction for simulation debugging
+        {
+            use base64::{engine::general_purpose, Engine as _};
+            let tx_b64 = general_purpose::STANDARD.encode(&bundle_txs[0]);
+            debug!(
+                "Built bundle: {} txs, tip={} lamports, min_out={}, route={} hops, tx_b64={}",
+                bundle_txs.len(),
+                tip_lamports,
+                min_final_output,
+                route.hop_count(),
+                tx_b64,
+            );
+        }
 
         Ok(bundle_txs)
     }
@@ -627,10 +633,11 @@ pub fn build_meteora_dlmm_swap_ix(
         &[b"__event_authority"], &dlmm_program,
     );
 
-    // Bitmap extension PDA
-    let (bitmap_extension, _) = Pubkey::find_program_address(
-        &[b"bitmap", pool.address.as_ref()], &dlmm_program,
-    );
+    // Bitmap extension PDA — may not exist for all pools.
+    // If uninitialized (owned by System Program), the DLMM program rejects it.
+    // Use the pool address as fallback (owned by DLMM program, passes ownership check).
+    // TODO: check on-chain existence and only pass real bitmap extension when it exists.
+    let bitmap_extension = pool.address; // safe fallback — pool is owned by DLMM program
 
     // Bin array PDAs: compute the current bin array index and get a few in the swap direction
     let bin_array_index = if active_id >= 0 {
