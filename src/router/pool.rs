@@ -36,6 +36,10 @@ pub struct PoolExtra {
     pub config: Option<Pubkey>,
     pub token_program_a: Option<Pubkey>,
     pub token_program_b: Option<Pubkey>,
+    /// Tick spacing for CLMM pools (Orca Whirlpool, Raydium CLMM)
+    pub tick_spacing: Option<u16>,
+    /// Observation state account (Raydium CLMM)
+    pub observation: Option<Pubkey>,
 }
 
 /// Represents the on-chain state of an AMM pool.

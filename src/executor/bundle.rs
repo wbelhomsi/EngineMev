@@ -129,7 +129,14 @@ impl BundleBuilder {
     ) -> Result<Instruction> {
         match hop.dex_type {
             DexType::RaydiumAmm => self.build_raydium_amm_swap(hop, minimum_amount_out),
-            DexType::RaydiumClmm => self.build_raydium_clmm_swap(hop),
+            DexType::RaydiumClmm => {
+                let pool = self.state_cache.get_any(&hop.pool_address)
+                    .ok_or_else(|| anyhow::anyhow!("Pool not found for CLMM: {}", hop.pool_address))?;
+                build_raydium_clmm_swap_ix(
+                    &self.searcher_keypair.pubkey(), &pool, hop.input_mint,
+                    hop.estimated_output, minimum_amount_out,
+                ).ok_or_else(|| anyhow::anyhow!("Missing pool data for Raydium CLMM"))
+            }
             DexType::RaydiumCp => {
                 let pool = self.state_cache.get_any(&hop.pool_address)
                     .ok_or_else(|| anyhow::anyhow!("Pool not found for Raydium CP: {}", hop.pool_address))?;
@@ -138,8 +145,22 @@ impl BundleBuilder {
                     hop.estimated_output, minimum_amount_out,
                 ).ok_or_else(|| anyhow::anyhow!("Missing pool data for Raydium CP"))
             }
-            DexType::OrcaWhirlpool => self.build_orca_whirlpool_swap(hop),
-            DexType::MeteoraDlmm => self.build_meteora_dlmm_swap(hop),
+            DexType::OrcaWhirlpool => {
+                let pool = self.state_cache.get_any(&hop.pool_address)
+                    .ok_or_else(|| anyhow::anyhow!("Pool not found for Orca: {}", hop.pool_address))?;
+                build_orca_whirlpool_swap_ix(
+                    &self.searcher_keypair.pubkey(), &pool, hop.input_mint,
+                    hop.estimated_output, minimum_amount_out,
+                ).ok_or_else(|| anyhow::anyhow!("Missing pool data for Orca Whirlpool"))
+            }
+            DexType::MeteoraDlmm => {
+                let pool = self.state_cache.get_any(&hop.pool_address)
+                    .ok_or_else(|| anyhow::anyhow!("Pool not found for DLMM: {}", hop.pool_address))?;
+                build_meteora_dlmm_swap_ix(
+                    &self.searcher_keypair.pubkey(), &pool, hop.input_mint,
+                    hop.estimated_output, minimum_amount_out,
+                ).ok_or_else(|| anyhow::anyhow!("Missing pool data for Meteora DLMM"))
+            }
             DexType::MeteoraDammV2 => {
                 let pool = self.state_cache.get_any(&hop.pool_address)
                     .ok_or_else(|| anyhow::anyhow!("Pool not found for DAMM v2: {}", hop.pool_address))?;
@@ -176,48 +197,6 @@ impl BundleBuilder {
                 AccountMeta::new_readonly(hop.pool_address, false),
             ],
             data,
-        })
-    }
-
-    fn build_raydium_clmm_swap(
-        &self,
-        hop: &crate::router::pool::RouteHop,
-    ) -> Result<Instruction> {
-        // TODO: Anchor-encoded swap with tick array accounts
-        Ok(Instruction {
-            program_id: crate::config::programs::raydium_clmm(),
-            accounts: vec![
-                AccountMeta::new_readonly(hop.pool_address, false),
-            ],
-            data: vec![],
-        })
-    }
-
-    fn build_orca_whirlpool_swap(
-        &self,
-        hop: &crate::router::pool::RouteHop,
-    ) -> Result<Instruction> {
-        // TODO: Anchor-encoded swap with tick array + oracle accounts
-        Ok(Instruction {
-            program_id: crate::config::programs::orca_whirlpool(),
-            accounts: vec![
-                AccountMeta::new_readonly(hop.pool_address, false),
-            ],
-            data: vec![],
-        })
-    }
-
-    fn build_meteora_dlmm_swap(
-        &self,
-        hop: &crate::router::pool::RouteHop,
-    ) -> Result<Instruction> {
-        // TODO: DLMM bin-step swap encoding
-        Ok(Instruction {
-            program_id: crate::config::programs::meteora_dlmm(),
-            accounts: vec![
-                AccountMeta::new_readonly(hop.pool_address, false),
-            ],
-            data: vec![],
         })
     }
 
@@ -406,6 +385,293 @@ pub fn build_damm_v2_swap_ix(
     ];
 
     Some(Instruction { program_id: damm_program, accounts, data })
+}
+
+/// Floor division that rounds toward negative infinity (needed for tick array computation).
+fn floor_div(dividend: i32, divisor: i32) -> i32 {
+    if dividend % divisor == 0 || dividend.signum() == divisor.signum() {
+        dividend / divisor
+    } else {
+        dividend / divisor - 1
+    }
+}
+
+/// Build an Orca Whirlpool swap_v2 instruction with full account layout.
+///
+/// Program: whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc
+/// Discriminator: [0x2b, 0x04, 0xed, 0x0b, 0x1a, 0xc9, 0x1e, 0x62] (swap_v2)
+/// Accounts: 12 (token_program, token_authority, whirlpool, ata_a, vault_a, ata_b, vault_b,
+///           tick_array_0, tick_array_1, tick_array_2, oracle, memo_program)
+pub fn build_orca_whirlpool_swap_ix(
+    signer: &Pubkey,
+    pool: &crate::router::pool::PoolState,
+    input_mint: Pubkey,
+    amount_in: u64,
+    minimum_amount_out: u64,
+) -> Option<Instruction> {
+    let extra = &pool.extra;
+    let vault_a = extra.vault_a?;
+    let vault_b = extra.vault_b?;
+    let tick_spacing = extra.tick_spacing?;
+
+    let whirlpool_program = Pubkey::from_str("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc").unwrap();
+    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+    let memo_program = Pubkey::from_str("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr").unwrap();
+
+    let a_to_b = input_mint == pool.token_a_mint;
+    let tick_current = pool.current_tick.unwrap_or(0);
+
+    // Oracle PDA
+    let (oracle, _) = Pubkey::find_program_address(
+        &[b"oracle", pool.address.as_ref()], &whirlpool_program,
+    );
+
+    // Tick array PDAs (3 arrays, string-encoded start index)
+    let ticks_in_array: i32 = 88 * tick_spacing as i32;
+    let start_base = floor_div(tick_current, ticks_in_array) * ticks_in_array;
+
+    let offsets: [i32; 3] = if a_to_b {
+        [0, -1, -2]
+    } else if tick_current + tick_spacing as i32 >= start_base + ticks_in_array {
+        [1, 2, 3]
+    } else {
+        [0, 1, 2]
+    };
+
+    let tick_arrays: Vec<Pubkey> = offsets.iter().map(|&o| {
+        let start = start_base + o * ticks_in_array;
+        Pubkey::find_program_address(
+            &[b"tick_array", pool.address.as_ref(), start.to_string().as_bytes()],
+            &whirlpool_program,
+        ).0
+    }).collect();
+
+    // sqrt_price_limit
+    let sqrt_price_limit: u128 = if a_to_b { 4295048016u128 } else { 79226673515401279992447579055u128 };
+
+    // User token accounts
+    let user_ata_a = derive_ata(signer, &pool.token_a_mint);
+    let user_ata_b = derive_ata(signer, &pool.token_b_mint);
+
+    // Discriminator: swap_v2 [0x2b, 0x04, 0xed, 0x0b, 0x1a, 0xc9, 0x1e, 0x62]
+    let mut data = Vec::with_capacity(43);
+    data.extend_from_slice(&[0x2b, 0x04, 0xed, 0x0b, 0x1a, 0xc9, 0x1e, 0x62]);
+    data.extend_from_slice(&amount_in.to_le_bytes());
+    data.extend_from_slice(&minimum_amount_out.to_le_bytes());
+    data.extend_from_slice(&sqrt_price_limit.to_le_bytes());
+    data.push(1u8); // is_exact_in = true
+    data.push(if a_to_b { 1u8 } else { 0u8 }); // a_to_b
+    data.push(0u8); // remaining_accounts_info = None
+
+    let accounts = vec![
+        AccountMeta::new_readonly(token_program, false),  // 0
+        AccountMeta::new(*signer, true),                   // 1: token_authority
+        AccountMeta::new(pool.address, false),             // 2: whirlpool
+        AccountMeta::new(user_ata_a, false),               // 3: token_owner_account_a
+        AccountMeta::new(vault_a, false),                  // 4: token_vault_a
+        AccountMeta::new(user_ata_b, false),               // 5: token_owner_account_b
+        AccountMeta::new(vault_b, false),                  // 6: token_vault_b
+        AccountMeta::new(tick_arrays[0], false),           // 7: tick_array_0
+        AccountMeta::new(tick_arrays[1], false),           // 8: tick_array_1
+        AccountMeta::new(tick_arrays[2], false),           // 9: tick_array_2
+        AccountMeta::new(oracle, false),                   // 10: oracle
+        AccountMeta::new_readonly(memo_program, false),    // 11: memo_program
+    ];
+
+    Some(Instruction { program_id: whirlpool_program, accounts, data })
+}
+
+/// Build a Raydium CLMM swap_v2 instruction with full account layout.
+///
+/// Program: CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK
+/// Discriminator: [0x2b, 0x04, 0xed, 0x0b, 0x1a, 0xc9, 0x1e, 0x62] (swap_v2)
+/// Accounts: 17 (payer, amm_config, pool_state, input_ata, output_ata, input_vault, output_vault,
+///           observation_state, token_program, token_2022, memo, input_mint, output_mint,
+///           bitmap_extension, tick_array_0, tick_array_1, tick_array_2)
+pub fn build_raydium_clmm_swap_ix(
+    signer: &Pubkey,
+    pool: &crate::router::pool::PoolState,
+    input_mint: Pubkey,
+    amount_in: u64,
+    minimum_amount_out: u64,
+) -> Option<Instruction> {
+    let extra = &pool.extra;
+    let vault_a = extra.vault_a?;
+    let vault_b = extra.vault_b?;
+    let tick_spacing = extra.tick_spacing?;
+    let amm_config = extra.config?;
+    let observation_state = extra.observation?;
+
+    let clmm_program = Pubkey::from_str("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK").unwrap();
+    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+    let token_2022_program = Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb").unwrap();
+    let memo_program = Pubkey::from_str("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr").unwrap();
+
+    let a_to_b = input_mint == pool.token_a_mint;
+    let tick_current = pool.current_tick.unwrap_or(0);
+
+    let (input_vault, output_vault) = if a_to_b { (vault_a, vault_b) } else { (vault_b, vault_a) };
+    let output_mint = if a_to_b { pool.token_b_mint } else { pool.token_a_mint };
+
+    let user_input_ata = derive_ata(signer, &input_mint);
+    let user_output_ata = derive_ata(signer, &output_mint);
+
+    // Bitmap extension PDA
+    let (bitmap_extension, _) = Pubkey::find_program_address(
+        &[b"pool_tick_array_bitmap_extension", pool.address.as_ref()],
+        &clmm_program,
+    );
+
+    // Tick array PDAs (3 arrays, i32 big-endian encoded)
+    let ticks_in_array: i32 = 60 * tick_spacing as i32;
+    let start_base = floor_div(tick_current, ticks_in_array) * ticks_in_array;
+
+    let tick_offsets: [i32; 3] = if a_to_b {
+        [0, -1, -2]
+    } else {
+        [0, 1, 2]
+    };
+
+    let tick_arrays: Vec<Pubkey> = tick_offsets.iter().map(|&o| {
+        let start = start_base + o * ticks_in_array;
+        Pubkey::find_program_address(
+            &[b"tick_array", pool.address.as_ref(), &start.to_be_bytes()],
+            &clmm_program,
+        ).0
+    }).collect();
+
+    // sqrt_price_limit
+    let sqrt_price_limit: u128 = if a_to_b { 4295048016u128 } else { 79226673521066979257578248091u128 };
+
+    // Discriminator: swap_v2
+    let mut data = Vec::with_capacity(41);
+    data.extend_from_slice(&[0x2b, 0x04, 0xed, 0x0b, 0x1a, 0xc9, 0x1e, 0x62]);
+    data.extend_from_slice(&amount_in.to_le_bytes());
+    data.extend_from_slice(&minimum_amount_out.to_le_bytes());
+    data.extend_from_slice(&sqrt_price_limit.to_le_bytes());
+    data.push(1u8); // is_exact_in = true
+
+    let accounts = vec![
+        AccountMeta::new(*signer, true),                       // 0: payer
+        AccountMeta::new_readonly(amm_config, false),          // 1: amm_config
+        AccountMeta::new(pool.address, false),                 // 2: pool_state
+        AccountMeta::new(user_input_ata, false),               // 3: input_token_account
+        AccountMeta::new(user_output_ata, false),              // 4: output_token_account
+        AccountMeta::new(input_vault, false),                  // 5: input_vault
+        AccountMeta::new(output_vault, false),                 // 6: output_vault
+        AccountMeta::new(observation_state, false),            // 7: observation_state
+        AccountMeta::new_readonly(token_program, false),       // 8: token_program
+        AccountMeta::new_readonly(token_2022_program, false),  // 9: token_program_2022
+        AccountMeta::new_readonly(memo_program, false),        // 10: memo_program
+        AccountMeta::new_readonly(input_mint, false),          // 11: input_vault_mint
+        AccountMeta::new_readonly(output_mint, false),         // 12: output_vault_mint
+        // Remaining accounts:
+        AccountMeta::new(bitmap_extension, false),             // 13: bitmap extension
+        AccountMeta::new(tick_arrays[0], false),               // 14: tick_array_0
+        AccountMeta::new(tick_arrays[1], false),               // 15: tick_array_1
+        AccountMeta::new(tick_arrays[2], false),               // 16: tick_array_2
+    ];
+
+    Some(Instruction { program_id: clmm_program, accounts, data })
+}
+
+/// Build a Meteora DLMM swap2 instruction with full account layout.
+///
+/// Program: LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo
+/// Discriminator: [0x41, 0x4b, 0x3f, 0x4c, 0xeb, 0x5b, 0x5b, 0x88] (swap2)
+/// Accounts: 15 fixed + N bin arrays as remaining accounts
+pub fn build_meteora_dlmm_swap_ix(
+    signer: &Pubkey,
+    pool: &crate::router::pool::PoolState,
+    input_mint: Pubkey,
+    amount_in: u64,
+    minimum_amount_out: u64,
+) -> Option<Instruction> {
+    let extra = &pool.extra;
+    let vault_a = extra.vault_a?;  // reserve_x
+    let vault_b = extra.vault_b?;  // reserve_y
+
+    let dlmm_program = Pubkey::from_str("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo").unwrap();
+    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+
+    let a_to_b = input_mint == pool.token_a_mint; // X -> Y
+    let active_id = pool.current_tick.unwrap_or(0);
+
+    let user_input_ata = derive_ata(signer, &input_mint);
+    let output_mint = if a_to_b { pool.token_b_mint } else { pool.token_a_mint };
+    let user_output_ata = derive_ata(signer, &output_mint);
+
+    // Oracle PDA
+    let (oracle, _) = Pubkey::find_program_address(
+        &[b"oracle", pool.address.as_ref()], &dlmm_program,
+    );
+
+    // Event authority PDA
+    let (event_authority, _) = Pubkey::find_program_address(
+        &[b"__event_authority"], &dlmm_program,
+    );
+
+    // Bitmap extension PDA
+    let (bitmap_extension, _) = Pubkey::find_program_address(
+        &[b"bitmap", pool.address.as_ref()], &dlmm_program,
+    );
+
+    // Bin array PDAs: compute the current bin array index and get a few in the swap direction
+    let bin_array_index = if active_id >= 0 {
+        active_id / 70
+    } else if active_id % 70 == 0 {
+        active_id / 70
+    } else {
+        active_id / 70 - 1
+    };
+
+    // Get 3 bin arrays in swap direction
+    let bin_offsets: [i32; 3] = if a_to_b {
+        [0, -1, -2] // X->Y, price goes down, bins decrease
+    } else {
+        [0, 1, 2]   // Y->X, price goes up, bins increase
+    };
+
+    let bin_arrays: Vec<Pubkey> = bin_offsets.iter().map(|&o| {
+        let idx = (bin_array_index + o) as i64;
+        Pubkey::find_program_address(
+            &[b"bin_array", pool.address.as_ref(), &idx.to_le_bytes()],
+            &dlmm_program,
+        ).0
+    }).collect();
+
+    // Discriminator: swap2
+    let mut data = Vec::with_capacity(28);
+    data.extend_from_slice(&[0x41, 0x4b, 0x3f, 0x4c, 0xeb, 0x5b, 0x5b, 0x88]);
+    data.extend_from_slice(&amount_in.to_le_bytes());
+    data.extend_from_slice(&minimum_amount_out.to_le_bytes());
+    // remaining_accounts_info: Vec length = 0 (Borsh: 4 bytes of 0)
+    data.extend_from_slice(&0u32.to_le_bytes());
+
+    let mut accounts = vec![
+        AccountMeta::new(pool.address, false),              // 0: lb_pair
+        AccountMeta::new(bitmap_extension, false),          // 1: bin_array_bitmap_extension
+        AccountMeta::new(vault_a, false),                   // 2: reserve_x
+        AccountMeta::new(vault_b, false),                   // 3: reserve_y
+        AccountMeta::new(user_input_ata, false),            // 4: user_token_in
+        AccountMeta::new(user_output_ata, false),           // 5: user_token_out
+        AccountMeta::new_readonly(pool.token_a_mint, false),// 6: token_x_mint
+        AccountMeta::new_readonly(pool.token_b_mint, false),// 7: token_y_mint
+        AccountMeta::new(oracle, false),                    // 8: oracle
+        AccountMeta::new(*signer, true),                    // 9: host_fee_in (using signer as placeholder)
+        AccountMeta::new(*signer, true),                    // 10: user (signer)
+        AccountMeta::new_readonly(token_program, false),    // 11: token_x_program
+        AccountMeta::new_readonly(token_program, false),    // 12: token_y_program
+        AccountMeta::new_readonly(event_authority, false),  // 13: event_authority
+        AccountMeta::new_readonly(dlmm_program, false),     // 14: program
+    ];
+
+    // Append bin arrays as remaining accounts
+    for ba in &bin_arrays {
+        accounts.push(AccountMeta::new(*ba, false));
+    }
+
+    Some(Instruction { program_id: dlmm_program, accounts, data })
 }
 
 /// Build the account list for a Sanctum Infinity SwapExactIn instruction.

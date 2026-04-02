@@ -1,7 +1,10 @@
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 
-use solana_mev_bot::executor::bundle::{build_raydium_cp_swap_ix, build_damm_v2_swap_ix};
+use solana_mev_bot::executor::bundle::{
+    build_raydium_cp_swap_ix, build_damm_v2_swap_ix,
+    build_orca_whirlpool_swap_ix, build_raydium_clmm_swap_ix, build_meteora_dlmm_swap_ix,
+};
 use solana_mev_bot::router::pool::{DexType, PoolState, PoolExtra};
 
 /// Helper: build a PoolState with filled PoolExtra for testing.
@@ -24,6 +27,7 @@ fn make_test_pool(dex_type: DexType) -> PoolState {
             config: Some(Pubkey::new_unique()),
             token_program_a: Some(Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap()),
             token_program_b: Some(Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap()),
+            ..Default::default()
         },
     }
 }
@@ -93,4 +97,249 @@ fn test_damm_v2_swap_ix_swap_mode_exact_in() {
     // Data layout: 8 bytes disc + 8 bytes amount_in + 8 bytes min_out + 1 byte swap_mode
     assert_eq!(ix.data.len(), 25, "DAMM v2 data should be 25 bytes");
     assert_eq!(ix.data[24], 0u8, "swap_mode should be 0 (ExactIn)");
+}
+
+// ─── Orca Whirlpool tests ───────────────────────────────────────────────────
+
+#[test]
+fn test_orca_whirlpool_swap_ix_account_count() {
+    let pool = PoolState {
+        address: Pubkey::new_unique(),
+        dex_type: DexType::OrcaWhirlpool,
+        token_a_mint: Pubkey::new_unique(),
+        token_b_mint: Pubkey::new_unique(),
+        token_a_reserve: 1_000_000,
+        token_b_reserve: 1_000_000,
+        fee_bps: 30,
+        current_tick: Some(100),
+        sqrt_price_x64: Some(1_000_000),
+        liquidity: Some(500_000),
+        last_slot: 100,
+        extra: PoolExtra {
+            vault_a: Some(Pubkey::new_unique()),
+            vault_b: Some(Pubkey::new_unique()),
+            tick_spacing: Some(64),
+            ..Default::default()
+        },
+    };
+    let signer = Pubkey::new_unique();
+    let ix = build_orca_whirlpool_swap_ix(&signer, &pool, pool.token_a_mint, 1000, 900);
+    assert!(ix.is_some(), "Should produce an instruction with vaults + tick_spacing");
+    let ix = ix.unwrap();
+    assert_eq!(ix.accounts.len(), 12, "Orca swap_v2 needs 12 accounts");
+}
+
+#[test]
+fn test_orca_whirlpool_swap_ix_discriminator() {
+    let pool = PoolState {
+        address: Pubkey::new_unique(),
+        dex_type: DexType::OrcaWhirlpool,
+        token_a_mint: Pubkey::new_unique(),
+        token_b_mint: Pubkey::new_unique(),
+        token_a_reserve: 1_000_000,
+        token_b_reserve: 1_000_000,
+        fee_bps: 30,
+        current_tick: Some(100),
+        sqrt_price_x64: Some(1_000_000),
+        liquidity: Some(500_000),
+        last_slot: 100,
+        extra: PoolExtra {
+            vault_a: Some(Pubkey::new_unique()),
+            vault_b: Some(Pubkey::new_unique()),
+            tick_spacing: Some(64),
+            ..Default::default()
+        },
+    };
+    let signer = Pubkey::new_unique();
+    let ix = build_orca_whirlpool_swap_ix(&signer, &pool, pool.token_a_mint, 1000, 900).unwrap();
+    assert_eq!(&ix.data[0..8], &[0x2b, 0x04, 0xed, 0x0b, 0x1a, 0xc9, 0x1e, 0x62]);
+}
+
+#[test]
+fn test_orca_whirlpool_swap_ix_returns_none_without_tick_spacing() {
+    let pool = PoolState {
+        address: Pubkey::new_unique(),
+        dex_type: DexType::OrcaWhirlpool,
+        token_a_mint: Pubkey::new_unique(),
+        token_b_mint: Pubkey::new_unique(),
+        token_a_reserve: 1_000_000,
+        token_b_reserve: 1_000_000,
+        fee_bps: 30,
+        current_tick: Some(100),
+        sqrt_price_x64: Some(1_000_000),
+        liquidity: Some(500_000),
+        last_slot: 100,
+        extra: PoolExtra {
+            vault_a: Some(Pubkey::new_unique()),
+            vault_b: Some(Pubkey::new_unique()),
+            ..Default::default() // tick_spacing is None
+        },
+    };
+    let signer = Pubkey::new_unique();
+    let ix = build_orca_whirlpool_swap_ix(&signer, &pool, pool.token_a_mint, 1000, 900);
+    assert!(ix.is_none(), "Should return None when tick_spacing is missing");
+}
+
+// ─── Raydium CLMM tests ────────────────────────────────────────────────────
+
+#[test]
+fn test_raydium_clmm_swap_ix_account_count() {
+    let pool = PoolState {
+        address: Pubkey::new_unique(),
+        dex_type: DexType::RaydiumClmm,
+        token_a_mint: Pubkey::new_unique(),
+        token_b_mint: Pubkey::new_unique(),
+        token_a_reserve: 1_000_000,
+        token_b_reserve: 1_000_000,
+        fee_bps: 25,
+        current_tick: Some(50),
+        sqrt_price_x64: Some(1_000_000),
+        liquidity: Some(500_000),
+        last_slot: 100,
+        extra: PoolExtra {
+            vault_a: Some(Pubkey::new_unique()),
+            vault_b: Some(Pubkey::new_unique()),
+            config: Some(Pubkey::new_unique()),
+            observation: Some(Pubkey::new_unique()),
+            tick_spacing: Some(10),
+            ..Default::default()
+        },
+    };
+    let signer = Pubkey::new_unique();
+    let ix = build_raydium_clmm_swap_ix(&signer, &pool, pool.token_a_mint, 1000, 900);
+    assert!(ix.is_some(), "Should produce an instruction with full CLMM extra");
+    let ix = ix.unwrap();
+    assert_eq!(ix.accounts.len(), 17, "Raydium CLMM swap_v2 needs 17 accounts");
+}
+
+#[test]
+fn test_raydium_clmm_swap_ix_discriminator() {
+    let pool = PoolState {
+        address: Pubkey::new_unique(),
+        dex_type: DexType::RaydiumClmm,
+        token_a_mint: Pubkey::new_unique(),
+        token_b_mint: Pubkey::new_unique(),
+        token_a_reserve: 1_000_000,
+        token_b_reserve: 1_000_000,
+        fee_bps: 25,
+        current_tick: Some(50),
+        sqrt_price_x64: Some(1_000_000),
+        liquidity: Some(500_000),
+        last_slot: 100,
+        extra: PoolExtra {
+            vault_a: Some(Pubkey::new_unique()),
+            vault_b: Some(Pubkey::new_unique()),
+            config: Some(Pubkey::new_unique()),
+            observation: Some(Pubkey::new_unique()),
+            tick_spacing: Some(10),
+            ..Default::default()
+        },
+    };
+    let signer = Pubkey::new_unique();
+    let ix = build_raydium_clmm_swap_ix(&signer, &pool, pool.token_a_mint, 1000, 900).unwrap();
+    assert_eq!(&ix.data[0..8], &[0x2b, 0x04, 0xed, 0x0b, 0x1a, 0xc9, 0x1e, 0x62]);
+}
+
+#[test]
+fn test_raydium_clmm_swap_ix_returns_none_without_observation() {
+    let pool = PoolState {
+        address: Pubkey::new_unique(),
+        dex_type: DexType::RaydiumClmm,
+        token_a_mint: Pubkey::new_unique(),
+        token_b_mint: Pubkey::new_unique(),
+        token_a_reserve: 1_000_000,
+        token_b_reserve: 1_000_000,
+        fee_bps: 25,
+        current_tick: Some(50),
+        sqrt_price_x64: Some(1_000_000),
+        liquidity: Some(500_000),
+        last_slot: 100,
+        extra: PoolExtra {
+            vault_a: Some(Pubkey::new_unique()),
+            vault_b: Some(Pubkey::new_unique()),
+            config: Some(Pubkey::new_unique()),
+            tick_spacing: Some(10),
+            // observation is None
+            ..Default::default()
+        },
+    };
+    let signer = Pubkey::new_unique();
+    let ix = build_raydium_clmm_swap_ix(&signer, &pool, pool.token_a_mint, 1000, 900);
+    assert!(ix.is_none(), "Should return None when observation is missing");
+}
+
+// ─── Meteora DLMM tests ────────────────────────────────────────────────────
+
+#[test]
+fn test_meteora_dlmm_swap_ix_account_count() {
+    let pool = PoolState {
+        address: Pubkey::new_unique(),
+        dex_type: DexType::MeteoraDlmm,
+        token_a_mint: Pubkey::new_unique(),
+        token_b_mint: Pubkey::new_unique(),
+        token_a_reserve: 1_000_000,
+        token_b_reserve: 1_000_000,
+        fee_bps: 10,
+        current_tick: Some(100),
+        sqrt_price_x64: None,
+        liquidity: None,
+        last_slot: 100,
+        extra: PoolExtra {
+            vault_a: Some(Pubkey::new_unique()),
+            vault_b: Some(Pubkey::new_unique()),
+            ..Default::default()
+        },
+    };
+    let signer = Pubkey::new_unique();
+    let ix = build_meteora_dlmm_swap_ix(&signer, &pool, pool.token_a_mint, 2000, 1800);
+    assert!(ix.is_some(), "Should produce an instruction with vaults");
+    let ix = ix.unwrap();
+    // 15 fixed + 3 bin arrays = 18
+    assert_eq!(ix.accounts.len(), 18, "DLMM swap2 needs 15 fixed + 3 bin arrays");
+}
+
+#[test]
+fn test_meteora_dlmm_swap_ix_discriminator() {
+    let pool = PoolState {
+        address: Pubkey::new_unique(),
+        dex_type: DexType::MeteoraDlmm,
+        token_a_mint: Pubkey::new_unique(),
+        token_b_mint: Pubkey::new_unique(),
+        token_a_reserve: 1_000_000,
+        token_b_reserve: 1_000_000,
+        fee_bps: 10,
+        current_tick: Some(100),
+        sqrt_price_x64: None,
+        liquidity: None,
+        last_slot: 100,
+        extra: PoolExtra {
+            vault_a: Some(Pubkey::new_unique()),
+            vault_b: Some(Pubkey::new_unique()),
+            ..Default::default()
+        },
+    };
+    let signer = Pubkey::new_unique();
+    let ix = build_meteora_dlmm_swap_ix(&signer, &pool, pool.token_a_mint, 2000, 1800).unwrap();
+    assert_eq!(&ix.data[0..8], &[0x41, 0x4b, 0x3f, 0x4c, 0xeb, 0x5b, 0x5b, 0x88]);
+}
+
+#[test]
+fn test_meteora_dlmm_swap_ix_returns_none_without_vaults() {
+    let pool = PoolState {
+        address: Pubkey::new_unique(),
+        dex_type: DexType::MeteoraDlmm,
+        token_a_mint: Pubkey::new_unique(),
+        token_b_mint: Pubkey::new_unique(),
+        token_a_reserve: 1_000_000,
+        token_b_reserve: 1_000_000,
+        fee_bps: 10,
+        current_tick: Some(100),
+        sqrt_price_x64: None,
+        liquidity: None,
+        last_slot: 100,
+        extra: PoolExtra::default(), // no vaults
+    };
+    let signer = Pubkey::new_unique();
+    let ix = build_meteora_dlmm_swap_ix(&signer, &pool, pool.token_a_mint, 2000, 1800);
+    assert!(ix.is_none(), "Should return None when vaults are missing");
 }
