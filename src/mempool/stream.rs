@@ -424,11 +424,16 @@ pub fn parse_orca_whirlpool(pool_address: &Pubkey, data: &[u8], slot: u64) -> Op
         sqrt_price_x64: Some(sqrt_price_x64),
         liquidity: Some(liquidity),
         last_slot: slot,
-        extra: PoolExtra {
-            vault_a: Some(Pubkey::new_from_array(data[133..165].try_into().ok()?)),
-            vault_b: Some(Pubkey::new_from_array(data[213..245].try_into().ok()?)),
-            tick_spacing: Some(tick_spacing),
-            ..Default::default()
+        extra: {
+            let spl_token = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+            PoolExtra {
+                vault_a: Some(Pubkey::new_from_array(data[133..165].try_into().ok()?)),
+                vault_b: Some(Pubkey::new_from_array(data[213..245].try_into().ok()?)),
+                tick_spacing: Some(tick_spacing),
+                token_program_a: Some(spl_token),
+                token_program_b: Some(spl_token),
+                ..Default::default()
+            }
         },
         best_bid_price: None,
         best_ask_price: None,
@@ -478,13 +483,18 @@ pub fn parse_raydium_clmm(pool_address: &Pubkey, data: &[u8], slot: u64) -> Opti
         sqrt_price_x64: Some(sqrt_price_x64),
         liquidity: Some(liquidity),
         last_slot: slot,
-        extra: PoolExtra {
-            vault_a: Some(Pubkey::new_from_array(data[137..169].try_into().ok()?)),
-            vault_b: Some(Pubkey::new_from_array(data[169..201].try_into().ok()?)),
-            config: Some(amm_config),
-            observation: Some(observation_key),
-            tick_spacing: Some(tick_spacing),
-            ..Default::default()
+        extra: {
+            let spl_token = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+            PoolExtra {
+                vault_a: Some(Pubkey::new_from_array(data[137..169].try_into().ok()?)),
+                vault_b: Some(Pubkey::new_from_array(data[169..201].try_into().ok()?)),
+                config: Some(amm_config),
+                observation: Some(observation_key),
+                tick_spacing: Some(tick_spacing),
+                token_program_a: Some(spl_token),
+                token_program_b: Some(spl_token),
+                ..Default::default()
+            }
         },
         best_bid_price: None,
         best_ask_price: None,
@@ -655,10 +665,15 @@ pub fn parse_raydium_amm_v4(
         sqrt_price_x64: None,
         liquidity: None,
         last_slot: slot,
-        extra: PoolExtra {
-            vault_a: Some(base_vault),
-            vault_b: Some(quote_vault),
-            ..Default::default()
+        extra: {
+            let spl_token = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+            PoolExtra {
+                vault_a: Some(base_vault),
+                vault_b: Some(quote_vault),
+                token_program_a: Some(spl_token),
+                token_program_b: Some(spl_token),
+                ..Default::default()
+            }
         },
         best_bid_price: None,
         best_ask_price: None,
