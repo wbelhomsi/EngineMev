@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
 
     // Load searcher keypair
     let searcher_keypair = load_keypair(&config.searcher_keypair_path)?;
-    let bundle_builder = Arc::new(BundleBuilder::new(searcher_keypair));
+    let bundle_builder = Arc::new(BundleBuilder::new(searcher_keypair, state_cache.clone()));
 
     info!("All components initialized, starting pipeline...");
 

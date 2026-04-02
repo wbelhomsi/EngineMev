@@ -6,3 +6,4 @@ mod bundle_profit;
 mod simulator_lst;
 mod blockhash;
 mod stream_parsing;
+mod bundle_real_ix;

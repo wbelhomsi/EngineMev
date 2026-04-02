@@ -1,14 +1,17 @@
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Keypair;
 use solana_sdk::hash::Hash;
+use std::time::Duration;
 
 use solana_mev_bot::router::pool::{ArbRoute, DexType, RouteHop};
 use solana_mev_bot::executor::BundleBuilder;
+use solana_mev_bot::state::StateCache;
 
 #[test]
 fn test_bundle_sets_min_out_on_final_hop() {
     let keypair = Keypair::new();
-    let builder = BundleBuilder::new(keypair);
+    let state_cache = StateCache::new(Duration::from_secs(60));
+    let builder = BundleBuilder::new(keypair, state_cache);
 
     let base_mint = Pubkey::new_unique();
     let other_mint = Pubkey::new_unique();
