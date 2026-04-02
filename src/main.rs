@@ -424,6 +424,8 @@ fn bootstrap_sanctum_pools(state_cache: &state::StateCache) {
             liquidity: None,
             last_slot: 0,
             extra: PoolExtra::default(),
+            best_bid_price: None,
+            best_ask_price: None,
         };
 
         state_cache.upsert(virtual_pool_addr, pool);

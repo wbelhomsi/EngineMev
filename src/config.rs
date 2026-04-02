@@ -58,6 +58,14 @@ pub mod programs {
     pub fn sanctum_flat_fee_pricing() -> Pubkey {
         Pubkey::from_str("f1tUoNEKrDp1oeGn4zxr7bh41eN6VcfHjfrL3ZqQday").unwrap()
     }
+
+    pub fn phoenix_v1() -> Pubkey {
+        Pubkey::from_str("PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY").unwrap()
+    }
+
+    pub fn manifest() -> Pubkey {
+        Pubkey::from_str("MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms").unwrap()
+    }
 }
 
 /// Supported LST mints and their human-readable names.
@@ -198,6 +206,8 @@ impl BotConfig {
             programs::orca_whirlpool(),
             programs::meteora_dlmm(),
             programs::meteora_damm_v2(),
+            programs::phoenix_v1(),
+            programs::manifest(),
         ];
         if self.lst_arb_enabled {
             programs.push(programs::sanctum_s_controller());

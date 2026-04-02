@@ -40,6 +40,8 @@ fn setup_cache_with_spread(orca_rate: f64, sanctum_rate: f64) -> (StateCache, Pu
         liquidity: None,
         last_slot: 100,
         extra: PoolExtra::default(),
+        best_bid_price: None,
+        best_ask_price: None,
     });
 
     // Sanctum virtual pool
@@ -57,6 +59,8 @@ fn setup_cache_with_spread(orca_rate: f64, sanctum_rate: f64) -> (StateCache, Pu
         liquidity: None,
         last_slot: 100,
         extra: PoolExtra::default(),
+        best_bid_price: None,
+        best_ask_price: None,
     });
 
     (cache, orca_addr, sanctum_addr)

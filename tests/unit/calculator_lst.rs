@@ -31,6 +31,8 @@ fn sanctum_virtual_pool(rate: f64, address: Pubkey) -> PoolState {
         liquidity: None,
         last_slot: 100,
         extra: PoolExtra::default(),
+        best_bid_price: None,
+        best_ask_price: None,
     }
 }
 
@@ -49,6 +51,8 @@ fn dex_pool(dex_type: DexType, address: Pubkey, sol_reserve: u64, jitosol_reserv
         liquidity: None,
         last_slot: 100,
         extra: PoolExtra::default(),
+        best_bid_price: None,
+        best_ask_price: None,
     }
 }
 

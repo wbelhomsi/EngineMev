@@ -157,6 +157,12 @@ fn make_raydium_cp_data(vault_0: &Pubkey, vault_1: &Pubkey, mint_0: &Pubkey, min
 }
 
 #[test]
+fn test_phoenix_and_manifest_dex_types_exist() {
+    assert_eq!(DexType::Phoenix.base_fee_bps(), 2);
+    assert_eq!(DexType::Manifest.base_fee_bps(), 0);
+}
+
+#[test]
 fn test_parse_raydium_cp() {
     let addr = Pubkey::new_unique();
     let v0 = Pubkey::new_unique(); let v1 = Pubkey::new_unique();

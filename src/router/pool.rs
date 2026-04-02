@@ -10,6 +10,8 @@ pub enum DexType {
     MeteoraDlmm,
     MeteoraDammV2,
     SanctumInfinity,
+    Phoenix,
+    Manifest,
 }
 
 impl DexType {
@@ -24,6 +26,8 @@ impl DexType {
             DexType::MeteoraDlmm => 1,      // dynamic fees
             DexType::MeteoraDammV2 => 15,   // 0.15%
             DexType::SanctumInfinity => 3,  // ~3bps flat fee
+            DexType::Phoenix => 2,          // ~2bps taker fee on major markets
+            DexType::Manifest => 0,         // zero fees
         }
     }
 }
@@ -65,6 +69,10 @@ pub struct PoolState {
     pub last_slot: u64,
     /// Extra data for building swap instructions (vaults, config, token programs)
     pub extra: PoolExtra,
+    /// For orderbook DEXes: best bid in quote atoms per base atom
+    pub best_bid_price: Option<u128>,
+    /// For orderbook DEXes: best ask in quote atoms per base atom
+    pub best_ask_price: Option<u128>,
 }
 
 impl PoolState {
@@ -74,6 +82,11 @@ impl PoolState {
     pub fn get_output_amount(&self, input_amount: u64, a_to_b: bool) -> Option<u64> {
         if input_amount == 0 {
             return Some(0);
+        }
+
+        // Orderbook DEXes: use bid/ask price directly
+        if let Some(output) = self.get_orderbook_output(input_amount, a_to_b) {
+            return Some(output);
         }
 
         // Use CLMM single-tick math if sqrt_price and liquidity are available.
@@ -173,6 +186,47 @@ impl PoolState {
 
             if output > u64::MAX as u128 { return None; }
             Some(output as u64)
+        }
+    }
+
+    /// Orderbook output calculation using top-of-book price.
+    /// a_to_b = selling base into bids: output_quote = input_base * best_bid
+    /// b_to_a = buying base from asks:  output_base = input_quote / best_ask
+    ///
+    /// Depth semantics:
+    ///   a_to_b: token_a_reserve is the available base depth; cap input_base by it.
+    ///   b_to_a: token_b_reserve is the available base-output depth; cap output_base by it.
+    fn get_orderbook_output(&self, input_amount: u64, a_to_b: bool) -> Option<u64> {
+        // Apply fee
+        let input_after_fee = (input_amount as u128)
+            .checked_mul(10_000u128.checked_sub(self.fee_bps as u128)?)?
+            .checked_div(10_000)?;
+
+        if a_to_b {
+            let price = self.best_bid_price?;
+            if price == 0 {
+                return None;
+            }
+            // Cap input (base atoms) by available bid depth (token_a_reserve)
+            let effective_input = std::cmp::min(input_after_fee, self.token_a_reserve as u128);
+            let output = effective_input.checked_mul(price)?;
+            if output > u64::MAX as u128 {
+                return None;
+            }
+            Some(output as u64)
+        } else {
+            let price = self.best_ask_price?;
+            if price == 0 {
+                return None;
+            }
+            // Compute uncapped output (base atoms) = input_quote / price
+            let output = input_after_fee.checked_div(price)?;
+            // Cap output (base atoms) by available ask depth (token_b_reserve)
+            let capped_output = std::cmp::min(output, self.token_b_reserve as u128);
+            if capped_output > u64::MAX as u128 {
+                return None;
+            }
+            Some(capped_output as u64)
         }
     }
 

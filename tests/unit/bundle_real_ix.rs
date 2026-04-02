@@ -29,6 +29,8 @@ fn make_test_pool(dex_type: DexType) -> PoolState {
             token_program_b: Some(Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap()),
             ..Default::default()
         },
+        best_bid_price: None,
+        best_ask_price: None,
     }
 }
 
@@ -121,6 +123,8 @@ fn test_orca_whirlpool_swap_ix_account_count() {
             tick_spacing: Some(64),
             ..Default::default()
         },
+        best_bid_price: None,
+        best_ask_price: None,
     };
     let signer = Pubkey::new_unique();
     let ix = build_orca_whirlpool_swap_ix(&signer, &pool, pool.token_a_mint, 1000, 900);
@@ -149,6 +153,8 @@ fn test_orca_whirlpool_swap_ix_discriminator() {
             tick_spacing: Some(64),
             ..Default::default()
         },
+        best_bid_price: None,
+        best_ask_price: None,
     };
     let signer = Pubkey::new_unique();
     let ix = build_orca_whirlpool_swap_ix(&signer, &pool, pool.token_a_mint, 1000, 900).unwrap();
@@ -174,6 +180,8 @@ fn test_orca_whirlpool_swap_ix_returns_none_without_tick_spacing() {
             vault_b: Some(Pubkey::new_unique()),
             ..Default::default() // tick_spacing is None
         },
+        best_bid_price: None,
+        best_ask_price: None,
     };
     let signer = Pubkey::new_unique();
     let ix = build_orca_whirlpool_swap_ix(&signer, &pool, pool.token_a_mint, 1000, 900);
@@ -204,6 +212,8 @@ fn test_raydium_clmm_swap_ix_account_count() {
             tick_spacing: Some(10),
             ..Default::default()
         },
+        best_bid_price: None,
+        best_ask_price: None,
     };
     let signer = Pubkey::new_unique();
     let ix = build_raydium_clmm_swap_ix(&signer, &pool, pool.token_a_mint, 1000, 900);
@@ -234,6 +244,8 @@ fn test_raydium_clmm_swap_ix_discriminator() {
             tick_spacing: Some(10),
             ..Default::default()
         },
+        best_bid_price: None,
+        best_ask_price: None,
     };
     let signer = Pubkey::new_unique();
     let ix = build_raydium_clmm_swap_ix(&signer, &pool, pool.token_a_mint, 1000, 900).unwrap();
@@ -262,6 +274,8 @@ fn test_raydium_clmm_swap_ix_returns_none_without_observation() {
             // observation is None
             ..Default::default()
         },
+        best_bid_price: None,
+        best_ask_price: None,
     };
     let signer = Pubkey::new_unique();
     let ix = build_raydium_clmm_swap_ix(&signer, &pool, pool.token_a_mint, 1000, 900);
@@ -289,6 +303,8 @@ fn test_meteora_dlmm_swap_ix_account_count() {
             vault_b: Some(Pubkey::new_unique()),
             ..Default::default()
         },
+        best_bid_price: None,
+        best_ask_price: None,
     };
     let signer = Pubkey::new_unique();
     let ix = build_meteora_dlmm_swap_ix(&signer, &pool, pool.token_a_mint, 2000, 1800);
@@ -317,6 +333,8 @@ fn test_meteora_dlmm_swap_ix_discriminator() {
             vault_b: Some(Pubkey::new_unique()),
             ..Default::default()
         },
+        best_bid_price: None,
+        best_ask_price: None,
     };
     let signer = Pubkey::new_unique();
     let ix = build_meteora_dlmm_swap_ix(&signer, &pool, pool.token_a_mint, 2000, 1800).unwrap();
@@ -338,6 +356,8 @@ fn test_meteora_dlmm_swap_ix_returns_none_without_vaults() {
         liquidity: None,
         last_slot: 100,
         extra: PoolExtra::default(), // no vaults
+        best_bid_price: None,
+        best_ask_price: None,
     };
     let signer = Pubkey::new_unique();
     let ix = build_meteora_dlmm_swap_ix(&signer, &pool, pool.token_a_mint, 2000, 1800);

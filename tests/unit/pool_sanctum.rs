@@ -28,6 +28,8 @@ fn test_sanctum_virtual_pool_rate() {
         liquidity: None,
         last_slot: 100,
         extra: PoolExtra::default(),
+        best_bid_price: None,
+        best_ask_price: None,
     };
 
     // Swap 1_000_000_000 lamports (1 jitoSOL) worth of jitoSOL -> SOL
@@ -65,6 +67,8 @@ fn test_sanctum_virtual_pool_fee_deduction() {
         liquidity: None,
         last_slot: 100,
         extra: PoolExtra::default(),
+        best_bid_price: None,
+        best_ask_price: None,
     };
 
     let pool_no_fee = PoolState {
