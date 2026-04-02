@@ -44,6 +44,8 @@ pub struct PoolExtra {
     pub tick_spacing: Option<u16>,
     /// Observation state account (Raydium CLMM)
     pub observation: Option<Pubkey>,
+    /// Bitmap extension account (Meteora DLMM) — None if doesn't exist on-chain
+    pub bitmap_extension: Option<Pubkey>,
 }
 
 /// Represents the on-chain state of an AMM pool.

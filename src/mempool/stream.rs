@@ -1,6 +1,7 @@
 use anyhow::Result;
 use crossbeam_channel::Sender;
 use solana_sdk::pubkey::Pubkey;
+use std::str::FromStr;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -208,6 +209,41 @@ impl GeyserStream {
                     });
                 }
 
+                // For Meteora DLMM: fetch bitmap extension existence on first discovery
+                if matches!(self.state_cache.get_any(&pool_address).map(|p| p.dex_type),
+                            Some(crate::router::pool::DexType::MeteoraDlmm))
+                {
+                    if let Some(pool) = self.state_cache.get_any(&pool_address) {
+                        if pool.extra.bitmap_extension.is_none() {
+                            let client = self.http_client.clone();
+                            let url = self.config.rpc_url.clone();
+                            let cache = self.state_cache.clone();
+                            let dlmm_program = Pubkey::from_str("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo").unwrap();
+                            tokio::spawn(async move {
+                                let (bitmap_pda, _) = Pubkey::find_program_address(
+                                    &[b"bitmap", pool_address.as_ref()], &dlmm_program,
+                                );
+                                // Check if it exists on-chain
+                                match check_account_exists(&client, &url, &bitmap_pda).await {
+                                    Ok(true) => {
+                                        if let Some(mut p) = cache.get_any(&pool_address) {
+                                            p.extra.bitmap_extension = Some(bitmap_pda);
+                                            cache.upsert(pool_address, p);
+                                            debug!("DLMM bitmap extension found for {}", pool_address);
+                                        }
+                                    }
+                                    Ok(false) => {
+                                        debug!("DLMM bitmap extension not initialized for {}", pool_address);
+                                    }
+                                    Err(e) => {
+                                        debug!("DLMM bitmap check failed: {}", crate::config::redact_url(&e.to_string()));
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+
                 // Notify router
                 let event = PoolStateChange { pool_address, slot };
                 if let Err(e) = tx_sender.try_send(event) {
@@ -232,6 +268,36 @@ pub struct StreamStats {
 // ─── Per-DEX pool state parsers ───────────────────────────────────────────────
 
 use crate::router::pool::{DexType, PoolExtra, PoolState};
+
+/// Check if an account exists on-chain (not owned by System Program).
+async fn check_account_exists(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    account: &Pubkey,
+) -> anyhow::Result<bool> {
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "getAccountInfo",
+        "params": [account.to_string(), {"encoding": "base64", "dataSlice": {"offset": 0, "length": 0}}]
+    });
+
+    let resp = client
+        .post(rpc_url)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await?
+        .json::<serde_json::Value>()
+        .await?;
+
+    let exists = resp
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .map(|v| !v.is_null())
+        .unwrap_or(false);
+
+    Ok(exists)
+}
 
 /// Fetch vault balances for a Raydium AMM/CP pool and update reserves in cache.
 /// Uses dataSlice to fetch only the 8-byte balance from each vault.

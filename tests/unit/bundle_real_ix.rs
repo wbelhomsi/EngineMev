@@ -301,6 +301,7 @@ fn test_meteora_dlmm_swap_ix_account_count() {
         extra: PoolExtra {
             vault_a: Some(Pubkey::new_unique()),
             vault_b: Some(Pubkey::new_unique()),
+            bitmap_extension: Some(Pubkey::new_unique()),
             ..Default::default()
         },
         best_bid_price: None,
@@ -308,7 +309,7 @@ fn test_meteora_dlmm_swap_ix_account_count() {
     };
     let signer = Pubkey::new_unique();
     let ix = build_meteora_dlmm_swap_ix(&signer, &pool, pool.token_a_mint, 2000, 1800);
-    assert!(ix.is_some(), "Should produce an instruction with vaults");
+    assert!(ix.is_some(), "Should produce an instruction with bitmap_extension");
     let ix = ix.unwrap();
     // 15 fixed + 3 bin arrays = 18
     assert_eq!(ix.accounts.len(), 18, "DLMM swap2 needs 15 fixed + 3 bin arrays");
@@ -331,6 +332,7 @@ fn test_meteora_dlmm_swap_ix_discriminator() {
         extra: PoolExtra {
             vault_a: Some(Pubkey::new_unique()),
             vault_b: Some(Pubkey::new_unique()),
+            bitmap_extension: Some(Pubkey::new_unique()),
             ..Default::default()
         },
         best_bid_price: None,
