@@ -170,8 +170,21 @@ impl BundleBuilder {
                 ).ok_or_else(|| anyhow::anyhow!("Missing pool data for DAMM v2"))
             }
             DexType::SanctumInfinity => self.build_sanctum_swap(hop, minimum_amount_out),
-            DexType::Phoenix | DexType::Manifest => {
-                Err(anyhow::anyhow!("Swap IX builder not yet implemented for {:?}", hop.dex_type))
+            DexType::Phoenix => {
+                let pool = self.state_cache.get_any(&hop.pool_address)
+                    .ok_or_else(|| anyhow::anyhow!("Pool not found for Phoenix: {}", hop.pool_address))?;
+                build_phoenix_swap_ix(
+                    &self.searcher_keypair.pubkey(), &pool, hop.input_mint,
+                    hop.estimated_output, minimum_amount_out,
+                ).ok_or_else(|| anyhow::anyhow!("Missing pool data for Phoenix"))
+            }
+            DexType::Manifest => {
+                let pool = self.state_cache.get_any(&hop.pool_address)
+                    .ok_or_else(|| anyhow::anyhow!("Pool not found for Manifest: {}", hop.pool_address))?;
+                build_manifest_swap_ix(
+                    &self.searcher_keypair.pubkey(), &pool, hop.input_mint,
+                    hop.estimated_output, minimum_amount_out,
+                ).ok_or_else(|| anyhow::anyhow!("Missing pool data for Manifest"))
             }
         }
     }
@@ -675,6 +688,111 @@ pub fn build_meteora_dlmm_swap_ix(
     }
 
     Some(Instruction { program_id: dlmm_program, accounts, data })
+}
+
+/// Build a Phoenix swap instruction (ImmediateOrCancel order).
+///
+/// Program: PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY
+/// Discriminant: 0x00 (Swap)
+/// Accounts: 9 (phoenix_program, log_authority, market, trader, base_ata, quote_ata,
+///           base_vault, quote_vault, token_program)
+pub fn build_phoenix_swap_ix(
+    signer: &Pubkey,
+    pool: &crate::router::pool::PoolState,
+    input_mint: Pubkey,
+    amount_in: u64,
+    minimum_amount_out: u64,
+) -> Option<Instruction> {
+    let vault_a = pool.extra.vault_a?; // base vault
+    let vault_b = pool.extra.vault_b?; // quote vault
+
+    let phoenix_program = Pubkey::from_str("PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY").unwrap();
+    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+
+    let (log_authority, _) = Pubkey::find_program_address(&[b"log"], &phoenix_program);
+
+    // token_a_mint = base, token_b_mint = quote
+    let a_to_b = input_mint == pool.token_a_mint; // selling base = Ask side
+    let side: u8 = if a_to_b { 0x01 } else { 0x00 }; // Ask=0x01, Bid=0x00
+
+    let base_ata = derive_ata(signer, &pool.token_a_mint);
+    let quote_ata = derive_ata(signer, &pool.token_b_mint);
+
+    // Instruction data: discriminant + ImmediateOrCancel OrderPacket
+    let mut data = Vec::with_capacity(44);
+    data.push(0x00u8);             // instruction discriminant: Swap
+    data.push(0x01u8);             // OrderPacket discriminant: ImmediateOrCancel
+    data.push(side);               // side: 0x00=Bid, 0x01=Ask
+    data.extend_from_slice(&0u64.to_le_bytes());              // price_in_ticks (0 = market)
+    data.extend_from_slice(&amount_in.to_le_bytes());         // num_base_lots
+    data.extend_from_slice(&0u64.to_le_bytes());              // num_quote_lots
+    data.extend_from_slice(&minimum_amount_out.to_le_bytes()); // min_base_lots_to_fill
+    data.extend_from_slice(&0u64.to_le_bytes());              // min_quote_lots_to_fill
+    data.push(0x00u8);             // self_trade_behavior: Abort
+    data.push(0x00u8);             // match_limit: None
+    data.extend_from_slice(&0u128.to_le_bytes());             // client_order_id
+    data.push(0x00u8);             // use_only_deposited_funds: false
+
+    let accounts = vec![
+        AccountMeta::new_readonly(phoenix_program, false), // 0: Phoenix program
+        AccountMeta::new_readonly(log_authority, false),   // 1: Log authority PDA
+        AccountMeta::new(pool.address, false),             // 2: Market (writable)
+        AccountMeta::new(*signer, true),                   // 3: Trader/signer
+        AccountMeta::new(base_ata, false),                 // 4: Trader base token account
+        AccountMeta::new(quote_ata, false),                // 5: Trader quote token account
+        AccountMeta::new(vault_a, false),                  // 6: Base vault
+        AccountMeta::new(vault_b, false),                  // 7: Quote vault
+        AccountMeta::new_readonly(token_program, false),   // 8: Token Program
+    ];
+
+    Some(Instruction { program_id: phoenix_program, accounts, data })
+}
+
+/// Build a Manifest swap instruction.
+///
+/// Program: MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms
+/// Discriminant: 4 (Swap)
+/// Accounts: 8 (payer, market, system_program, base_ata, quote_ata, base_vault, quote_vault,
+///           token_program)
+pub fn build_manifest_swap_ix(
+    signer: &Pubkey,
+    pool: &crate::router::pool::PoolState,
+    input_mint: Pubkey,
+    amount_in: u64,
+    minimum_amount_out: u64,
+) -> Option<Instruction> {
+    let vault_a = pool.extra.vault_a?; // base vault
+    let vault_b = pool.extra.vault_b?; // quote vault
+
+    let manifest_program = Pubkey::from_str("MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms").unwrap();
+    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+    let system_program = solana_sdk::system_program::id();
+
+    // token_a_mint = base, token_b_mint = quote
+    let is_base_in: u8 = if input_mint == pool.token_a_mint { 1 } else { 0 };
+
+    let base_ata = derive_ata(signer, &pool.token_a_mint);
+    let quote_ata = derive_ata(signer, &pool.token_b_mint);
+
+    let mut data = Vec::with_capacity(19);
+    data.push(4u8);                                           // Swap discriminant
+    data.extend_from_slice(&amount_in.to_le_bytes());         // in_atoms
+    data.extend_from_slice(&minimum_amount_out.to_le_bytes()); // out_atoms
+    data.push(is_base_in);                                    // is_base_in
+    data.push(1u8);                                           // is_exact_in = true
+
+    let accounts = vec![
+        AccountMeta::new(*signer, true),                   // 0: Payer/signer
+        AccountMeta::new(pool.address, false),             // 1: Market
+        AccountMeta::new_readonly(system_program, false),  // 2: System program
+        AccountMeta::new(base_ata, false),                 // 3: Trader base token account
+        AccountMeta::new(quote_ata, false),                // 4: Trader quote token account
+        AccountMeta::new(vault_a, false),                  // 5: Base vault
+        AccountMeta::new(vault_b, false),                  // 6: Quote vault
+        AccountMeta::new_readonly(token_program, false),   // 7: Token program
+    ];
+
+    Some(Instruction { program_id: manifest_program, accounts, data })
 }
 
 /// Build the account list for a Sanctum Infinity SwapExactIn instruction.
