@@ -3,6 +3,7 @@ use solana_mev_bot::{config, executor, mempool, router, state};
 use anyhow::Result;
 use crossbeam_channel::bounded;
 use solana_sdk::signature::Keypair;
+use solana_sdk::signer::Signer;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{info, warn, error};
@@ -424,14 +425,27 @@ fn bootstrap_sanctum_pools(state_cache: &state::StateCache) {
     }
 }
 
-/// Load a Solana keypair from a JSON file.
+/// Load the searcher keypair.
+/// Tries SEARCHER_PRIVATE_KEY env var (base58) first, then falls back to JSON file.
 fn load_keypair(path: &str) -> Result<Keypair> {
-    // In production, load from file:
-    // let data = std::fs::read_to_string(path)?;
-    // let bytes: Vec<u8> = serde_json::from_str(&data)?;
-    // Ok(Keypair::from_bytes(&bytes)?)
+    // Try base58 private key from env var first
+    if let Ok(pk_b58) = std::env::var("SEARCHER_PRIVATE_KEY") {
+        let bytes = bs58::decode(pk_b58.trim())
+            .into_vec()
+            .map_err(|e| anyhow::anyhow!("Invalid base58 SEARCHER_PRIVATE_KEY: {}", e))?;
+        let keypair = Keypair::from_bytes(&bytes)
+            .map_err(|e| anyhow::anyhow!("Invalid keypair bytes: {}", e))?;
+        info!("Loaded searcher keypair from SEARCHER_PRIVATE_KEY: {}", keypair.pubkey());
+        return Ok(keypair);
+    }
 
-    // For development, generate a throwaway keypair
-    warn!("Using generated keypair — replace with real keypair for production");
-    Ok(Keypair::new())
+    // Fall back to JSON file
+    let data = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read keypair file {}: {}", path, e))?;
+    let bytes: Vec<u8> = serde_json::from_str(&data)
+        .map_err(|e| anyhow::anyhow!("Invalid keypair JSON in {}: {}", path, e))?;
+    let keypair = Keypair::from_bytes(&bytes)
+        .map_err(|e| anyhow::anyhow!("Invalid keypair bytes in {}: {}", path, e))?;
+    info!("Loaded searcher keypair from {}: {}", path, keypair.pubkey());
+    Ok(keypair)
 }
