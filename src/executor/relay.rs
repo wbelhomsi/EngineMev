@@ -43,11 +43,45 @@ impl MultiRelay {
     pub fn new(config: Arc<BotConfig>) -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
-            .pool_max_idle_per_host(4)
+            .pool_max_idle_per_host(8)
+            .pool_idle_timeout(std::time::Duration::from_secs(300)) // keep connections alive 5 min
+            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .tcp_nodelay(true) // disable Nagle's algorithm for lower latency
+            .http2_keep_alive_interval(std::time::Duration::from_secs(15))
+            .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("Failed to build HTTP client");
 
         Self { config, http_client }
+    }
+
+    /// Warm up connections to all configured relays.
+    /// Call at startup to pre-establish TCP+TLS+HTTP2 connections
+    /// so the first bundle submission doesn't pay cold-connect latency.
+    pub async fn warmup(&self) {
+        let endpoints = &self.config.relay_endpoints;
+
+        // Jito tip floor API is a lightweight GET that warms the connection
+        let url = format!("{}/api/v1/bundles/tip_floor", endpoints.jito.trim_end_matches('/'));
+        match self.http_client.get(&url).send().await {
+            Ok(_) => info!("Relay warmup: Jito connection established"),
+            Err(e) => debug!("Relay warmup: Jito ping failed ({}), will connect on first bundle", e),
+        }
+
+        // Warm other relays if configured
+        for (name, endpoint) in [
+            ("nozomi", &endpoints.nozomi),
+            ("bloxroute", &endpoints.bloxroute),
+            ("astralane", &endpoints.astralane),
+            ("zeroslot", &endpoints.zeroslot),
+        ] {
+            if let Some(url) = endpoint {
+                match self.http_client.get(url.as_str()).send().await {
+                    Ok(_) => info!("Relay warmup: {} connection established", name),
+                    Err(_) => debug!("Relay warmup: {} ping failed", name),
+                }
+            }
+        }
     }
 
     /// Submit a bundle to all configured relays concurrently.
@@ -176,11 +210,18 @@ impl MultiRelay {
             ]
         });
 
-        let result = client
+        // Jito auth UUID from env (optional, gives priority in auction)
+        let mut req = client
             .post(format!("{}/bundles", base_url))
-            .json(&payload)
-            .send()
-            .await;
+            .json(&payload);
+
+        if let Ok(auth_uuid) = std::env::var("JITO_AUTH_UUID") {
+            if !auth_uuid.is_empty() {
+                req = req.header("x-jito-auth", &auth_uuid);
+            }
+        }
+
+        let result = req.send().await;
 
         let latency = start.elapsed().as_micros() as u64;
 
