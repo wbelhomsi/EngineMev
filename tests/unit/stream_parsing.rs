@@ -3,6 +3,7 @@ use solana_mev_bot::router::pool::DexType;
 use solana_mev_bot::mempool::stream::{
     parse_orca_whirlpool, parse_raydium_clmm, parse_meteora_dlmm,
     parse_meteora_damm_v2, parse_raydium_amm_v4, parse_raydium_cp,
+    parse_phoenix_market, parse_manifest_market,
 };
 
 fn make_whirlpool_data(mint_a: &Pubkey, vault_a: &Pubkey, mint_b: &Pubkey, vault_b: &Pubkey, sqrt_price: u128, tick: i32, liquidity: u128) -> Vec<u8> {
@@ -175,4 +176,85 @@ fn test_parse_raydium_cp() {
     assert_eq!(pool.token_a_mint, m0);
     assert_eq!(pool.token_b_mint, m1);
     assert_eq!(vaults, (v0, v1));
+}
+
+// ─── Phoenix market parser tests ─────────────────────────────────────────────
+
+#[test]
+fn test_parse_phoenix_market_too_short() {
+    let data = vec![0u8; 623];
+    assert!(parse_phoenix_market(&Pubkey::new_unique(), &data, 100).is_none());
+}
+
+#[test]
+fn test_parse_phoenix_market_extracts_mints() {
+    let base_mint = Pubkey::new_unique();
+    let quote_mint = Pubkey::new_unique();
+    let base_vault = Pubkey::new_unique();
+    let quote_vault = Pubkey::new_unique();
+
+    let mut data = vec![0u8; 700];
+    data[48..80].copy_from_slice(base_mint.as_ref());
+    data[80..112].copy_from_slice(base_vault.as_ref());
+    data[136..144].copy_from_slice(&1u64.to_le_bytes()); // base_lot_size
+    data[152..184].copy_from_slice(quote_mint.as_ref());
+    data[184..216].copy_from_slice(quote_vault.as_ref());
+    data[240..248].copy_from_slice(&1u64.to_le_bytes()); // quote_lot_size
+
+    let result = parse_phoenix_market(&Pubkey::new_unique(), &data, 100);
+    assert!(result.is_some());
+    let pool = result.unwrap();
+    assert_eq!(pool.dex_type, DexType::Phoenix);
+    assert_eq!(pool.token_a_mint, base_mint);
+    assert_eq!(pool.token_b_mint, quote_mint);
+    assert_eq!(pool.extra.vault_a, Some(base_vault));
+    assert_eq!(pool.extra.vault_b, Some(quote_vault));
+    assert_eq!(pool.fee_bps, 2);
+}
+
+#[test]
+fn test_parse_phoenix_rejects_zero_lot_size() {
+    let mut data = vec![0u8; 700];
+    data[48..80].copy_from_slice(Pubkey::new_unique().as_ref());
+    data[152..184].copy_from_slice(Pubkey::new_unique().as_ref());
+    // base_lot_size = 0 (default) → should reject
+    assert!(parse_phoenix_market(&Pubkey::new_unique(), &data, 100).is_none());
+}
+
+// ─── Manifest market parser tests ────────────────────────────────────────────
+
+#[test]
+fn test_parse_manifest_market_too_short() {
+    let data = vec![0u8; 255];
+    assert!(parse_manifest_market(&Pubkey::new_unique(), &data, 100).is_none());
+}
+
+#[test]
+fn test_parse_manifest_market_extracts_mints() {
+    let base_mint = Pubkey::new_unique();
+    let quote_mint = Pubkey::new_unique();
+    let base_vault = Pubkey::new_unique();
+    let quote_vault = Pubkey::new_unique();
+
+    let mut data = vec![0u8; 300];
+    data[16..48].copy_from_slice(base_mint.as_ref());
+    data[48..80].copy_from_slice(quote_mint.as_ref());
+    data[80..112].copy_from_slice(base_vault.as_ref());
+    data[112..144].copy_from_slice(quote_vault.as_ref());
+
+    let result = parse_manifest_market(&Pubkey::new_unique(), &data, 100);
+    assert!(result.is_some());
+    let pool = result.unwrap();
+    assert_eq!(pool.dex_type, DexType::Manifest);
+    assert_eq!(pool.token_a_mint, base_mint);
+    assert_eq!(pool.token_b_mint, quote_mint);
+    assert_eq!(pool.extra.vault_a, Some(base_vault));
+    assert_eq!(pool.extra.vault_b, Some(quote_vault));
+    assert_eq!(pool.fee_bps, 0);
+}
+
+#[test]
+fn test_parse_manifest_rejects_zero_mints() {
+    let data = vec![0u8; 300];
+    assert!(parse_manifest_market(&Pubkey::new_unique(), &data, 100).is_none());
 }

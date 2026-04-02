@@ -180,7 +180,10 @@ impl GeyserStream {
                         .map(|(p, vaults)| (p, Some(vaults))),
                     637 => parse_raydium_cp(&pool_address, data, slot)
                         .map(|(p, vaults)| (p, Some(vaults))),
-                    _ => None,
+                    _ => {
+                        // Variable-size accounts: try orderbook DEX parsers
+                        try_parse_orderbook(&pool_address, data, slot).map(|p| (p, None))
+                    }
                 };
 
                 let Some((pool_state, vault_info)) = parsed else {
@@ -646,4 +649,113 @@ pub fn parse_raydium_cp(
     };
 
     Some((pool, (vault_0, vault_1)))
+}
+
+// ─── Orderbook DEX parsers ──────────────────────────────────────────────────
+
+/// Try to parse a variable-size account as an orderbook DEX market.
+fn try_parse_orderbook(pool_address: &Pubkey, data: &[u8], slot: u64) -> Option<PoolState> {
+    if data.len() >= 624 {
+        if let Some(pool) = parse_phoenix_market(pool_address, data, slot) {
+            return Some(pool);
+        }
+    }
+    if data.len() >= 256 {
+        if let Some(pool) = parse_manifest_market(pool_address, data, slot) {
+            return Some(pool);
+        }
+    }
+    None
+}
+
+/// Parse a Phoenix V1 market account (header >= 624 bytes, variable total size).
+///
+/// Layout (byte offsets from MarketHeader):
+///   48  base_mint (Pubkey, 32)
+///   80  base_vault (Pubkey, 32)
+///   136 base_lot_size (u64, 8)
+///   152 quote_mint (Pubkey, 32)
+///   184 quote_vault (Pubkey, 32)
+///   240 quote_lot_size (u64, 8)
+///
+/// Top-of-book extraction deferred — requires walking the Red-Black tree.
+/// For now we discover the pool and index it by token pair; reserves and
+/// prices are set to zero/None.
+pub fn parse_phoenix_market(pool_address: &Pubkey, data: &[u8], slot: u64) -> Option<PoolState> {
+    const HEADER_LEN: usize = 624;
+    if data.len() < HEADER_LEN { return None; }
+
+    let base_mint = Pubkey::new_from_array(data[48..80].try_into().ok()?);
+    let quote_mint = Pubkey::new_from_array(data[152..184].try_into().ok()?);
+    let base_vault = Pubkey::new_from_array(data[80..112].try_into().ok()?);
+    let quote_vault = Pubkey::new_from_array(data[184..216].try_into().ok()?);
+    let base_lot_size = u64::from_le_bytes(data[136..144].try_into().ok()?);
+    let quote_lot_size = u64::from_le_bytes(data[240..248].try_into().ok()?);
+
+    if base_lot_size == 0 || quote_lot_size == 0 { return None; }
+    if base_mint == Pubkey::default() || quote_mint == Pubkey::default() { return None; }
+
+    Some(PoolState {
+        address: *pool_address,
+        dex_type: DexType::Phoenix,
+        token_a_mint: base_mint,
+        token_b_mint: quote_mint,
+        token_a_reserve: 0,
+        token_b_reserve: 0,
+        fee_bps: DexType::Phoenix.base_fee_bps(),
+        current_tick: None,
+        sqrt_price_x64: None,
+        liquidity: None,
+        last_slot: slot,
+        extra: PoolExtra {
+            vault_a: Some(base_vault),
+            vault_b: Some(quote_vault),
+            ..Default::default()
+        },
+        best_bid_price: None,
+        best_ask_price: None,
+    })
+}
+
+/// Parse a Manifest market account (fixed header = 256 bytes, variable total size).
+///
+/// Layout (byte offsets from MarketFixed):
+///   16  base_mint (Pubkey, 32)
+///   48  quote_mint (Pubkey, 32)
+///   80  base_vault (Pubkey, 32)
+///   112 quote_vault (Pubkey, 32)
+///
+/// Top-of-book extraction deferred — tree node layout in the dynamic section
+/// needs careful verification. For now we discover the pool and index by pair.
+pub fn parse_manifest_market(pool_address: &Pubkey, data: &[u8], slot: u64) -> Option<PoolState> {
+    const HEADER_LEN: usize = 256;
+    if data.len() < HEADER_LEN { return None; }
+
+    let base_mint = Pubkey::new_from_array(data[16..48].try_into().ok()?);
+    let quote_mint = Pubkey::new_from_array(data[48..80].try_into().ok()?);
+    let base_vault = Pubkey::new_from_array(data[80..112].try_into().ok()?);
+    let quote_vault = Pubkey::new_from_array(data[112..144].try_into().ok()?);
+
+    if base_mint == Pubkey::default() || quote_mint == Pubkey::default() { return None; }
+
+    Some(PoolState {
+        address: *pool_address,
+        dex_type: DexType::Manifest,
+        token_a_mint: base_mint,
+        token_b_mint: quote_mint,
+        token_a_reserve: 0,
+        token_b_reserve: 0,
+        fee_bps: 0,
+        current_tick: None,
+        sqrt_price_x64: None,
+        liquidity: None,
+        last_slot: slot,
+        extra: PoolExtra {
+            vault_a: Some(base_vault),
+            vault_b: Some(quote_vault),
+            ..Default::default()
+        },
+        best_bid_price: None,
+        best_ask_price: None,
+    })
 }
