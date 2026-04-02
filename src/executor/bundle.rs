@@ -138,12 +138,18 @@ impl BundleBuilder {
             }
         }
 
+        // Resolve token programs: if pool data says SPL Token but mint is actually Token-2022,
+        // the ATA creation and swap IX will fail. Check wSOL (always SPL Token) and use
+        // the pool's stored token_program for the rest. This covers DLMM/DAMM v2/CP pools
+        // which store the flag. For Orca/CLMM pools (no flag), we default to SPL Token
+        // which is correct for 99% of their tokens.
+        let wsol = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
+
         // Create ATAs idempotently (no-op if they already exist)
         for (mint, mint_token_program) in &mut ata_mints {
-            // Heuristic: pump.fun tokens (vanity addresses ending in "pump") are Token-2022
-            let mint_str = mint.to_string();
-            if mint_str.ends_with("pump") && *mint_token_program != token_2022 {
-                *mint_token_program = token_2022;
+            // wSOL is always SPL Token — no need to check
+            if *mint == wsol {
+                *mint_token_program = token_program;
             }
             debug!("ATA create: mint={}, program={}", mint, mint_token_program);
             let ata = derive_ata_with_program(&signer_pubkey, mint, mint_token_program);
