@@ -229,6 +229,7 @@ impl MultiRelay {
             Ok(resp) => {
                 match resp.json::<serde_json::Value>().await {
                     Ok(body) => {
+                        debug!("Jito response: {}", body);
                         if let Some(bundle_id) = body.get("result").and_then(|v| v.as_str()) {
                             RelayResult {
                                 relay_name: "jito".to_string(),
@@ -251,7 +252,7 @@ impl MultiRelay {
                                 bundle_id: None,
                                 success: false,
                                 latency_us: latency,
-                                error: Some("Unexpected response format".to_string()),
+                                error: Some(format!("Unexpected response: {}", body)),
                             }
                         }
                     }
