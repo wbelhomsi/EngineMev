@@ -334,6 +334,7 @@ pub fn parse_orca_whirlpool(pool_address: &Pubkey, data: &[u8], slot: u64) -> Op
         return None;
     }
 
+    let tick_spacing = u16::from_le_bytes(data[41..43].try_into().ok()?);
     let liquidity = u128::from_le_bytes(data[49..65].try_into().ok()?);
     let sqrt_price_x64 = u128::from_le_bytes(data[65..81].try_into().ok()?);
     let tick = i32::from_le_bytes(data[81..85].try_into().ok()?);
@@ -357,6 +358,7 @@ pub fn parse_orca_whirlpool(pool_address: &Pubkey, data: &[u8], slot: u64) -> Op
         extra: PoolExtra {
             vault_a: Some(Pubkey::new_from_array(data[133..165].try_into().ok()?)),
             vault_b: Some(Pubkey::new_from_array(data[213..245].try_into().ok()?)),
+            tick_spacing: Some(tick_spacing),
             ..Default::default()
         },
     })
@@ -382,8 +384,11 @@ pub fn parse_raydium_clmm(pool_address: &Pubkey, data: &[u8], slot: u64) -> Opti
         return None;
     }
 
+    let amm_config = Pubkey::try_from(&data[9..41]).ok()?;
     let mint_0 = Pubkey::new_from_array(data[73..105].try_into().ok()?);
     let mint_1 = Pubkey::new_from_array(data[105..137].try_into().ok()?);
+    let observation_key = Pubkey::try_from(&data[201..233]).ok()?;
+    let tick_spacing = u16::from_le_bytes(data[235..237].try_into().ok()?);
     let liquidity = u128::from_le_bytes(data[237..253].try_into().ok()?);
     let sqrt_price_x64 = u128::from_le_bytes(data[253..269].try_into().ok()?);
     let tick = i32::from_le_bytes(data[269..273].try_into().ok()?);
@@ -405,6 +410,9 @@ pub fn parse_raydium_clmm(pool_address: &Pubkey, data: &[u8], slot: u64) -> Opti
         extra: PoolExtra {
             vault_a: Some(Pubkey::new_from_array(data[137..169].try_into().ok()?)),
             vault_b: Some(Pubkey::new_from_array(data[169..201].try_into().ok()?)),
+            config: Some(amm_config),
+            observation: Some(observation_key),
+            tick_spacing: Some(tick_spacing),
             ..Default::default()
         },
     })
@@ -621,6 +629,7 @@ pub fn parse_raydium_cp(
             config: Some(amm_config),
             token_program_a: Some(token_0_program),
             token_program_b: Some(token_1_program),
+            ..Default::default()
         },
     };
 
