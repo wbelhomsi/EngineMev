@@ -196,7 +196,13 @@ impl PoolState {
     /// Depth semantics:
     ///   a_to_b: token_a_reserve is the available base depth; cap input_base by it.
     ///   b_to_a: token_b_reserve is the available base-output depth; cap output_base by it.
+    ///
+    /// Manifest prices are D18 fixed-point (scaled by 10^18). For Manifest:
+    ///   a_to_b: output = input * price_d18 / 10^18
+    ///   b_to_a: output = input * 10^18 / price_d18
     fn get_orderbook_output(&self, input_amount: u64, a_to_b: bool) -> Option<u64> {
+        const D18: u128 = 1_000_000_000_000_000_000;
+
         // Apply fee
         let input_after_fee = (input_amount as u128)
             .checked_mul(10_000u128.checked_sub(self.fee_bps as u128)?)?
@@ -209,7 +215,12 @@ impl PoolState {
             }
             // Cap input (base atoms) by available bid depth (token_a_reserve)
             let effective_input = std::cmp::min(input_after_fee, self.token_a_reserve as u128);
-            let output = effective_input.checked_mul(price)?;
+            let raw = effective_input.checked_mul(price)?;
+            let output = if self.dex_type == DexType::Manifest {
+                raw.checked_div(D18)?
+            } else {
+                raw
+            };
             if output > u64::MAX as u128 {
                 return None;
             }
@@ -219,8 +230,12 @@ impl PoolState {
             if price == 0 {
                 return None;
             }
-            // Compute uncapped output (base atoms) = input_quote / price
-            let output = input_after_fee.checked_div(price)?;
+            // Compute uncapped output (base atoms)
+            let output = if self.dex_type == DexType::Manifest {
+                input_after_fee.checked_mul(D18)?.checked_div(price)?
+            } else {
+                input_after_fee.checked_div(price)?
+            };
             // Cap output (base atoms) by available ask depth (token_b_reserve)
             let capped_output = std::cmp::min(output, self.token_b_reserve as u128);
             if capped_output > u64::MAX as u128 {
