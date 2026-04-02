@@ -403,7 +403,8 @@ impl MultiRelay {
     /// Submit to Astralane Iris aggregator.
     ///
     /// Astralane routes bundles through Jito, Paladin, and swQoS paths.
-    /// Uses a Jito-compatible JSON-RPC interface.
+    /// Uses send_bundle with revert_protect=true for zero-loss failed bundles.
+    /// Auth via api_key header. Frankfurt IP endpoint for lowest latency.
     async fn submit_to_astralane(
         client: &reqwest::Client,
         url: &str,
@@ -414,12 +415,18 @@ impl MultiRelay {
         let payload = json!({
             "jsonrpc": "2.0",
             "id": 1,
-            "method": "sendBundle",
-            "params": [encoded_txs]
+            "method": "send_bundle",
+            "params": [{
+                "encoded_transactions": encoded_txs,
+                "revert_protect": true
+            }]
         });
+
+        let api_key = std::env::var("ASTRALANE_API_KEY").unwrap_or_default();
 
         let result = client
             .post(url)
+            .header("api_key", &api_key)
             .json(&payload)
             .send()
             .await;
