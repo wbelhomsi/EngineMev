@@ -1,7 +1,7 @@
 # DEX Swap Instruction Reference
 
 Accounts, PDA derivations, discriminators, and data layouts for building raw swap instructions.
-Verified against a production CPI router's on-chain source code (`a production CPI router's on-chain source code`).
+Verified against a production CPI router's on-chain source code.
 
 > The CPI discriminators below are the same bytes used in raw direct calls — the Anchor `global:` hash
 > produces the same 8-byte prefix regardless of whether you call via CPI or direct instruction.
