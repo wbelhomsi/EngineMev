@@ -31,6 +31,8 @@ fn make_cache_with_pools(orca_addr: Pubkey, sanctum_addr: Pubkey) -> StateCache 
         liquidity: None,
         last_slot: 100,
         extra: PoolExtra::default(),
+        best_bid_price: None,
+        best_ask_price: None,
     });
 
     // Sanctum virtual pool: rate 1.082
@@ -48,6 +50,8 @@ fn make_cache_with_pools(orca_addr: Pubkey, sanctum_addr: Pubkey) -> StateCache 
         liquidity: None,
         last_slot: 100,
         extra: PoolExtra::default(),
+        best_bid_price: None,
+        best_ask_price: None,
     });
 
     cache

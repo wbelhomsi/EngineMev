@@ -361,6 +361,8 @@ pub fn parse_orca_whirlpool(pool_address: &Pubkey, data: &[u8], slot: u64) -> Op
             tick_spacing: Some(tick_spacing),
             ..Default::default()
         },
+        best_bid_price: None,
+        best_ask_price: None,
     })
 }
 
@@ -415,6 +417,8 @@ pub fn parse_raydium_clmm(pool_address: &Pubkey, data: &[u8], slot: u64) -> Opti
             tick_spacing: Some(tick_spacing),
             ..Default::default()
         },
+        best_bid_price: None,
+        best_ask_price: None,
     })
 }
 
@@ -466,6 +470,8 @@ pub fn parse_meteora_dlmm(pool_address: &Pubkey, data: &[u8], slot: u64) -> Opti
             vault_b: Some(Pubkey::new_from_array(data[184..216].try_into().ok()?)),
             ..Default::default()
         },
+        best_bid_price: None,
+        best_ask_price: None,
     })
 }
 
@@ -526,6 +532,8 @@ pub fn parse_meteora_damm_v2(pool_address: &Pubkey, data: &[u8], slot: u64) -> O
             vault_b: Some(Pubkey::new_from_array(data[264..296].try_into().ok()?)),
             ..Default::default()
         },
+        best_bid_price: None,
+        best_ask_price: None,
     })
 }
 
@@ -574,6 +582,8 @@ pub fn parse_raydium_amm_v4(
             vault_b: Some(quote_vault),
             ..Default::default()
         },
+        best_bid_price: None,
+        best_ask_price: None,
     };
 
     Some((pool, (base_vault, quote_vault)))
@@ -631,6 +641,8 @@ pub fn parse_raydium_cp(
             token_program_b: Some(token_1_program),
             ..Default::default()
         },
+        best_bid_price: None,
+        best_ask_price: None,
     };
 
     Some((pool, (vault_0, vault_1)))

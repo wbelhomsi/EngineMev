@@ -170,6 +170,9 @@ impl BundleBuilder {
                 ).ok_or_else(|| anyhow::anyhow!("Missing pool data for DAMM v2"))
             }
             DexType::SanctumInfinity => self.build_sanctum_swap(hop, minimum_amount_out),
+            DexType::Phoenix | DexType::Manifest => {
+                Err(anyhow::anyhow!("Swap IX builder not yet implemented for {:?}", hop.dex_type))
+            }
         }
     }
 
