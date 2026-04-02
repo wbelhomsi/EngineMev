@@ -2,7 +2,7 @@
 
 ## What This Is
 
-Halal-compliant MEV backrun engine on Solana. Detects price dislocations across 6 DEXes via Yellowstone Geyser (Helius LaserStream) account streaming, then submits atomic arbitrage bundles via multi-relay fan-out (Jito, Nozomi, bloXroute, Astralane, ZeroSlot).
+Halal-compliant MEV backrun engine on Solana. Detects price dislocations across 8 DEXes (6 AMMs + 2 CLOBs) via Yellowstone Geyser (Helius LaserStream) account streaming, then submits atomic arbitrage bundles via multi-relay fan-out (Jito, Nozomi, bloXroute, Astralane, ZeroSlot).
 
 **Repo:** github.com/wbelhomsi/EngineMev
 **Status:** DRY_RUN mode working. Detecting real arb opportunities on mainnet (~27 in 3 min, ~0.0117 SOL potential profit). Not yet submitting bundles.
@@ -44,7 +44,7 @@ Subscribe by **DEX program owner** — NOT by individual vault accounts or Token
 - **TLS required for LaserStream**: `ClientTlsConfig::new().with_native_roots()` on the gRPC builder.
 - **crossbeam-channel** between async Geyser stream and sync router thread.
 - **DashMap** for lock-free concurrent cache reads across threads.
-- **Per-DEX parsers in stream.rs**: Route by data size (653=Orca, 1560=CLMM, 904=DLMM, 1112=DAMM v2, 752=Raydium AMM, 637=Raydium CP).
+- **Per-DEX parsers in stream.rs**: Route by data size (653=Orca, 1560=CLMM, 904=DLMM, 1112=DAMM v2, 752=Raydium AMM, 637=Raydium CP). Phoenix and Manifest use variable-size accounts routed by `try_parse_orderbook()` fallback instead of data size.
 - **BlockhashCache**: `Arc<RwLock>` with 5s staleness, background 2s refresh via `getLatestBlockhash`.
 - **API key redaction**: `config::redact_url()` strips keys from all log output.
 
@@ -56,14 +56,14 @@ src/
 │                        # Geyser reconnect with exponential backoff (1s → 30s max)
 │                        # Sanctum virtual pool bootstrap, blockhash task spawn
 ├── lib.rs               # Re-exports modules for integration tests
-├── config.rs            # Env config, 7 DEX program IDs, relay endpoints, redact_url()
+├── config.rs            # Env config, 9 DEX program IDs, relay endpoints, redact_url()
 ├── mempool/
 │   ├── mod.rs           # Exports GeyserStream, PoolStateChange
 │   └── stream.rs        # Yellowstone gRPC subscription, per-DEX pool state parsers,
 │                        # lazy vault fetch for Raydium, approx_reserves_from_sqrt_price
 ├── router/
 │   ├── mod.rs           # Exports RouteCalculator, ProfitSimulator
-│   ├── pool.rs          # DexType (7 variants), PoolState, ArbRoute, RouteHop, DetectedSwap
+│   ├── pool.rs          # DexType (9 variants: 6 AMMs + Sanctum + PhoenixV1 + Manifest), PoolState, ArbRoute, RouteHop, DetectedSwap
 │   ├── calculator.rs    # 2-hop and 3-hop circular route discovery, O(1) via token→pool index
 │   └── simulator.rs     # Final go/no-go gate: re-reads fresh state, calculates tip, checks min profit
 ├── executor/
@@ -88,6 +88,8 @@ src/
 | Meteora DLMM | `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo` | 904 | Yes |
 | Meteora DAMM v2 | `cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG` | 1112 | Yes |
 | Sanctum S Controller | `5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx` | varies | Yes |
+| Phoenix V1 | `PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY` | variable (624+ header) | No (Shank) |
+| Manifest | `MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms` | variable (256+ header) | No |
 
 **See `docs/DEX-REFERENCE.md` for full account layouts, byte offsets, and quoting math.**
 
@@ -142,7 +144,7 @@ cargo test --features e2e --test e2e          # 4 e2e tests
 Base DEX↔DEX backrun arb working in dry-run on mainnet.
 
 **Done:**
-- Geyser streaming with per-DEX pool state parsing (6 DEXes)
+- Geyser streaming with per-DEX pool state parsing (8 DEXes: 6 AMMs + 2 CLOBs)
 - Lazy pool discovery via Geyser (zero bootstrap)
 - Lazy vault fetch for Raydium AMM/CP
 - CLMM single-tick math using u128 integer arithmetic (Orca, Raydium CLMM, DAMM v2 concentrated)
@@ -157,6 +159,8 @@ Base DEX↔DEX backrun arb working in dry-run on mainnet.
 - Helius LaserStream TLS connection
 - API key redaction in all logs
 - LST rate arb (Phase 2 bolt-on, Sanctum virtual pools)
+- Phoenix V1 + Manifest CLOB market parsing (header extraction, pool discovery)
+- Phoenix + Manifest swap instruction builders
 - 26 unit tests + 4 e2e tests passing
 - Tested on mainnet: ~300 realistic opportunities in 5 min, ~0.000189 SOL avg profit per opp
 
@@ -180,7 +184,7 @@ Flashbots MEV-Share on Ethereum. See `docs/STRATEGY-MEVSHARE-ETH.md`.
 
 | File | Content |
 |------|---------|
-| `docs/DEX-REFERENCE.md` | **Primary reference.** All 7 DEX account layouts, byte offsets, quoting math, Geyser strategy |
+| `docs/DEX-REFERENCE.md` | **Primary reference.** All 9 DEX account layouts, byte offsets, quoting math, Geyser strategy |
 | `docs/STRATEGY-LST-ARB.md` | LST rate arb strategy (jitoSOL/mSOL/bSOL) |
 | `docs/STRATEGY-CEX-DEX-ARB.md` | CEX↔DEX arb strategy (Binance WS) |
 | `docs/STRATEGY-MEVSHARE-ETH.md` | MEV-Share on Ethereum (Flashbots) |
@@ -208,6 +212,9 @@ Flashbots MEV-Share on Ethereum. See `docs/STRATEGY-MEVSHARE-ETH.md`.
 16. **DLMM bin prices are precomputed on-chain.** Don't compute `(1+binStep/10000)^binId` — it overflows for real bin IDs. Parse `bin.price` (u128) from bin array accounts instead.
 17. **DLMM active_id max is ~443636** (not 2^23). Values like 8388608 are garbage — skip those pools.
 18. **Profit sanity cap: 10 SOL.** Any route showing >10 SOL profit is an approximation artifact. The simulator rejects these automatically.
+19. **Phoenix/Manifest SDK crates (phoenix-v1, manifest-dex) conflict with solana-sdk 2.2.** We use raw byte-offset parsing with bytemuck instead. Do not add these crates to Cargo.toml.
+20. **Phoenix market accounts are variable-size.** Can't route by data.len() like AMMs. The `try_parse_orderbook()` fallback handles this.
+21. **Phoenix orderbook top-of-book requires Red-Black tree traversal.** Currently deferred — pools are discovered with zero reserves/pricing. Full book parsing needs the sokoban crate or manual tree walk.
 
 ## Environment Variables
 

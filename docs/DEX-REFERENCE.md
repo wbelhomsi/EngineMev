@@ -15,6 +15,8 @@ Authoritative reference for all supported DEX programs. Account offsets verified
 | Meteora DLMM | `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo` | 904 | Yes | Bin-by-bin simulation (bin arrays) |
 | Meteora DAMM v2 | `cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG` | 1112 | Yes | Pool state (dual mode: CP or concentrated) |
 | Sanctum Infinity | `5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx` | varies | Yes | Virtual pool (synthetic reserves from oracle rate) |
+| Phoenix V1 | `PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY` | variable (624+ header) | No (Shank) | Top-of-book from Red-Black tree (currently deferred) |
+| Manifest | `MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms` | variable (256+ header) | No | O(1) top-of-book via bids_best_index/asks_best_index |
 
 ---
 
@@ -269,6 +271,58 @@ output = reserve_b * input / (reserve_a + input)
 **Mode 0-3 (Concentrated liquidity pools):**
 Uses `liquidity` (360), `sqrtPrice` (456), `sqrtMinPrice` (424), `sqrtMaxPrice` (440).
 Dynamic CLMM math — `getNextSqrtPrice` + liquidity delta calculations. No vault balances needed.
+
+---
+
+### Phoenix V1 — Market (variable size, 624-byte header + orderbook, Shank)
+
+Program ID: `PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY`
+
+No Anchor discriminator. Uses Shank IDL. Account size is variable: 624-byte MarketHeader followed by the orderbook data (Red-Black tree nodes for bids/asks). Can't be routed by `data.len()` — handled by `try_parse_orderbook()` fallback.
+
+**MarketHeader layout (first 624 bytes):**
+
+| Offset | Size | Field | Notes |
+|--------|------|-------|-------|
+| 0 | 8 | discriminant | u64 |
+| 8 | 8 | status | u64 |
+| 48 | 32 | base_mint | Pubkey |
+| 80 | 32 | base_vault | Pubkey |
+| 136 | 8 | base_lot_size | u64 |
+| 152 | 32 | quote_mint | Pubkey |
+| 184 | 32 | quote_vault | Pubkey |
+| 240 | 8 | quote_lot_size | u64 |
+| 248 | 8 | tick_size_in_quote_atoms_per_base_unit | u64 |
+
+**Orderbook data (bytes 624+):** Red-Black tree nodes for bids and asks. Top-of-book retrieval requires traversing the tree to find the best bid/ask. This traversal is currently deferred — pools are discovered with zero reserves/pricing from the header alone.
+
+**Quoting:** Price in quote atoms per base unit. Convert lots to native amounts using `base_lot_size` and `quote_lot_size`. Top-of-book spread gives the effective exchange rate.
+
+---
+
+### Manifest — Market (variable size, 256-byte header + orderbook)
+
+Program ID: `MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms`
+
+No Anchor discriminator. Account size is variable: 256-byte MarketFixed header followed by dynamic book data. Can't be routed by `data.len()` — handled by `try_parse_orderbook()` fallback.
+
+**MarketFixed layout (first 256 bytes):**
+
+| Offset | Size | Field | Notes |
+|--------|------|-------|-------|
+| 0 | 8 | discriminant | u64 |
+| 9 | 1 | base_mint_decimals | u8 |
+| 10 | 1 | quote_mint_decimals | u8 |
+| 16 | 32 | base_mint | Pubkey |
+| 48 | 32 | quote_mint | Pubkey |
+| 80 | 32 | base_vault | Pubkey |
+| 112 | 32 | quote_vault | Pubkey |
+| 160 | 4 | bids_best_index | u32 — index into dynamic book section |
+| 168 | 4 | asks_best_index | u32 — index into dynamic book section |
+
+**Orderbook data (bytes 256+):** Dynamic node array. `bids_best_index` and `asks_best_index` give O(1) access to the best bid/ask without tree traversal.
+
+**Quoting:** Use `bids_best_index`/`asks_best_index` to look up the best resting order price and size from the dynamic section. Price is in native quote units per base unit adjusted by decimals.
 
 ---
 
