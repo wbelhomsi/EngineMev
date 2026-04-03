@@ -1,25 +1,47 @@
 # Next Session TODO
 
-## Issue 1: Mint fetch adds latency → pool state expires before simulation
+## Status: Jito accepts bundles at 66ms. Need rate limiter + verify on-chain landing.
 
-The race condition fix works (mint programs are cached before router notification), but the ~100ms per mint fetch delays the PoolStateChange delivery. By the time the router runs the simulator, the pool state has expired from the 400ms TTL cache.
+## 1. Add Jito rate limiter (CRITICAL)
+Jito allows 1 bundle/sec unauthenticated. We're submitting every opportunity (~5/sec), triggering rate limit backoff after the first bundle. Only the first bundle per session gets accepted.
 
-**Evidence:** 95 mints cached, 136 pools tracked, 0 opportunities (simulator rejects all as stale).
+**Fix:** Add rate limiter back in `src/main.rs` router loop:
+```rust
+let mut last_submission = Instant::now() - Duration::from_secs(5);
+const MIN_INTERVAL: Duration = Duration::from_millis(1500);
 
-**Fix options (pick one):**
-1. **Fire-and-forget mint fetch BUT skip first event** — spawn the fetch async, skip the first PoolStateChange for new mints, let the second event (with mints already cached) proceed normally. Most pools fire multiple events per second.
-2. **Increase simulator TTL** — change `get()` TTL from 400ms to 2s. Pools are still "fresh enough" within 2 seconds.
-3. **Fetch mints in parallel** — fetch both mints concurrently instead of sequentially (halves latency).
+// Before submitting:
+if last_submission.elapsed() < MIN_INTERVAL { continue; }
+// After submitting:
+last_submission = Instant::now();
+```
 
-**Recommended: Option 1 + 3.** Fire-and-forget for first event, mints cache within ~100ms, second event proceeds with cached mints. Also fetch both mints in parallel with `tokio::join!`.
+## 2. Verify Astralane auth fix works
+Changed from `api_key` header to `?api-key=` query param. Was getting 401 Unauthorized. Need to test if the query param approach works.
 
-## Issue 2: Add compute budget IX
-Bundles need priority fees for Jito auction placement.
+## 3. Check if Jito-accepted bundles land on-chain
+Previous accepted bundle IDs:
+- `659231248cc2a7f39adb8e6d8038191423d4316ef287db1520cfcdd3934681d8`
+- `cf6ec769977e815666c46bcc0eb9ef337877e11e8e088a71a3c4f7064a6235b5`
 
-## Issue 3: Simulate before submitting
-After fixing the above, capture a tx and run `simulateTransaction` to verify it passes before live testing.
+Check: https://explorer.jito.wtf/bundle/<id>
+If they show as "landed" — we're making money. If "dropped" — the arb was already captured by faster searchers.
 
-## Reference
-- Searcher: `149xtHKerf2MgJVQ2CZB34bUALs8GaZjZWmQnC9si9yh` (0.75 SOL, untouched)
-- 66 tests, 8 DEXes, Jito+Astralane relays
-- The mint cache + Token-2022 detection is CORRECT — just needs the timing fixed
+## 4. Apply for Jito UUID (pending)
+Application submitted via pastebin. Once approved, set `JITO_AUTH_UUID` in .env for higher rate limits.
+
+## What's working
+- Full pipeline: Geyser → 8 DEX parsers → route → simulate → build bundle → ATA creation → compute budget → tip → submit
+- Mint program cache (SPL Token vs Token-2022) — correctly identifies pump.fun tokens
+- Fire-and-forget mint fetch with router gating (race condition fixed)
+- Jito Frankfurt at 66ms, Astralane FRA with revert_protect
+- Compute budget IX (400K CU limit, 1000 micro-lamport priority)
+- 66 tests passing
+- Balance: 0.75 SOL (untouched — minimum_amount_out + revert_protect)
+
+## Key findings from this session
+- Jito rate limit: 1/sec unauth, "Network congested" after backoff
+- Astralane was 401 (wrong auth method) — fixed to query param
+- Mint cache race condition — fixed (fire-and-forget + gate router on cached mints)
+- DLMM bitmap extension — pass program ID for Option<UncheckedAccount> None
+- Token-2022 detection — getAccountInfo(mint).owner via RPC, cached in DashMap
