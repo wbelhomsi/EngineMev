@@ -1,9 +1,11 @@
 use anyhow::Result;
 use crossbeam_channel::Sender;
+use dashmap::DashMap;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
+use std::time::Instant;
 use tokio::sync::watch;
 use tracing::{info, warn, debug};
 use yellowstone_grpc_client::GeyserGrpcClient;
@@ -48,10 +50,22 @@ pub struct PoolStateChange {
 /// 2. When vault balances change (someone swapped), emit PoolStateChange
 /// 3. Downstream router detects price dislocation across DEXes
 /// 4. Bundle submitted for next slot via multi-relay fan-out
+/// Max concurrent RPC calls to prevent flooding Helius.
+const MAX_CONCURRENT_RPC: usize = 10;
+/// Minimum interval between vault fetches for the same pool.
+const VAULT_FETCH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub struct GeyserStream {
     config: Arc<BotConfig>,
     state_cache: StateCache,
     http_client: reqwest::Client,
+    /// Semaphore to cap concurrent RPC calls.
+    rpc_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Tracks DLMM pools whose bitmap has been checked (found or not).
+    /// Once checked, never re-check — bitmap existence doesn't change.
+    bitmap_checked: Arc<DashMap<Pubkey, bool>>,
+    /// Last vault fetch time per pool — prevents re-fetching within cooldown.
+    vault_last_fetch: Arc<DashMap<Pubkey, Instant>>,
 }
 
 impl GeyserStream {
@@ -60,6 +74,9 @@ impl GeyserStream {
             config,
             state_cache,
             http_client,
+            rpc_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_RPC)),
+            bitmap_checked: Arc::new(DashMap::new()),
+            vault_last_fetch: Arc::new(DashMap::new()),
         }
     }
 
@@ -215,59 +232,77 @@ impl GeyserStream {
                         let client = self.http_client.clone();
                         let url = self.config.rpc_url.clone();
                         let cache = self.state_cache.clone();
+                        let sem = self.rpc_semaphore.clone();
                         tokio::spawn(async move {
+                            let _permit = sem.acquire().await;
                             let _ = fetch_mint_program(&client, &url, &cache, &mint).await;
                         });
                     }
                 }
 
                 // For Category B (Raydium AMM/CP): trigger async vault balance fetch
+                // Throttled: skip if we fetched this pool within VAULT_FETCH_COOLDOWN
                 if let Some((vault_a, vault_b)) = vault_info {
-                    let client = self.http_client.clone();
-                    let url = self.config.rpc_url.clone();
-                    let cache = self.state_cache.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = fetch_vault_balances_for_pool(
-                            &client, &url, &cache, pool_address, vault_a, vault_b,
-                        ).await {
-                            debug!("Vault fetch failed for {}: {}",
-                                pool_address, crate::config::redact_url(&e.to_string()));
-                        }
-                    });
+                    let should_fetch = self.vault_last_fetch
+                        .get(&pool_address)
+                        .map(|t| t.value().elapsed() >= VAULT_FETCH_COOLDOWN)
+                        .unwrap_or(true);
+                    if should_fetch {
+                        self.vault_last_fetch.insert(pool_address, Instant::now());
+                        let client = self.http_client.clone();
+                        let url = self.config.rpc_url.clone();
+                        let cache = self.state_cache.clone();
+                        let sem = self.rpc_semaphore.clone();
+                        tokio::spawn(async move {
+                            let _permit = sem.acquire().await;
+                            if let Err(e) = fetch_vault_balances_for_pool(
+                                &client, &url, &cache, pool_address, vault_a, vault_b,
+                            ).await {
+                                debug!("Vault fetch failed for {}: {}",
+                                    pool_address, crate::config::redact_url(&e.to_string()));
+                            }
+                        });
+                    }
                 }
 
-                // For Meteora DLMM: fetch bitmap extension existence on first discovery
+                // For Meteora DLMM: fetch bitmap extension existence on first discovery.
+                // Cached permanently in bitmap_checked — never re-check the same pool.
                 if matches!(self.state_cache.get_any(&pool_address).map(|p| p.dex_type),
                             Some(crate::router::pool::DexType::MeteoraDlmm))
                 {
-                    if let Some(pool) = self.state_cache.get_any(&pool_address) {
-                        if pool.extra.bitmap_extension.is_none() {
-                            let client = self.http_client.clone();
-                            let url = self.config.rpc_url.clone();
-                            let cache = self.state_cache.clone();
-                            let dlmm_program = crate::config::programs::meteora_dlmm();
-                            tokio::spawn(async move {
-                                let (bitmap_pda, _) = Pubkey::find_program_address(
-                                    &[b"bitmap", pool_address.as_ref()], &dlmm_program,
-                                );
-                                // Check if it exists on-chain
-                                match check_account_exists(&client, &url, &bitmap_pda).await {
-                                    Ok(true) => {
-                                        if let Some(mut p) = cache.get_any(&pool_address) {
-                                            p.extra.bitmap_extension = Some(bitmap_pda);
-                                            cache.upsert(pool_address, p);
-                                            debug!("DLMM bitmap extension found for {}", pool_address);
-                                        }
+                    if !self.bitmap_checked.contains_key(&pool_address) {
+                        self.bitmap_checked.insert(pool_address, false); // mark as in-flight
+                        let client = self.http_client.clone();
+                        let url = self.config.rpc_url.clone();
+                        let cache = self.state_cache.clone();
+                        let bitmap_checked = self.bitmap_checked.clone();
+                        let sem = self.rpc_semaphore.clone();
+                        let dlmm_program = crate::config::programs::meteora_dlmm();
+                        tokio::spawn(async move {
+                            let _permit = sem.acquire().await;
+                            let (bitmap_pda, _) = Pubkey::find_program_address(
+                                &[b"bitmap", pool_address.as_ref()], &dlmm_program,
+                            );
+                            match check_account_exists(&client, &url, &bitmap_pda).await {
+                                Ok(true) => {
+                                    if let Some(mut p) = cache.get_any(&pool_address) {
+                                        p.extra.bitmap_extension = Some(bitmap_pda);
+                                        cache.upsert(pool_address, p);
                                     }
-                                    Ok(false) => {
-                                        debug!("DLMM bitmap extension not initialized for {}", pool_address);
-                                    }
-                                    Err(e) => {
-                                        debug!("DLMM bitmap check failed: {}", crate::config::redact_url(&e.to_string()));
-                                    }
+                                    bitmap_checked.insert(pool_address, true);
+                                    debug!("DLMM bitmap extension found for {}", pool_address);
                                 }
-                            });
-                        }
+                                Ok(false) => {
+                                    bitmap_checked.insert(pool_address, false);
+                                    debug!("DLMM bitmap not initialized for {}", pool_address);
+                                }
+                                Err(e) => {
+                                    // Remove from checked so we retry on next update
+                                    bitmap_checked.remove(&pool_address);
+                                    debug!("DLMM bitmap check failed: {}", crate::config::redact_url(&e.to_string()));
+                                }
+                            }
+                        });
                     }
                 }
 
