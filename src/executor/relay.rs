@@ -3,7 +3,7 @@ use base64::{engine::general_purpose, Engine as _};
 use serde_json::json;
 use std::sync::Arc;
 use tokio::task::JoinSet;
-use tracing::{info, error, debug};
+use tracing::{info, warn, error, debug};
 
 use crate::config::BotConfig;
 
@@ -160,10 +160,17 @@ impl MultiRelay {
             match result {
                 Ok(relay_result) => {
                     if relay_result.success {
-                        debug!(
+                        info!(
                             "Bundle accepted by {}: id={:?} latency={}us",
                             relay_result.relay_name,
                             relay_result.bundle_id,
+                            relay_result.latency_us,
+                        );
+                    } else {
+                        warn!(
+                            "Bundle REJECTED by {}: {:?} (latency={}us)",
+                            relay_result.relay_name,
+                            relay_result.error,
                             relay_result.latency_us,
                         );
                     }
@@ -424,9 +431,19 @@ impl MultiRelay {
 
         let api_key = std::env::var("ASTRALANE_API_KEY").unwrap_or_default();
 
+        // Astralane accepts api-key as query parameter
+        let url_with_key = if api_key.is_empty() {
+            url.to_string()
+        } else {
+            if url.contains('?') {
+                format!("{}&api-key={}", url, api_key)
+            } else {
+                format!("{}?api-key={}", url, api_key)
+            }
+        };
+
         let result = client
-            .post(url)
-            .header("api_key", &api_key)
+            .post(&url_with_key)
             .json(&payload)
             .send()
             .await;
