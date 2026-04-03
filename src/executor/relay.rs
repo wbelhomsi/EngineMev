@@ -40,16 +40,25 @@ pub struct MultiRelay {
     last_submit: Arc<dashmap::DashMap<String, std::time::Instant>>,
 }
 
-/// Per-relay rate limits (minimum interval between submissions)
+/// Per-relay rate limits from env (e.g., JITO_TPS=1, ASTRALANE_TPS=40).
+/// Falls back to sensible defaults if not set.
 fn relay_rate_limit(name: &str) -> std::time::Duration {
-    match name {
-        "jito" => std::time::Duration::from_millis(1500),       // 1/sec + safety margin
-        "astralane" => std::time::Duration::from_millis(30),    // 40 TPS
-        "nozomi" => std::time::Duration::from_millis(200),      // ~5 TPS
-        "bloxroute" => std::time::Duration::from_millis(200),   // ~5 TPS
-        "zeroslot" => std::time::Duration::from_millis(200),    // ~5 TPS
-        _ => std::time::Duration::from_millis(1000),
+    let env_key = format!("{}_TPS", name.to_uppercase());
+    let tps: f64 = std::env::var(&env_key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(match name {
+            "jito" => 1.0,
+            "astralane" => 40.0,
+            "nozomi" => 5.0,
+            "bloxroute" => 5.0,
+            "zeroslot" => 5.0,
+            _ => 1.0,
+        });
+    if tps <= 0.0 {
+        return std::time::Duration::from_millis(1000);
     }
+    std::time::Duration::from_millis((1000.0 / tps) as u64 + 10) // +10ms safety margin
 }
 
 impl MultiRelay {
