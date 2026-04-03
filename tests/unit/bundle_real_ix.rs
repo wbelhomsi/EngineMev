@@ -4,6 +4,7 @@ use std::str::FromStr;
 use solana_mev_bot::executor::bundle::{
     build_raydium_cp_swap_ix, build_damm_v2_swap_ix,
     build_orca_whirlpool_swap_ix, build_raydium_clmm_swap_ix, build_meteora_dlmm_swap_ix,
+    build_raydium_amm_swap_ix,
 };
 use solana_mev_bot::router::pool::{DexType, PoolState, PoolExtra};
 
@@ -364,4 +365,75 @@ fn test_meteora_dlmm_swap_ix_returns_none_without_vaults() {
     let signer = Pubkey::new_unique();
     let ix = build_meteora_dlmm_swap_ix(&signer, &pool, pool.token_a_mint, 2000, 1800);
     assert!(ix.is_none(), "Should return None when vaults are missing");
+}
+
+// ---- Raydium AMM v4 ----
+
+fn make_raydium_amm_pool() -> PoolState {
+    PoolState {
+        address: Pubkey::new_unique(),
+        dex_type: DexType::RaydiumAmm,
+        token_a_mint: Pubkey::new_unique(),
+        token_b_mint: Pubkey::new_unique(),
+        token_a_reserve: 1_000_000,
+        token_b_reserve: 1_000_000,
+        fee_bps: 25,
+        current_tick: None,
+        sqrt_price_x64: None,
+        liquidity: None,
+        last_slot: 100,
+        extra: PoolExtra {
+            vault_a: Some(Pubkey::new_unique()),
+            vault_b: Some(Pubkey::new_unique()),
+            open_orders: Some(Pubkey::new_unique()),
+            amm_nonce: Some(254), // valid nonce for PDA derivation
+            ..Default::default()
+        },
+        best_bid_price: None,
+        best_ask_price: None,
+    }
+}
+
+#[test]
+fn test_raydium_amm_swap_ix_account_count() {
+    let pool = make_raydium_amm_pool();
+    let signer = Pubkey::new_unique();
+    let ix = build_raydium_amm_swap_ix(&signer, &pool, pool.token_a_mint, 1000, 900).unwrap();
+    assert_eq!(ix.accounts.len(), 9, "Raydium AMM v4 swap needs 9 accounts");
+}
+
+#[test]
+fn test_raydium_amm_swap_ix_discriminator() {
+    let pool = make_raydium_amm_pool();
+    let signer = Pubkey::new_unique();
+    let ix = build_raydium_amm_swap_ix(&signer, &pool, pool.token_a_mint, 5000, 4500).unwrap();
+    assert_eq!(ix.data[0], 9u8, "Discriminator must be 9 (swap)");
+    assert_eq!(ix.data.len(), 17, "Data must be 17 bytes: 1 disc + 8 amount_in + 8 min_out");
+    let amount_in = u64::from_le_bytes(ix.data[1..9].try_into().unwrap());
+    assert_eq!(amount_in, 5000);
+    let min_out = u64::from_le_bytes(ix.data[9..17].try_into().unwrap());
+    assert_eq!(min_out, 4500);
+}
+
+#[test]
+fn test_raydium_amm_swap_ix_returns_none_without_vaults() {
+    let pool = PoolState {
+        address: Pubkey::new_unique(),
+        dex_type: DexType::RaydiumAmm,
+        token_a_mint: Pubkey::new_unique(),
+        token_b_mint: Pubkey::new_unique(),
+        token_a_reserve: 1_000_000,
+        token_b_reserve: 1_000_000,
+        fee_bps: 25,
+        current_tick: None,
+        sqrt_price_x64: None,
+        liquidity: None,
+        last_slot: 100,
+        extra: PoolExtra::default(), // no vaults, no nonce
+        best_bid_price: None,
+        best_ask_price: None,
+    };
+    let signer = Pubkey::new_unique();
+    let ix = build_raydium_amm_swap_ix(&signer, &pool, pool.token_a_mint, 1000, 900);
+    assert!(ix.is_none(), "Should return None when PoolExtra is empty");
 }

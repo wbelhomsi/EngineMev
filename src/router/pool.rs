@@ -46,6 +46,16 @@ pub struct PoolExtra {
     pub observation: Option<Pubkey>,
     /// Bitmap extension account (Meteora DLMM) — None if doesn't exist on-chain
     pub bitmap_extension: Option<Pubkey>,
+    /// Open orders account (Raydium AMM v4) — from pool state offset 496
+    pub open_orders: Option<Pubkey>,
+    /// Market account (Raydium AMM v4) — from pool state offset 528
+    pub market: Option<Pubkey>,
+    /// Market program (Raydium AMM v4) — from pool state offset 560 (OpenBook/Serum)
+    pub market_program: Option<Pubkey>,
+    /// Target orders account (Raydium AMM v4) — from pool state offset 592
+    pub target_orders: Option<Pubkey>,
+    /// AMM authority nonce (Raydium AMM v4) — from pool state offset 8
+    pub amm_nonce: Option<u8>,
 }
 
 /// Represents the on-chain state of an AMM pool.

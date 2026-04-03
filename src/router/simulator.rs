@@ -18,6 +18,9 @@ pub struct ProfitSimulator {
     state_cache: StateCache,
     tip_fraction: f64,
     min_profit_lamports: u64,
+    /// Extra relay tips beyond Jito (e.g., Astralane) in lamports.
+    /// These are deducted from profit alongside the Jito tip.
+    relay_extra_tips: u64,
 }
 
 /// Result of profit simulation — either a confirmed opportunity or a rejection.
@@ -27,8 +30,9 @@ pub enum SimulationResult {
     Profitable {
         route: ArbRoute,
         net_profit_lamports: u64,
-        tip_lamports: u64,
-        /// Profit after tip
+        /// Total tip budget (Jito + relay extras like Astralane)
+        total_tip_lamports: u64,
+        /// Profit after all tips
         final_profit_lamports: u64,
     },
     /// Route is not profitable. Reason provided for logging.
@@ -43,7 +47,14 @@ impl ProfitSimulator {
             state_cache,
             tip_fraction,
             min_profit_lamports,
+            relay_extra_tips: 0,
         }
+    }
+
+    /// Set extra relay tip amount (e.g., Astralane tip) that must be deducted from profit.
+    pub fn with_relay_extra_tips(mut self, extra_tips: u64) -> Self {
+        self.relay_extra_tips = extra_tips;
+        self
     }
 
     /// Run full simulation on a candidate route.
@@ -67,8 +78,9 @@ impl ProfitSimulator {
 
         let fresh_states: Vec<_> = fresh_states.into_iter().map(|s| s.unwrap()).collect();
 
-        // Step 2: Re-simulate with fresh state
+        // Step 2: Re-simulate with fresh state, collecting per-hop outputs
         let mut current_amount = route.input_amount;
+        let mut fresh_hop_outputs: Vec<u64> = Vec::with_capacity(route.hops.len());
 
         for (hop, pool) in route.hops.iter().zip(fresh_states.iter()) {
             let a_to_b = match pool.is_a_to_b(&hop.input_mint) {
@@ -94,6 +106,8 @@ impl ProfitSimulator {
                     };
                 }
             };
+
+            fresh_hop_outputs.push(current_amount);
         }
 
         // Step 3: Calculate profit
@@ -124,12 +138,25 @@ impl ProfitSimulator {
         }
 
         // Step 4: Calculate Jito tip
-        let tip_lamports = (gross_profit_u64 as f64 * self.tip_fraction) as u64;
+        let jito_tip_lamports = (gross_profit_u64 as f64 * self.tip_fraction) as u64;
 
-        // Step 5: Final profit after tip
-        let final_profit = gross_profit_u64.saturating_sub(tip_lamports);
+        // Step 5: Total tips = Jito + relay extras (Astralane, etc.)
+        let total_tip_lamports = jito_tip_lamports + self.relay_extra_tips;
 
-        // Step 6: Check minimum threshold
+        // Step 5a: Reject if total tips would exceed or equal profit (would lose money)
+        if total_tip_lamports >= gross_profit_u64 {
+            return SimulationResult::Unprofitable {
+                reason: format!(
+                    "Total tips ({}) >= gross profit ({}), would lose money",
+                    total_tip_lamports, gross_profit_u64
+                ),
+            };
+        }
+
+        // Step 6: Final profit after ALL tips
+        let final_profit = gross_profit_u64.saturating_sub(total_tip_lamports);
+
+        // Step 7: Check minimum threshold
         if final_profit < self.min_profit_lamports {
             return SimulationResult::Unprofitable {
                 reason: format!(
@@ -139,23 +166,28 @@ impl ProfitSimulator {
             };
         }
 
-        // Step 7: Reconstruct route with fresh estimates
+        // Step 8: Reconstruct route with fresh estimates and fresh hop outputs
         let mut fresh_route = route.clone();
         fresh_route.estimated_profit = gross_profit;
         fresh_route.estimated_profit_lamports = gross_profit_u64;
+        for (hop, &fresh_output) in fresh_route.hops.iter_mut().zip(fresh_hop_outputs.iter()) {
+            hop.estimated_output = fresh_output;
+        }
 
         debug!(
-            "Profitable route: {} hops, gross={}, tip={}, net={}",
+            "Profitable route: {} hops, gross={}, total_tips={} (jito={}, relay_extra={}), net={}",
             fresh_route.hop_count(),
             gross_profit_u64,
-            tip_lamports,
+            total_tip_lamports,
+            jito_tip_lamports,
+            self.relay_extra_tips,
             final_profit
         );
 
         SimulationResult::Profitable {
             route: fresh_route,
             net_profit_lamports: gross_profit_u64,
-            tip_lamports,
+            total_tip_lamports,
             final_profit_lamports: final_profit,
         }
     }

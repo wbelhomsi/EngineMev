@@ -3,7 +3,7 @@ use crossbeam_channel::Sender;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::watch;
 use tracing::{info, warn, debug};
 use yellowstone_grpc_client::GeyserGrpcClient;
@@ -14,6 +14,15 @@ use yellowstone_grpc_proto::prelude::{
 
 use crate::config::BotConfig;
 use crate::state::StateCache;
+
+// ─── Static Pubkeys (parsed once, reused across all parsers) ───────────────
+
+static SPL_TOKEN_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap()
+});
+static TOKEN_2022_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb").unwrap()
+});
 
 /// Notification that a pool's on-chain state was updated.
 /// The actual state is already in the StateCache — this is just a signal
@@ -236,7 +245,7 @@ impl GeyserStream {
                             let client = self.http_client.clone();
                             let url = self.config.rpc_url.clone();
                             let cache = self.state_cache.clone();
-                            let dlmm_program = Pubkey::from_str("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo").unwrap();
+                            let dlmm_program = crate::config::programs::meteora_dlmm();
                             tokio::spawn(async move {
                                 let (bitmap_pda, _) = Pubkey::find_program_address(
                                     &[b"bitmap", pool_address.as_ref()], &dlmm_program,
@@ -486,7 +495,7 @@ pub fn parse_orca_whirlpool(pool_address: &Pubkey, data: &[u8], slot: u64) -> Op
         liquidity: Some(liquidity),
         last_slot: slot,
         extra: {
-            let spl_token = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+            let spl_token = *SPL_TOKEN_PROGRAM;
             PoolExtra {
                 vault_a: Some(Pubkey::new_from_array(data[133..165].try_into().ok()?)),
                 vault_b: Some(Pubkey::new_from_array(data[213..245].try_into().ok()?)),
@@ -545,7 +554,7 @@ pub fn parse_raydium_clmm(pool_address: &Pubkey, data: &[u8], slot: u64) -> Opti
         liquidity: Some(liquidity),
         last_slot: slot,
         extra: {
-            let spl_token = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+            let spl_token = *SPL_TOKEN_PROGRAM;
             PoolExtra {
                 vault_a: Some(Pubkey::new_from_array(data[137..169].try_into().ok()?)),
                 vault_b: Some(Pubkey::new_from_array(data[169..201].try_into().ok()?)),
@@ -606,8 +615,8 @@ pub fn parse_meteora_dlmm(pool_address: &Pubkey, data: &[u8], slot: u64) -> Opti
         liquidity: None,
         last_slot: slot,
         extra: {
-            let spl_token = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
-            let token_2022 = Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb").unwrap();
+            let spl_token = *SPL_TOKEN_PROGRAM;
+            let token_2022 = *TOKEN_2022_PROGRAM;
             // token_mint_x_program_flag at offset 878, y at 879 (0=SPL Token, 1=Token-2022)
             let prog_x = if data.len() > 878 && data[878] == 1 { token_2022 } else { spl_token };
             let prog_y = if data.len() > 879 && data[879] == 1 { token_2022 } else { spl_token };
@@ -727,7 +736,7 @@ pub fn parse_raydium_amm_v4(
         liquidity: None,
         last_slot: slot,
         extra: {
-            let spl_token = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+            let spl_token = *SPL_TOKEN_PROGRAM;
             PoolExtra {
                 vault_a: Some(base_vault),
                 vault_b: Some(quote_vault),

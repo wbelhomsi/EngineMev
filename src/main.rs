@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
         state_cache.clone(),
         config.tip_fraction,
         config.min_profit_lamports,
-    );
+    ).with_relay_extra_tips(solana_mev_bot::executor::bundle::relay_extra_tips());
     let multi_relay = Arc::new(MultiRelay::new(config.clone()));
 
     // Load searcher keypair
@@ -268,16 +268,16 @@ async fn main() -> Result<()> {
                     SimulationResult::Profitable {
                         route,
                         net_profit_lamports,
-                        tip_lamports,
+                        total_tip_lamports,
                         final_profit_lamports,
                     } => {
                         opportunities_found += 1;
                         info!(
-                            "OPPORTUNITY #{}: {} hops, gross={}, tip={}, net={} lamports, pool={}",
+                            "OPPORTUNITY #{}: {} hops, gross={}, total_tips={}, net={} lamports, pool={}",
                             opportunities_found,
                             route.hop_count(),
                             net_profit_lamports,
-                            tip_lamports,
+                            total_tip_lamports,
                             final_profit_lamports,
                             pool_address,
                         );
@@ -301,10 +301,10 @@ async fn main() -> Result<()> {
                             }
                         };
 
-                        match bundle_builder.build_arb_bundle(&route, tip_lamports, blockhash) {
+                        match bundle_builder.build_arb_bundle(&route, total_tip_lamports, blockhash) {
                             Ok(bundle_txs) => {
                                 let relay = multi_relay.clone();
-                                let tip = tip_lamports;
+                                let tip = total_tip_lamports;
                                 // Fire-and-forget relay submission on async runtime.
                                 // We don't wait — next opportunity is more valuable than
                                 // tracking this bundle's fate.
@@ -371,6 +371,9 @@ fn can_submit_route(route: &router::pool::ArbRoute) -> bool {
         | router::pool::DexType::OrcaWhirlpool
         | router::pool::DexType::MeteoraDlmm
         | router::pool::DexType::MeteoraDammV2
+        | router::pool::DexType::SanctumInfinity
+        | router::pool::DexType::Phoenix
+        | router::pool::DexType::Manifest
     ))
 }
 

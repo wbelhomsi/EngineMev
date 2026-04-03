@@ -118,7 +118,7 @@ DRY_RUN=true
 ### Tests
 
 ```bash
-cargo test --test unit                        # 26 unit tests
+cargo test --test unit                        # 87 unit tests
 cargo test --features e2e --test e2e          # 4 e2e tests
 ```
 
@@ -140,8 +140,8 @@ cargo test --features e2e --test e2e          # 4 e2e tests
 
 ## Roadmap — Current Status
 
-### Phase 1: EngineMev Core (SVM) — MOSTLY COMPLETE
-Base DEX↔DEX backrun arb working in dry-run on mainnet.
+### Phase 1: EngineMev Core (SVM) — COMPLETE
+Base DEX↔DEX backrun arb working live on mainnet.
 
 **Done:**
 - Geyser streaming with per-DEX pool state parsing (8 DEXes: 6 AMMs + 2 CLOBs)
@@ -151,26 +151,30 @@ Base DEX↔DEX backrun arb working in dry-run on mainnet.
 - CLMM fee rate uses 1,000,000 denominator (validated against production system)
 - Profit sanity cap (10 SOL max) catches approximation artifacts
 - Route calculator (2-hop and 3-hop)
-- Profit simulator with fresh-state validation
-- Bundle builder with minimum_amount_out enforcement
-- Multi-relay fan-out (Jito/Nozomi/bloXroute/Astralane/ZeroSlot)
+- Profit simulator with fresh-state validation and fresh hop output writeback
+- Bundle builder with minimum_amount_out enforcement and correct per-hop amount_in chaining
+- Total tip accounting (Jito + Astralane) — simulator rejects if total tips >= profit
+- Real swap IX builders for all 9 DEXes (Raydium AMM/CP/CLMM, Orca, DLMM, DAMM v2, Sanctum, Phoenix, Manifest)
+- All 8 DEXes + Sanctum enabled in can_submit_route()
+- Multi-relay fan-out (Jito/Nozomi/bloXroute/Astralane/ZeroSlot) with per-relay rate limiting
 - Blockhash cache (2s refresh, 5s staleness)
 - Geyser reconnect with exponential backoff
 - Helius LaserStream TLS connection
 - API key redaction in all logs
-- LST rate arb (Phase 2 bolt-on, Sanctum virtual pools)
-- Phoenix V1 + Manifest CLOB market parsing (header extraction, pool discovery)
-- Phoenix + Manifest swap instruction builders
-- 26 unit tests + 4 e2e tests passing
+- LST rate arb (Sanctum virtual pools, enabled for submission)
+- Phoenix V1 + Manifest CLOB market parsing + swap IX builders (enabled for submission)
+- LazyLock static Pubkeys — no more Pubkey::from_str() on hot path
+- Pre-computed pair index in StateCache for O(1) pool pair lookups
+- Token-2022 ATA derivation correct for Raydium CP and Meteora DLMM
+- 87 unit tests + 4 e2e tests passing
 - Tested on mainnet: ~300 realistic opportunities in 5 min, ~0.000189 SOL avg profit per opp
 
 **Remaining:**
 - CLMM multi-tick crossing (current: single-tick only, underestimates large swaps — conservative)
 - DLMM bin-by-bin simulation (current: synthetic reserves from active_id — needs bin array accounts for accuracy)
-- Real DEX swap instruction account lists (currently placeholder single-account)
+- Raydium AMM v4 not yet in can_submit_route() — needs on-chain verification first
 - Deduplication of repeated opportunities on same pool pair
 - Metrics/Prometheus endpoint
-- Switch from DRY_RUN to live bundle submission (needs real keypair + SOL)
 
 ### Phase 3: CEX↔DEX Arb (SVM — new module)
 Binance websocket price feed + divergence detector. See `docs/STRATEGY-CEX-DEX-ARB.md`.
