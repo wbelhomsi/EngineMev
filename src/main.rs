@@ -366,11 +366,12 @@ async fn main() -> Result<()> {
 fn can_submit_route(route: &router::pool::ArbRoute) -> bool {
     route.hops.iter().all(|hop| matches!(
         hop.dex_type,
-        router::pool::DexType::RaydiumCp
-        | router::pool::DexType::MeteoraDammV2
-        | router::pool::DexType::OrcaWhirlpool
+        router::pool::DexType::RaydiumAmm
+        | router::pool::DexType::RaydiumCp
         | router::pool::DexType::RaydiumClmm
+        | router::pool::DexType::OrcaWhirlpool
         | router::pool::DexType::MeteoraDlmm
+        | router::pool::DexType::MeteoraDammV2
     ))
 }
 
