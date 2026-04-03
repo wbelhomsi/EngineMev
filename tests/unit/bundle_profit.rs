@@ -41,6 +41,10 @@ fn test_bundle_sets_min_out_on_final_hop() {
     };
     state_cache.upsert(amm_pool_address, amm_pool);
 
+    // Set LST indices so Sanctum IX builder can find them
+    state_cache.set_lst_index(other_mint, 5);
+    state_cache.set_lst_index(base_mint, 1);
+
     let builder = BundleBuilder::new(keypair, state_cache);
 
     let route = ArbRoute {

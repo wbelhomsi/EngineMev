@@ -11,7 +11,7 @@ fn can_submit_route(route: &ArbRoute) -> bool {
         | DexType::OrcaWhirlpool
         | DexType::MeteoraDlmm
         | DexType::MeteoraDammV2
-        // SanctumInfinity disabled — needs Shank IX rewrite
+        | DexType::SanctumInfinity
         | DexType::Phoenix
         | DexType::Manifest
     ))
@@ -50,17 +50,16 @@ fn test_manifest_route_accepted() {
 }
 
 #[test]
-fn test_sanctum_route_rejected() {
-    // Sanctum disabled until Shank IX format is implemented
+fn test_sanctum_route_accepted() {
     let route = make_route(vec![make_hop(DexType::OrcaWhirlpool), make_hop(DexType::SanctumInfinity)]);
-    assert!(!can_submit_route(&route));
+    assert!(can_submit_route(&route));
 }
 
 #[test]
 fn test_all_submittable_types_accepted() {
     for dex in [
         DexType::RaydiumCp, DexType::RaydiumClmm, DexType::OrcaWhirlpool,
-        DexType::MeteoraDlmm, DexType::MeteoraDammV2,
+        DexType::MeteoraDlmm, DexType::MeteoraDammV2, DexType::SanctumInfinity,
         DexType::Phoenix, DexType::Manifest,
     ] {
         let route = make_route(vec![make_hop(dex)]);
