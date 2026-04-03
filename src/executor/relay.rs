@@ -35,8 +35,21 @@ pub struct RelayResult {
 pub struct MultiRelay {
     config: Arc<BotConfig>,
     /// Shared HTTP client — connection pooling across relay calls.
-    /// Single client reuses TCP connections. ~2ms saved per relay vs new client.
     http_client: reqwest::Client,
+    /// Per-relay rate limiters: relay_name → last submission time
+    last_submit: Arc<dashmap::DashMap<String, std::time::Instant>>,
+}
+
+/// Per-relay rate limits (minimum interval between submissions)
+fn relay_rate_limit(name: &str) -> std::time::Duration {
+    match name {
+        "jito" => std::time::Duration::from_millis(1500),       // 1/sec + safety margin
+        "astralane" => std::time::Duration::from_millis(30),    // 40 TPS
+        "nozomi" => std::time::Duration::from_millis(200),      // ~5 TPS
+        "bloxroute" => std::time::Duration::from_millis(200),   // ~5 TPS
+        "zeroslot" => std::time::Duration::from_millis(200),    // ~5 TPS
+        _ => std::time::Duration::from_millis(1000),
+    }
 }
 
 impl MultiRelay {
@@ -44,15 +57,29 @@ impl MultiRelay {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .pool_max_idle_per_host(8)
-            .pool_idle_timeout(std::time::Duration::from_secs(300)) // keep connections alive 5 min
+            .pool_idle_timeout(std::time::Duration::from_secs(300))
             .tcp_keepalive(std::time::Duration::from_secs(30))
-            .tcp_nodelay(true) // disable Nagle's algorithm for lower latency
+            .tcp_nodelay(true)
             .http2_keep_alive_interval(std::time::Duration::from_secs(15))
             .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
             .build()
             .expect("Failed to build HTTP client");
 
-        Self { config, http_client }
+        Self { config, http_client, last_submit: Arc::new(dashmap::DashMap::new()) }
+    }
+
+    /// Check if a relay is ready to accept a submission (not rate limited).
+    fn can_submit(&self, relay_name: &str) -> bool {
+        let limit = relay_rate_limit(relay_name);
+        match self.last_submit.get(relay_name) {
+            Some(last) => last.value().elapsed() >= limit,
+            None => true,
+        }
+    }
+
+    /// Mark a relay as having just submitted.
+    fn mark_submitted(&self, relay_name: &str) {
+        self.last_submit.insert(relay_name.to_string(), std::time::Instant::now());
     }
 
     /// Warm up connections to all configured relays.
@@ -104,11 +131,12 @@ impl MultiRelay {
         let mut tasks = JoinSet::new();
         let endpoints = &self.config.relay_endpoints;
 
-        // Jito — primary relay, always submit
-        {
+        // Jito — primary relay (rate limited: 1/sec unauth)
+        if self.can_submit("jito") {
             let url = format!("{}/api/v1", endpoints.jito.trim_end_matches('/'));
             let txs = encoded_txs.clone();
             let client = self.http_client.clone();
+            self.mark_submitted("jito");
             tasks.spawn(async move {
                 Self::submit_to_jito(&client, &url, &txs).await
             });
@@ -116,42 +144,54 @@ impl MultiRelay {
 
         // Nozomi — secondary relay
         if let Some(ref url) = endpoints.nozomi {
-            let url = url.clone();
-            let txs = encoded_txs.clone();
-            let client = self.http_client.clone();
-            tasks.spawn(async move {
-                Self::submit_to_nozomi(&client, &url, &txs).await
-            });
+            if self.can_submit("nozomi") {
+                let url = url.clone();
+                let txs = encoded_txs.clone();
+                let client = self.http_client.clone();
+                self.mark_submitted("nozomi");
+                tasks.spawn(async move {
+                    Self::submit_to_nozomi(&client, &url, &txs).await
+                });
+            }
         }
 
         // bloXroute
         if let Some(ref url) = endpoints.bloxroute {
-            let url = url.clone();
-            let txs = encoded_txs.clone();
-            let client = self.http_client.clone();
-            tasks.spawn(async move {
-                Self::submit_to_bloxroute(&client, &url, &txs).await
-            });
+            if self.can_submit("bloxroute") {
+                let url = url.clone();
+                let txs = encoded_txs.clone();
+                let client = self.http_client.clone();
+                self.mark_submitted("bloxroute");
+                tasks.spawn(async move {
+                    Self::submit_to_bloxroute(&client, &url, &txs).await
+                });
+            }
         }
 
-        // Astralane — aggregator, routes through multiple paths
+        // Astralane — 40 TPS, revert_protect
         if let Some(ref url) = endpoints.astralane {
-            let url = url.clone();
-            let txs = encoded_txs.clone();
-            let client = self.http_client.clone();
-            tasks.spawn(async move {
-                Self::submit_to_astralane(&client, &url, &txs).await
-            });
+            if self.can_submit("astralane") {
+                let url = url.clone();
+                let txs = encoded_txs.clone();
+                let client = self.http_client.clone();
+                self.mark_submitted("astralane");
+                tasks.spawn(async move {
+                    Self::submit_to_astralane(&client, &url, &txs).await
+                });
+            }
         }
 
         // ZeroSlot
         if let Some(ref url) = endpoints.zeroslot {
-            let url = url.clone();
-            let txs = encoded_txs.clone();
-            let client = self.http_client.clone();
-            tasks.spawn(async move {
-                Self::submit_to_zeroslot(&client, &url, &txs).await
-            });
+            if self.can_submit("zeroslot") {
+                let url = url.clone();
+                let txs = encoded_txs.clone();
+                let client = self.http_client.clone();
+                self.mark_submitted("zeroslot");
+                tasks.spawn(async move {
+                    Self::submit_to_zeroslot(&client, &url, &txs).await
+                });
+            }
         }
 
         // Collect all results
