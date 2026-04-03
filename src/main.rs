@@ -338,9 +338,12 @@ async fn main() -> Result<()> {
                             }
                         };
 
-                        // Build base instructions (no tips — each relay adds its own)
+                        // Build base instructions (no tips — each relay adds its own).
+                        // min_final_output protects the SWAP output only.
+                        // The tip is a separate SOL transfer added by each relay,
+                        // so the swap must return at least input + gross_profit.
                         let min_final_output = route.input_amount
-                            + route.estimated_profit_lamports.saturating_sub(tip_lamports);
+                            + route.estimated_profit_lamports;
                         match bundle_builder.build_arb_instructions(&route, min_final_output) {
                             Ok(instructions) => {
                                 // Optional: simulate before submission
@@ -591,6 +594,7 @@ async fn simulate_bundle_tx(
             {
                 "encoding": "base64",
                 "replaceRecentBlockhash": true,
+                "sigVerify": false,
                 "commitment": "processed"
             }
         ]
