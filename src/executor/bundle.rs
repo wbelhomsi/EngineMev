@@ -103,7 +103,26 @@ impl BundleBuilder {
         min_final_output: u64,
         recent_blockhash: Hash,
     ) -> Result<Transaction> {
-        let mut instructions = Vec::with_capacity(route.hop_count() * 3 + 2);
+        let mut instructions = Vec::with_capacity(route.hop_count() * 3 + 4);
+
+        // Compute budget: set unit limit and priority fee for Jito auction placement
+        let compute_budget_program = Pubkey::from_str("ComputeBudget111111111111111111111111111111").unwrap();
+        // SetComputeUnitLimit: instruction index 2, data = [2, limit_u32_le]
+        let mut cu_limit_data = vec![2u8];
+        cu_limit_data.extend_from_slice(&400_000u32.to_le_bytes());
+        instructions.push(Instruction {
+            program_id: compute_budget_program,
+            accounts: vec![],
+            data: cu_limit_data,
+        });
+        // SetComputeUnitPrice: instruction index 3, data = [3, price_u64_le] (micro-lamports)
+        let mut cu_price_data = vec![3u8];
+        cu_price_data.extend_from_slice(&1_000u64.to_le_bytes());
+        instructions.push(Instruction {
+            program_id: compute_budget_program,
+            accounts: vec![],
+            data: cu_price_data,
+        });
 
         let signer_pubkey = self.searcher_keypair.pubkey();
         let ata_program = Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap();
