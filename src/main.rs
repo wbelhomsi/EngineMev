@@ -196,6 +196,11 @@ async fn main() -> Result<()> {
             let mut opportunities_found: u64 = 0;
             let mut bundles_submitted: u64 = 0;
             let simulate_bundles = std::env::var("SIMULATE_BUNDLES").map(|v| v == "true").unwrap_or(false);
+            let send_public = std::env::var("SEND_PUBLIC").map(|v| v == "true").unwrap_or(false);
+            let mut public_sent = false;
+            if send_public {
+                warn!("SEND_PUBLIC=true — will send FIRST opportunity via public RPC (costs tx fee)");
+            }
             if simulate_bundles {
                 warn!("SIMULATE_BUNDLES=true — will simulateTransaction before each submission");
             }
@@ -276,6 +281,10 @@ async fn main() -> Result<()> {
                 // Find profitable routes in both directions
                 let mut routes = route_calculator.find_routes(&trigger);
                 routes.extend(route_calculator.find_routes(&trigger_reverse));
+
+                // Filter: only keep routes that start/end with SOL (the token we hold)
+                let sol = config::sol_mint();
+                routes.retain(|r| r.base_mint == sol);
 
                 // Deduplicate by sorting and taking best
                 routes.sort_by(|a, b| b.estimated_profit.cmp(&a.estimated_profit));
@@ -362,6 +371,20 @@ async fn main() -> Result<()> {
                                         simulate_bundle_tx(&http, &rpc_url, &[bytes]).await;
                                     });
                                 }
+                                // One-shot public send for on-chain verification
+                                if send_public && !public_sent {
+                                    public_sent = true;
+                                    let http = http_client.clone();
+                                    let rpc = config.rpc_url.clone();
+                                    let ixs = instructions.clone();
+                                    let bh = blockhash;
+                                    let signer_arc = relay_dispatcher.signer();
+                                    warn!("SEND_PUBLIC: sending 1 tx via public RPC...");
+                                    rt.spawn(async move {
+                                        send_public_tx(&http, &rpc, &ixs, &signer_arc, bh).await;
+                                    });
+                                }
+
                                 // Dispatch to all relays concurrently
                                 relay_dispatcher.dispatch(
                                     &instructions, tip_lamports, blockhash, &rt,
@@ -630,5 +653,77 @@ async fn simulate_bundle_tx(
             }
         }
         Err(e) => warn!("Simulation request failed: {}", crate::config::redact_url(&e.to_string())),
+    }
+}
+
+/// Send ONE transaction via public RPC (sendTransaction) for on-chain verification.
+/// This bypasses Jito bundles entirely — goes through normal tx processing.
+/// Costs: tx fee (~5000 lamports) + priority fee. minimum_amount_out protects against loss.
+async fn send_public_tx(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    base_instructions: &[solana_sdk::instruction::Instruction],
+    signer: &solana_sdk::signature::Keypair,
+    recent_blockhash: solana_sdk::hash::Hash,
+) {
+    use base64::{engine::general_purpose, Engine as _};
+    use solana_sdk::{signer::Signer, transaction::Transaction};
+
+    // Build and sign (no tip needed for public send)
+    let tx = Transaction::new_signed_with_payer(
+        base_instructions,
+        Some(&signer.pubkey()),
+        &[signer],
+        recent_blockhash,
+    );
+
+    let tx_bytes = match bincode::serialize(&tx) {
+        Ok(b) => b,
+        Err(e) => { warn!("SEND_PUBLIC: serialize error: {}", e); return; }
+    };
+
+    if tx_bytes.len() > 1232 {
+        warn!("SEND_PUBLIC: tx too large ({} bytes), skipping", tx_bytes.len());
+        return;
+    }
+
+    let tx_b64 = general_purpose::STANDARD.encode(&tx_bytes);
+    info!("SEND_PUBLIC: sending tx ({} bytes) to public RPC...", tx_bytes.len());
+
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "sendTransaction",
+        "params": [
+            tx_b64,
+            {
+                "encoding": "base64",
+                "skipPreflight": false,
+                "preflightCommitment": "processed",
+                "maxRetries": 3
+            }
+        ]
+    });
+
+    match client.post(rpc_url)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(10))
+        .send().await
+    {
+        Ok(resp) => {
+            match resp.json::<serde_json::Value>().await {
+                Ok(json) => {
+                    if let Some(sig) = json["result"].as_str() {
+                        warn!("SEND_PUBLIC SUCCESS: tx signature = {}", sig);
+                        warn!("Check: https://solscan.io/tx/{}", sig);
+                    } else if let Some(err) = json.get("error") {
+                        warn!("SEND_PUBLIC FAILED: {}", err);
+                    } else {
+                        warn!("SEND_PUBLIC: unexpected response: {}", json);
+                    }
+                }
+                Err(e) => warn!("SEND_PUBLIC: response parse error: {}", e),
+            }
+        }
+        Err(e) => warn!("SEND_PUBLIC: request failed: {}", crate::config::redact_url(&e.to_string())),
     }
 }
