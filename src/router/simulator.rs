@@ -48,17 +48,18 @@ impl ProfitSimulator {
     /// This re-simulates with the freshest cached state and applies
     /// all cost deductions before making the go/no-go call.
     pub fn simulate(&self, route: &ArbRoute) -> SimulationResult {
-        // Step 1: Re-read pool states (freshest from cache)
+        // Step 1: Re-read pool states from cache (use get_any to include
+        // virtual pools like Sanctum that don't get Geyser updates).
+        // The on-chain minimum_amount_out guard protects against truly stale state.
         let fresh_states: Vec<_> = route
             .hops
             .iter()
-            .map(|hop| self.state_cache.get(&hop.pool_address))
+            .map(|hop| self.state_cache.get_any(&hop.pool_address))
             .collect();
 
-        // If any pool state is stale (expired TTL), abort
         if fresh_states.iter().any(|s| s.is_none()) {
             return SimulationResult::Unprofitable {
-                reason: "Stale pool state — one or more pools expired from cache".to_string(),
+                reason: "Pool not found in cache".to_string(),
             };
         }
 
