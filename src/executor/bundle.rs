@@ -84,25 +84,32 @@ impl BundleBuilder {
         let ata_program = *ATA_PROGRAM;
         let token_program = *SPL_TOKEN_PROGRAM;
 
-        // Collect unique mints and resolve their token program from cache.
-        // The Geyser stream fetches mint owners (SPL Token vs Token-2022) asynchronously
-        // and caches them in StateCache.mint_programs. This is the authoritative source.
+        // Collect unique mints and resolve their token program from the POOL STATE.
+        // Must use the same token program the swap IX builders will use (pool.extra.token_program_a/b)
+        // to ensure ATA addresses match. Using a different source (e.g., mint_programs cache) can
+        // produce different ATA addresses, causing "AccountNotInitialized" on-chain.
         let wsol = *WSOL_MINT;
         let mut ata_mints: Vec<(Pubkey, Pubkey)> = Vec::new();
         for hop in &route.hops {
+            // Get pool state to read per-side token programs
+            let pool = self.state_cache.get_any(&hop.pool_address);
             for mint in [hop.input_mint, hop.output_mint] {
                 if !ata_mints.iter().any(|(m, _)| *m == mint) {
                     let prog = if mint == wsol {
                         token_program // wSOL is always SPL Token
-                    } else {
-                        match self.state_cache.get_mint_program(&mint) {
-                            Some(p) => p,
-                            None => {
-                                // Mint program not cached — can't safely create ATA.
-                                // Using wrong program causes "Incorrect program ID" on-chain.
-                                anyhow::bail!("Mint program not cached for {} — skipping route", mint);
-                            }
+                    } else if let Some(ref p) = pool {
+                        // Use the pool's token program for this mint (same as swap IX builder)
+                        if mint == p.token_a_mint {
+                            p.extra.token_program_a.unwrap_or(token_program)
+                        } else if mint == p.token_b_mint {
+                            p.extra.token_program_b.unwrap_or(token_program)
+                        } else {
+                            // Mint not in this pool — try cache
+                            self.state_cache.get_mint_program(&mint).unwrap_or(token_program)
                         }
+                    } else {
+                        // Pool not in cache — try mint program cache
+                        self.state_cache.get_mint_program(&mint).unwrap_or(token_program)
                     };
                     ata_mints.push((mint, prog));
                 }
