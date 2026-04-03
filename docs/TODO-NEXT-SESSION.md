@@ -1,52 +1,33 @@
 # Next Session TODO
 
-## Status: Engine runs on mainnet. 136 opportunities in ~10 min. Bundles building but mostly rate-limited.
+## Status: Per-relay architecture complete. Sanctum IX verified (29 SIM SUCCESS). Need live test of relay submissions.
 
-## Issues Found During 10-Min Live Run (2026-04-03)
+## Immediate: Live Verification
+1. Build release and run with `SIMULATE_BUNDLES=true` for 2-5 min
+2. Check: "could not be decoded" errors should be GONE (each tx now has only 1 tip)
+3. Check: SIM SUCCESS count should be similar to before (~29 in 90s)
+4. Check: Jito/Astralane should ACCEPT bundles (not just our simulation)
+5. If accepted: check Jito Explorer for bundle landing status
 
-### CRITICAL: 124 of 135 bundles submitted to 0 relays (rate limiter too aggressive)
-Most bundles fire during a burst (all from same pool state change) and the rate limiter blocks all but the first. Only 11 bundles actually reached any relay. The per-relay rate limiter is working correctly, but the BURST of 130+ opportunities from a single event means only 1 gets through.
+## Architecture Changes This Session
+- Per-relay bundle architecture: each relay owns tip+sign+send independently
+- 5 relay modules: jito.rs, astralane.rs, nozomi.rs, bloxroute.rs, zeroslot.rs
+- bundle.rs returns Vec<Instruction> (no tips, no signing)
+- Simulator uses single tip (not sum of all relay tips)
+- Sanctum Shank IX: 1-byte discriminant, 27-byte data, 12+variable accounts
+- LstStateList bootstrapped at startup (117 LSTs indexed)
+- Orca swap_v2: 15 accounts (was 12)
+- 85 unit tests passing
 
-**Root cause:** Dedup issue — 131 of 136 opportunities have identical profit (1,794,666 lamports). These are the SAME arb opportunity detected across different pool addresses for the same token pair. The route calculator finds the same price dislocation through every pool that trades the pair.
+## If Bundles Still Not Landing
+- Check if `minimum_amount_out` is too aggressive (try lower tip_fraction)
+- Check timing: how many slots between detection and submission?
+- Consider removing `minimum_amount_out` on a test run to see if txs would succeed
+- ALT (Address Lookup Tables) for further tx size reduction
 
-**Fix:** Dedup opportunities by (base_mint, intermediate_mint) pair BEFORE submission. Only submit the most profitable route per pair per slot.
-
-### HIGH: 2,392 DLMM bitmap check failures + 720 vault fetch failures
-Helius RPC is being hammered by fire-and-forget bitmap checks and vault fetches. Every DLMM pool state update triggers a bitmap PDA existence check via RPC. Every Raydium AMM/CP update triggers a vault balance fetch.
-
-**Fix options:**
-1. Cache bitmap existence permanently (it either exists or doesn't — won't change)
-2. Batch vault fetches instead of one-per-pool
-3. Rate limit RPC calls to stay within Helius free tier
-
-### MEDIUM: 76 blockhash fetch failures
-RPC rate limiting cascades — vault/bitmap fetches consume the RPC quota, leaving blockhash fetches to fail. When blockhash is stale, ALL opportunities get skipped.
-
-**Fix:** Use a separate RPC endpoint for blockhash (or prioritize it). Blockhash is the most critical RPC call.
-
-### MEDIUM: 7 Geyser disconnects in 10 minutes
-LaserStream connection drops every ~90 seconds. Reconnect works (1s backoff), but each disconnect loses ~1-2 seconds of data.
-
-**Fix:** Check if this is a LaserStream plan limit. May need to upgrade Helius plan or use a different Geyser provider.
-
-### MEDIUM: Jito rate limit (-32097) hit 3 times
-"Network congested. Endpoint is globally rate limited." — this is the unauth rate limit (1 bundle/sec). Need Jito UUID approval for higher limits.
-
-### LOW: All opportunities use same profit amount (no dedup)
-131 opportunities with gross=1,794,666 and 4 with gross=6,736,352. The engine finds the same arb through dozens of different pool paths. This is wasted computation and relay bandwidth.
-
-## Key Metrics From Run
-- 1,196 pools tracked
-- 136 opportunities detected
-- 135 bundles built
-- 11 bundles reached a relay
-- 3 Jito rejections (rate limited)
-- Tip accounting working: total_tip=1,445,999 (jito=1,345,999, astralane=100,000)
-- Balance: untouched (revert protection + min_amount_out)
-
-## Priority for Next Session
-1. **Opportunity deduplication** (biggest bang — 10x fewer bundles, 10x more relay throughput)
-2. **Cache DLMM bitmap existence** (eliminate 2,392 unnecessary RPC calls)
-3. **Batch/throttle vault fetches** (eliminate 720 RPC calls)
-4. **Separate RPC for blockhash** (ensure blockhash never stale)
-5. **Jito UUID** (higher rate limits)
+## Remaining Backlog
+- Raydium AMM v4: enable in can_submit_route() after on-chain verification
+- CLMM multi-tick crossing (underestimates large swaps)
+- DLMM bin-by-bin simulation (synthetic reserves approximate)
+- Metrics/Prometheus endpoint
+- Speculative multi-route submission (skip simulation, submit top N)
