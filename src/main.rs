@@ -10,7 +10,9 @@ use tokio::sync::watch;
 use tracing::{info, warn, error};
 
 use config::BotConfig;
-use executor::{BundleBuilder, MultiRelay};
+use executor::{BundleBuilder, RelayDispatcher};
+use executor::relays::{Relay, jito::JitoRelay, astralane::AstralaneRelay,
+    nozomi::NozomiRelay, bloxroute::BloxrouteRelay, zeroslot::ZeroSlotRelay};
 use mempool::{GeyserStream, PoolStateChange};
 use router::pool::DetectedSwap;
 use router::{RouteCalculator, ProfitSimulator};
@@ -113,18 +115,22 @@ async fn main() -> Result<()> {
         state_cache.clone(),
         config.tip_fraction,
         config.min_profit_lamports,
-    ).with_relay_extra_tips(solana_mev_bot::executor::bundle::relay_extra_tips());
-    let multi_relay = Arc::new(MultiRelay::new(config.clone()));
+    );
 
     // Load searcher keypair
     let searcher_keypair = load_keypair(&config.searcher_keypair_path)?;
-    let bundle_builder = Arc::new(BundleBuilder::new(searcher_keypair, state_cache.clone()));
+    let bundle_builder = Arc::new(BundleBuilder::new(searcher_keypair.insecure_clone(), state_cache.clone()));
 
-    // Warm up relay connections (pre-establish TCP+TLS+HTTP2)
-    multi_relay.warmup().await;
-
-    // Background keepalive for Astralane (getHealth every 30s keeps TCP hot)
-    multi_relay.spawn_astralane_keepalive(shutdown_rx.clone());
+    // Initialize per-relay modules — each owns its own tip accounts, rate limiting, and submission
+    let relays: Vec<Arc<dyn Relay>> = vec![
+        Arc::new(JitoRelay::new(&config)),
+        Arc::new(AstralaneRelay::new(&config, shutdown_rx.clone())),
+        Arc::new(NozomiRelay::new(&config)),
+        Arc::new(BloxrouteRelay::new(&config)),
+        Arc::new(ZeroSlotRelay::new(&config)),
+    ];
+    let relay_dispatcher = Arc::new(RelayDispatcher::new(relays, Arc::new(searcher_keypair)));
+    relay_dispatcher.warmup().await;
 
     info!("All components initialized, starting pipeline...");
 
@@ -179,7 +185,7 @@ async fn main() -> Result<()> {
     // Runs as a blocking task on a dedicated thread
     let router_handle = {
         let shutdown_rx = shutdown_rx.clone();
-        let multi_relay = multi_relay.clone();
+        let relay_dispatcher = relay_dispatcher.clone();
         let bundle_builder = bundle_builder.clone();
         let config = config.clone();
         let state_cache = state_cache.clone();
@@ -286,16 +292,16 @@ async fn main() -> Result<()> {
                     SimulationResult::Profitable {
                         route,
                         net_profit_lamports,
-                        total_tip_lamports,
+                        tip_lamports,
                         final_profit_lamports,
                     } => {
                         opportunities_found += 1;
                         info!(
-                            "OPPORTUNITY #{}: {} hops, gross={}, total_tips={}, net={} lamports, pool={}",
+                            "OPPORTUNITY #{}: {} hops, gross={}, tip={}, net={} lamports, pool={}",
                             opportunities_found,
                             route.hop_count(),
                             net_profit_lamports,
-                            total_tip_lamports,
+                            tip_lamports,
                             final_profit_lamports,
                             pool_address,
                         );
@@ -310,14 +316,12 @@ async fn main() -> Result<()> {
                             continue;
                         }
 
-                        // Arb dedup: extract token path signature and cap submissions.
-                        // For SOL→TOKEN→SOL, key = [TOKEN]. For SOL→A→B→SOL, key = [A, B].
+                        // Arb dedup
                         let arb_key: Vec<solana_sdk::pubkey::Pubkey> = route.hops.iter()
                             .map(|h| h.output_mint)
                             .filter(|m| *m != route.base_mint)
                             .collect();
                         let now_dedup = std::time::Instant::now();
-                        // Evict expired entries
                         recent_arbs.retain(|_, (_, t)| now_dedup.duration_since(*t) < DEDUP_WINDOW);
                         let entry = recent_arbs.entry(arb_key).or_insert((0, now_dedup));
                         if entry.0 >= MAX_SUBS_PER_ARB {
@@ -326,7 +330,6 @@ async fn main() -> Result<()> {
                         }
                         entry.0 += 1;
 
-                        // Get recent blockhash from cache
                         let blockhash = match blockhash_cache.get() {
                             Some(h) => h,
                             None => {
@@ -335,24 +338,31 @@ async fn main() -> Result<()> {
                             }
                         };
 
-                        match bundle_builder.build_arb_bundle(&route, total_tip_lamports, blockhash) {
-                            Ok(bundle_txs) => {
-                                let relay = multi_relay.clone();
-                                let tip = total_tip_lamports;
-                                let rpc_url = config.rpc_url.clone();
-                                let http = http_client.clone();
-                                let do_sim = simulate_bundles;
-                                rt.spawn(async move {
-                                    // Optional: simulateTransaction before submission
-                                    if do_sim {
-                                        simulate_bundle_tx(&http, &rpc_url, &bundle_txs).await;
-                                    }
-                                    let results = relay.submit_bundle(&bundle_txs, tip).await;
-                                    let landed = results.iter().filter(|r| r.success).count();
-                                    if landed > 0 {
-                                        info!("Bundle landed on {}/{} relays", landed, results.len());
-                                    }
-                                });
+                        // Build base instructions (no tips — each relay adds its own)
+                        let min_final_output = route.input_amount
+                            + route.estimated_profit_lamports.saturating_sub(tip_lamports);
+                        match bundle_builder.build_arb_instructions(&route, min_final_output) {
+                            Ok(instructions) => {
+                                // Optional: simulate before submission
+                                if simulate_bundles {
+                                    let http = http_client.clone();
+                                    let rpc_url = config.rpc_url.clone();
+                                    let ixs = instructions.clone();
+                                    let signer_pub = bundle_builder.signer_pubkey();
+                                    let bh = blockhash;
+                                    rt.spawn(async move {
+                                        // Build temp tx for simulation (no tip needed)
+                                        let tx = solana_sdk::transaction::Transaction::new_with_payer(
+                                            &ixs, Some(&signer_pub),
+                                        );
+                                        let bytes = bincode::serialize(&tx).unwrap_or_default();
+                                        simulate_bundle_tx(&http, &rpc_url, &[bytes]).await;
+                                    });
+                                }
+                                // Dispatch to all relays concurrently
+                                relay_dispatcher.dispatch(
+                                    &instructions, tip_lamports, blockhash, &rt,
+                                );
                                 bundles_submitted += 1;
                             }
                             Err(e) => {

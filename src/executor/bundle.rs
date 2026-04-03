@@ -1,12 +1,10 @@
 use anyhow::Result;
 use solana_sdk::{
-    hash::Hash,
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
     signature::Keypair,
     signer::Signer,
     system_instruction,
-    transaction::Transaction,
 };
 use std::str::FromStr;
 use std::sync::LazyLock;
@@ -35,141 +33,32 @@ static WSOL_MINT: LazyLock<Pubkey> = LazyLock::new(|| {
     Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap()
 });
 
-/// Jito tip accounts — bundles must include a SOL transfer to one of these.
-/// These are fetched via getTipAccounts RPC but hardcoded as fallback.
-const JITO_TIP_ACCOUNTS: &[&str] = &[
-    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
-    "HFqU5x63VTqvQss8hp11i4bPKELzFLDELBGnNYpzHCDf",
-    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
-    "ADaUMid9yfUytqMBgopwjb2DTLSLzzWw1pa8U5j7cUi2",
-    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
-    "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
-    "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
-    "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
-];
-
-/// Jito tip floor API endpoints for dynamic tip pricing.
-const JITO_TIP_FLOOR_REST: &str = "https://bundles-api-rest.jito.wtf/api/v1/bundles/tip_floor";
-
-/// Default Astralane tip in lamports (0.0001 SOL).
-/// Override via ASTRALANE_TIP_LAMPORTS env var.
-pub const DEFAULT_ASTRALANE_TIP_LAMPORTS: u64 = 100_000;
-
-/// Returns the configured Astralane tip amount, or the default.
-pub fn astralane_tip_lamports() -> u64 {
-    std::env::var("ASTRALANE_TIP_LAMPORTS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_ASTRALANE_TIP_LAMPORTS)
-}
-
-/// Returns the total extra relay tips (beyond Jito) that will be added to bundles.
-/// Currently this is only Astralane when configured.
-pub fn relay_extra_tips() -> u64 {
-    if std::env::var("ASTRALANE_RELAY_URL").is_ok() {
-        astralane_tip_lamports()
-    } else {
-        0
-    }
-}
-
-/// Builds Jito-compatible transaction bundles for backrun arbitrage.
+/// Builds base arb instructions for relay submission.
 ///
-/// Post-mempool architecture (2024+):
-/// We no longer backrun a pending tx in the same bundle.
-/// Instead, we observe a state change via Geyser and submit a standalone
-/// arb bundle for the next slot. The bundle contains:
-/// 1. Our arbitrage transaction(s)
-/// 2. A tip transaction to a Jito tip account
-///
-/// Tip strategy:
-/// - Query tip floor API for current minimum
-/// - Bid tip_fraction * estimated_profit, floored at the Jito minimum (1000 lamports)
-/// - Auctions happen every 200ms
+/// Post-mempool architecture (2024+): observe state change via Geyser,
+/// build arb instructions, hand off to per-relay modules which add their
+/// own tips, sign, and submit independently.
 pub struct BundleBuilder {
     searcher_keypair: Keypair,
-    /// Index into tip accounts, rotated per bundle
-    tip_account_index: std::sync::atomic::AtomicUsize,
     state_cache: crate::state::StateCache,
 }
 
 impl BundleBuilder {
     pub fn new(searcher_keypair: Keypair, state_cache: crate::state::StateCache) -> Self {
-        Self {
-            searcher_keypair,
-            tip_account_index: std::sync::atomic::AtomicUsize::new(0),
-            state_cache,
-        }
+        Self { searcher_keypair, state_cache }
     }
 
-    /// Build a standalone arb bundle (no target tx — we're post-block, not same-block).
-    ///
-    /// `route` - the profitable arb route to execute
-    /// `tip_lamports` - total tip budget (Jito + all relay extras like Astralane)
-    /// `recent_blockhash` - current blockhash for transaction validity
-    pub fn build_arb_bundle(
-        &self,
-        route: &ArbRoute,
-        tip_lamports: u64,
-        recent_blockhash: Hash,
-    ) -> Result<Vec<Vec<u8>>> {
-        let mut bundle_txs: Vec<Vec<u8>> = Vec::with_capacity(2);
-
-        // Determine Astralane tip from total budget
-        let astralane_tip = if std::env::var("ASTRALANE_RELAY_URL").is_ok() {
-            astralane_tip_lamports()
-        } else {
-            0
-        };
-        // Jito gets the remainder of the total tip budget
-        let jito_tip = tip_lamports.saturating_sub(astralane_tip);
-
-        // Safety: reject if total tips exceed estimated profit
-        if tip_lamports >= route.estimated_profit_lamports {
-            anyhow::bail!(
-                "Total tips ({}) >= estimated profit ({}), would lose money",
-                tip_lamports,
-                route.estimated_profit_lamports
-            );
-        }
-
-        // Calculate minimum output for profit enforcement on final hop
-        // Must account for ALL tips (Jito + Astralane)
-        let min_final_output = route.input_amount + route.estimated_profit_lamports.saturating_sub(tip_lamports);
-
-        let arb_tx = self.build_arb_transaction_with_tip(route, jito_tip, astralane_tip, min_final_output, recent_blockhash)?;
-        bundle_txs.push(bincode::serialize(&arb_tx)?);
-
-        // Log the base64 transaction for simulation debugging
-        {
-            use base64::{engine::general_purpose, Engine as _};
-            let tx_b64 = general_purpose::STANDARD.encode(&bundle_txs[0]);
-            debug!(
-                "Built bundle: {} txs, total_tip={} (jito={}, astralane={}), min_out={}, route={} hops, tx_b64={}",
-                bundle_txs.len(),
-                tip_lamports,
-                jito_tip,
-                astralane_tip,
-                min_final_output,
-                route.hop_count(),
-                tx_b64,
-            );
-        }
-
-        Ok(bundle_txs)
+    pub fn signer_pubkey(&self) -> Pubkey {
+        self.searcher_keypair.pubkey()
     }
 
-    /// Build arb transaction with tip as last instruction.
-    /// `min_final_output` is set on the final hop to guarantee profit on-chain.
-    /// `jito_tip` and `astralane_tip` are the split tip amounts (already derived from total budget).
-    fn build_arb_transaction_with_tip(
+    /// Build base arb instructions: compute budget + ATA creates + swaps.
+    /// Does NOT include tips or signing — each relay adds its own tip and signs.
+    pub fn build_arb_instructions(
         &self,
         route: &ArbRoute,
-        jito_tip: u64,
-        astralane_tip: u64,
         min_final_output: u64,
-        recent_blockhash: Hash,
-    ) -> Result<Transaction> {
+    ) -> Result<Vec<Instruction>> {
         let mut instructions = Vec::with_capacity(route.hop_count() * 3 + 4);
 
         // Compute budget: set unit limit and priority fee for Jito auction placement
@@ -256,50 +145,8 @@ impl BundleBuilder {
             instructions.push(ix);
         }
 
-        // Tip instructions — each relay needs its own tip
-        // Jito tip (rotated across 8 accounts)
-        let tip_ix = self.build_tip_instruction(jito_tip)?;
-        instructions.push(tip_ix);
-
-        // Astralane tip — deducted from total tip budget, not added on top
-        if astralane_tip > 0 {
-            const ASTRALANE_TIP_ACCOUNTS: &[&str] = &[
-                "astrazznxsGUhWShqgNtAdfrzP2G83DzcWVJDxwV9bF",
-                "astra4uejePWneqNaJKuFFA8oonqCE1sqF6b45kDMZm",
-                "astra9xWY93QyfG6yM8zwsKsRodscjQ2uU2HKNL5prk",
-                "astraRVUuTHjpwEVvNBeQEgwYx9w9CFyfxjYoobCZhL",
-                "astraEJ2fEj8Xmy6KLG7B3VfbKfsHXhHrNdCQx7iGJK",
-                "astraubkDw81n4LuutzSQ8uzHCv4BhPVhfvTcYv8SKC",
-                "astraZW5GLFefxNPAatceHhYjfA1ciq9gvfEg2S47xk",
-                "astrawVNP4xDBKT7rAdxrLYiTSTdqtUr63fSMduivXK",
-                "AstrA1ejL4UeXC2SBP4cpeEmtcFPZVLxx3XGKXyCW6to",
-                "AsTra79FET4aCKWspPqeSFvjJNyp96SvAnrmyAxqg5b7",
-                "AstrABAu8CBTyuPXpV4eSCJ5fePEPnxN8NqBaPKQ9fHR",
-                "AsTRADtvb6tTmrsqULQ9Wji9PigDMjhfEMza6zkynEvV",
-                "AsTRAEoyMofR3vUPpf9k68Gsfb6ymTZttEtsAbv8Bk4d",
-                "AStrAJv2RN2hKCHxwUMtqmSxgdcNZbihCwc1mCSnG83W",
-                "Astran35aiQUF57XZsmkWMtNCtXGLzs8upfiqXxth2bz",
-                "AStRAnpi6kFrKypragExgeRoJ1QnKH7pbSjLAKQVWUum",
-                "ASTRaoF93eYt73TYvwtsv6fMWHWbGmMUZfVZPo3CRU9C",
-            ];
-            let idx = self.tip_account_index.load(std::sync::atomic::Ordering::Relaxed)
-                % ASTRALANE_TIP_ACCOUNTS.len();
-            let astralane_tip_account: Pubkey = ASTRALANE_TIP_ACCOUNTS[idx].parse().unwrap();
-            instructions.push(system_instruction::transfer(
-                &self.searcher_keypair.pubkey(),
-                &astralane_tip_account,
-                astralane_tip,
-            ));
-        }
-
-        let tx = Transaction::new_signed_with_payer(
-            &instructions,
-            Some(&self.searcher_keypair.pubkey()),
-            &[&self.searcher_keypair],
-            recent_blockhash,
-        );
-
-        Ok(tx)
+        debug!("Built {} arb instructions for {} hops", instructions.len(), route.hop_count());
+        Ok(instructions)
     }
 
     /// Build a single swap instruction for one hop with correct amount_in and minimum_amount_out.
@@ -392,44 +239,6 @@ impl BundleBuilder {
         }
     }
 
-    /// Build tip instruction to a Jito tip account (rotated per bundle).
-    fn build_tip_instruction(&self, tip_lamports: u64) -> Result<Instruction> {
-        let idx = self.tip_account_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            % JITO_TIP_ACCOUNTS.len();
-        let tip_pubkey: Pubkey = JITO_TIP_ACCOUNTS[idx].parse()?;
-
-        Ok(system_instruction::transfer(
-            &self.searcher_keypair.pubkey(),
-            &tip_pubkey,
-            tip_lamports,
-        ))
-    }
-
-    /// Fetch the current Jito tip floor from the REST API.
-    /// Returns the minimum tip in lamports needed for bundle inclusion.
-    pub async fn fetch_tip_floor() -> Result<u64> {
-        let client = reqwest::Client::new();
-        let resp = client
-            .get(JITO_TIP_FLOOR_REST)
-            .timeout(std::time::Duration::from_secs(2))
-            .send()
-            .await?
-            .json::<serde_json::Value>()
-            .await?;
-
-        // Parse tip floor from response
-        // Response format: [{"time":"...","landed_tips_25th_percentile":...,"landed_tips_50th_percentile":...}]
-        let tip_floor = resp
-            .as_array()
-            .and_then(|arr| arr.first())
-            .and_then(|entry| entry.get("landed_tips_50th_percentile"))
-            .and_then(|v| v.as_f64())
-            .map(|sol| (sol * 1_000_000_000.0) as u64) // SOL to lamports
-            .unwrap_or(1_000); // Fallback: 1000 lamports minimum
-
-        debug!("Current Jito tip floor: {} lamports", tip_floor);
-        Ok(tip_floor)
-    }
 }
 
 /// Derive an Associated Token Account address (SPL Token only).
