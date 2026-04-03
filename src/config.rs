@@ -184,7 +184,7 @@ impl BotConfig {
             tip_fraction,
             min_profit_lamports,
             max_hops,
-            pool_state_ttl: Duration::from_millis(400), // ~1 slot
+            pool_state_ttl: Duration::from_secs(5), // 5s — allows mint cache to populate + second Geyser event to arrive
             dry_run: std::env::var("DRY_RUN")
                 .unwrap_or_else(|_| "true".to_string())
                 .parse()?,
