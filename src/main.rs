@@ -117,6 +117,9 @@ async fn main() -> Result<()> {
     // Warm up relay connections (pre-establish TCP+TLS+HTTP2)
     multi_relay.warmup().await;
 
+    // Background keepalive for Astralane (getHealth every 30s keeps TCP hot)
+    multi_relay.spawn_astralane_keepalive(shutdown_rx.clone());
+
     info!("All components initialized, starting pipeline...");
 
     // === Pipeline (post-mempool architecture) ===
