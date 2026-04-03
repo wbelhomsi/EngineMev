@@ -130,6 +130,25 @@ impl BundleBuilder {
             instructions.push(create_ata_ix);
         }
 
+        // If the first hop's input is wSOL, wrap native SOL into the wSOL ATA.
+        // We hold native SOL but DEX swaps need wSOL (SPL Token).
+        let wsol = *WSOL_MINT;
+        if !route.hops.is_empty() && route.hops[0].input_mint == wsol {
+            let wsol_ata = derive_ata(&signer_pubkey, &wsol);
+            // Transfer native SOL to wSOL ATA
+            instructions.push(system_instruction::transfer(
+                &signer_pubkey,
+                &wsol_ata,
+                route.input_amount,
+            ));
+            // SyncNative: tell the SPL Token program to update the wSOL balance
+            instructions.push(Instruction {
+                program_id: *SPL_TOKEN_PROGRAM,
+                accounts: vec![AccountMeta::new(wsol_ata, false)],
+                data: vec![17], // 17 = SyncNative instruction
+            });
+        }
+
         // Swap instructions — intermediate hops get min_out=0, final hop gets profit floor.
         // Track amount_in per hop: first hop uses route.input_amount,
         // subsequent hops use the previous hop's estimated_output.
@@ -143,6 +162,22 @@ impl BundleBuilder {
             };
             let ix = self.build_swap_instruction_with_min_out(hop, amount_in, min_out)?;
             instructions.push(ix);
+        }
+
+        // If the last hop outputs wSOL, close the ATA to unwrap back to native SOL.
+        // This recovers the arb profit + rent as native SOL in our wallet.
+        if !route.hops.is_empty() && route.hops[route.hops.len() - 1].output_mint == wsol {
+            let wsol_ata = derive_ata(&signer_pubkey, &wsol);
+            // CloseAccount: transfers remaining wSOL balance to signer as native SOL
+            instructions.push(Instruction {
+                program_id: *SPL_TOKEN_PROGRAM,
+                accounts: vec![
+                    AccountMeta::new(wsol_ata, false),       // account to close
+                    AccountMeta::new(signer_pubkey, false),   // destination for SOL
+                    AccountMeta::new_readonly(signer_pubkey, true), // authority
+                ],
+                data: vec![9], // 9 = CloseAccount instruction
+            });
         }
 
         debug!("Built {} arb instructions for {} hops", instructions.len(), route.hop_count());
