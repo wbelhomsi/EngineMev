@@ -123,12 +123,11 @@ impl BundleBuilder {
                         match self.state_cache.get_mint_program(&mint) {
                             Some(p) => p,
                             None => {
-                                // Mint program not cached yet — skip this opportunity.
-                                // The async fetch will populate it for next time.
-                                return Err(anyhow::anyhow!(
-                                    "Mint program not cached for {}, skipping (will retry)",
-                                    mint
-                                ));
+                                // Mint program not cached — default to SPL Token.
+                                // The Geyser stream gates notifications on cached mints,
+                                // so this should rarely be hit.
+                                debug!("Mint program not cached for {}, defaulting SPL Token", mint);
+                                token_program
                             }
                         }
                     };

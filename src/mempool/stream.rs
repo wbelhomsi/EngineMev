@@ -119,7 +119,7 @@ impl GeyserStream {
                 msg = Self::next_message(&mut stream) => {
                     match msg {
                         Some(update) => {
-                            self.process_update(update, &tx_sender).await;
+                            self.process_update(update, &tx_sender);
                         }
                         None => {
                             warn!("Geyser stream ended, needs reconnect");
@@ -147,7 +147,7 @@ impl GeyserStream {
     /// Identifies DEX by account data size, dispatches to per-DEX parser,
     /// updates the StateCache, and for Raydium AMM/CP pools triggers an async
     /// vault balance fetch (since those pools don't embed reserves).
-    async fn process_update(
+    fn process_update(
         &self,
         update: yellowstone_grpc_proto::prelude::SubscribeUpdate,
         tx_sender: &Sender<PoolStateChange>,
@@ -195,13 +195,20 @@ impl GeyserStream {
                 let pool_mints = (pool_state.token_a_mint, pool_state.token_b_mint);
                 self.state_cache.upsert(pool_address, pool_state);
 
-                // Fetch token program for each mint — AWAIT before notifying router.
-                // This ensures the mint program cache is populated before the bundle builder needs it.
+                // Fetch token program for uncached mints (fire-and-forget).
+                // Only notify the router if BOTH mints are already cached.
+                // First event for a new mint pair triggers the fetch; second event
+                // (which arrives within ~400ms for active pools) will have cached mints.
+                let mut mints_ready = true;
                 for mint in [pool_mints.0, pool_mints.1] {
                     if self.state_cache.get_mint_program(&mint).is_none() {
-                        let _ = fetch_mint_program(
-                            &self.http_client, &self.config.rpc_url, &self.state_cache, &mint
-                        ).await;
+                        mints_ready = false;
+                        let client = self.http_client.clone();
+                        let url = self.config.rpc_url.clone();
+                        let cache = self.state_cache.clone();
+                        tokio::spawn(async move {
+                            let _ = fetch_mint_program(&client, &url, &cache, &mint).await;
+                        });
                     }
                 }
 
@@ -255,10 +262,12 @@ impl GeyserStream {
                     }
                 }
 
-                // Notify router
-                let event = PoolStateChange { pool_address, slot };
-                if let Err(e) = tx_sender.try_send(event) {
-                    debug!("Channel full, dropping pool change: {}", e);
+                // Notify router — only if mint programs are cached
+                if mints_ready {
+                    let event = PoolStateChange { pool_address, slot };
+                    if let Err(e) = tx_sender.try_send(event) {
+                        debug!("Channel full, dropping pool change: {}", e);
+                    }
                 }
             }
             _ => {}
