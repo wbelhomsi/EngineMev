@@ -498,9 +498,17 @@ async fn bootstrap_lst_indices(
     let count = entry_data.len() / entry_size;
 
     let mut found = 0;
+    let supported_lsts: Vec<(Pubkey, &str)> = config::lst_mints();
+    let sol = config::sol_mint();
+
     for i in 0..count {
         let offset = i * entry_size;
         if offset + entry_size > entry_data.len() { break; }
+
+        // sol_value at bytes 8..16 within each entry (u64 LE)
+        let sol_value = u64::from_le_bytes(
+            entry_data[offset + 8..offset + 16].try_into().unwrap_or([0u8; 8])
+        );
         // mint is at bytes 16..48 within each entry
         let mint_bytes: [u8; 32] = entry_data[offset + 16..offset + 48]
             .try_into().unwrap_or([0u8; 32]);
@@ -508,6 +516,31 @@ async fn bootstrap_lst_indices(
         if mint == Pubkey::default() { continue; }
         state_cache.set_lst_index(mint, i as u32);
         found += 1;
+
+        // For supported LSTs: update Sanctum virtual pool with real on-chain rate
+        if sol_value > 0 {
+            for (lst_mint, name) in &supported_lsts {
+                if mint == *lst_mint {
+                    // sol_value is in lamports per 10^9 LST atoms (rate = sol_value / 10^9)
+                    let rate = sol_value as f64 / 1_000_000_000.0;
+                    if rate > 0.5 && rate < 5.0 { // sanity check
+                        // Update the virtual pool reserves to reflect real rate
+                        let (virtual_pool_addr, _) = Pubkey::find_program_address(
+                            &[b"sanctum-virtual", lst_mint.as_ref()],
+                            &solana_sdk::system_program::id(),
+                        );
+                        let reserve_a: u64 = 1_000_000_000_000_000; // 1M SOL
+                        let reserve_b = (reserve_a as f64 / rate) as u64;
+                        if let Some(mut pool) = state_cache.get_any(&virtual_pool_addr) {
+                            pool.token_a_reserve = reserve_a;
+                            pool.token_b_reserve = reserve_b;
+                            state_cache.upsert(virtual_pool_addr, pool);
+                            info!("Updated Sanctum rate for {}: sol_value={}, rate={:.6}", name, sol_value, rate);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     info!("Bootstrapped {} LST indices from LstStateList", found);
