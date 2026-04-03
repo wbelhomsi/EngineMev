@@ -403,7 +403,7 @@ fn can_submit_route(route: &router::pool::ArbRoute) -> bool {
         | router::pool::DexType::OrcaWhirlpool
         | router::pool::DexType::MeteoraDlmm
         | router::pool::DexType::MeteoraDammV2
-        | router::pool::DexType::SanctumInfinity
+        // SanctumInfinity disabled — IX format is Shank (not Anchor), needs full rewrite
         | router::pool::DexType::Phoenix
         | router::pool::DexType::Manifest
     ))
