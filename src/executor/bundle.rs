@@ -635,8 +635,9 @@ fn floor_div(dividend: i32, divisor: i32) -> i32 {
 ///
 /// Program: whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc
 /// Discriminator: [0x2b, 0x04, 0xed, 0x0b, 0x1a, 0xc9, 0x1e, 0x62] (swap_v2)
-/// Accounts: 12 (token_program, token_authority, whirlpool, ata_a, vault_a, ata_b, vault_b,
-///           tick_array_0, tick_array_1, tick_array_2, oracle, memo_program)
+/// Accounts: 15 (token_program_a, token_program_b, memo_program, token_authority, whirlpool,
+///           token_mint_a, token_mint_b, ata_a, vault_a, ata_b, vault_b,
+///           tick_array_0, tick_array_1, tick_array_2, oracle)
 pub fn build_orca_whirlpool_swap_ix(
     signer: &Pubkey,
     pool: &crate::router::pool::PoolState,
@@ -698,19 +699,23 @@ pub fn build_orca_whirlpool_swap_ix(
     data.push(if a_to_b { 1u8 } else { 0u8 }); // a_to_b
     data.push(0u8); // remaining_accounts_info = None
 
+    // SwapV2 account layout (15 accounts):
     let accounts = vec![
-        AccountMeta::new_readonly(token_program, false),  // 0
-        AccountMeta::new(*signer, true),                   // 1: token_authority
-        AccountMeta::new(pool.address, false),             // 2: whirlpool
-        AccountMeta::new(user_ata_a, false),               // 3: token_owner_account_a
-        AccountMeta::new(vault_a, false),                  // 4: token_vault_a
-        AccountMeta::new(user_ata_b, false),               // 5: token_owner_account_b
-        AccountMeta::new(vault_b, false),                  // 6: token_vault_b
-        AccountMeta::new(tick_arrays[0], false),           // 7: tick_array_0
-        AccountMeta::new(tick_arrays[1], false),           // 8: tick_array_1
-        AccountMeta::new(tick_arrays[2], false),           // 9: tick_array_2
-        AccountMeta::new(oracle, false),                   // 10: oracle
-        AccountMeta::new_readonly(memo_program, false),    // 11: memo_program
+        AccountMeta::new_readonly(token_program, false),   // 0: token_program_a (SPL Token)
+        AccountMeta::new_readonly(token_program, false),   // 1: token_program_b (SPL Token — Whirlpool doesn't support Token-2022)
+        AccountMeta::new_readonly(memo_program, false),    // 2: memo_program
+        AccountMeta::new(*signer, true),                   // 3: token_authority (signer)
+        AccountMeta::new(pool.address, false),             // 4: whirlpool
+        AccountMeta::new_readonly(pool.token_a_mint, false), // 5: token_mint_a
+        AccountMeta::new_readonly(pool.token_b_mint, false), // 6: token_mint_b
+        AccountMeta::new(user_ata_a, false),               // 7: token_owner_account_a
+        AccountMeta::new(vault_a, false),                  // 8: token_vault_a
+        AccountMeta::new(user_ata_b, false),               // 9: token_owner_account_b
+        AccountMeta::new(vault_b, false),                  // 10: token_vault_b
+        AccountMeta::new(tick_arrays[0], false),           // 11: tick_array_0
+        AccountMeta::new(tick_arrays[1], false),           // 12: tick_array_1
+        AccountMeta::new(tick_arrays[2], false),           // 13: tick_array_2
+        AccountMeta::new(oracle, false),                   // 14: oracle
     ];
 
     Some(Instruction { program_id: whirlpool_program, accounts, data })

@@ -131,7 +131,7 @@ fn test_orca_whirlpool_swap_ix_account_count() {
     let ix = build_orca_whirlpool_swap_ix(&signer, &pool, pool.token_a_mint, 1000, 900);
     assert!(ix.is_some(), "Should produce an instruction with vaults + tick_spacing");
     let ix = ix.unwrap();
-    assert_eq!(ix.accounts.len(), 12, "Orca swap_v2 needs 12 accounts");
+    assert_eq!(ix.accounts.len(), 15, "Orca swap_v2 needs 15 accounts");
 }
 
 #[test]
