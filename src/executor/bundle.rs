@@ -910,7 +910,7 @@ pub fn build_meteora_dlmm_swap_ix(
         AccountMeta::new_readonly(pool.token_a_mint, false),// 6: token_x_mint
         AccountMeta::new_readonly(pool.token_b_mint, false),// 7: token_y_mint
         AccountMeta::new(oracle, false),                    // 8: oracle
-        AccountMeta::new_readonly(dlmm_program, false),     // 9: host_fee_in (None — pass program ID for Option)
+        AccountMeta::new(dlmm_program, false),               // 9: host_fee_in (None — pass program ID for Option, must be writable per IDL)
         AccountMeta::new(*signer, true),                    // 10: user (signer)
         AccountMeta::new_readonly(prog_a, false),             // 11: token_x_program
         AccountMeta::new_readonly(prog_b, false),            // 12: token_y_program
