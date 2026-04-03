@@ -183,6 +183,10 @@ async fn main() -> Result<()> {
             info!("Router thread started");
             let mut opportunities_found: u64 = 0;
             let mut bundles_submitted: u64 = 0;
+            let simulate_bundles = std::env::var("SIMULATE_BUNDLES").map(|v| v == "true").unwrap_or(false);
+            if simulate_bundles {
+                warn!("SIMULATE_BUNDLES=true — will simulateTransaction before each submission");
+            }
 
             // Create a tokio runtime handle for async relay submission from sync context.
             // The relay fan-out is async (HTTP calls), but the router loop is sync.
@@ -329,10 +333,14 @@ async fn main() -> Result<()> {
                             Ok(bundle_txs) => {
                                 let relay = multi_relay.clone();
                                 let tip = total_tip_lamports;
-                                // Fire-and-forget relay submission on async runtime.
-                                // We don't wait — next opportunity is more valuable than
-                                // tracking this bundle's fate.
+                                let rpc_url = config.rpc_url.clone();
+                                let http = http_client.clone();
+                                let do_sim = simulate_bundles;
                                 rt.spawn(async move {
+                                    // Optional: simulateTransaction before submission
+                                    if do_sim {
+                                        simulate_bundle_tx(&http, &rpc_url, &bundle_txs).await;
+                                    }
                                     let results = relay.submit_bundle(&bundle_txs, tip).await;
                                     let landed = results.iter().filter(|r| r.success).count();
                                     if landed > 0 {
@@ -486,4 +494,66 @@ fn load_keypair(path: &str) -> Result<Keypair> {
         .map_err(|e| anyhow::anyhow!("Invalid keypair bytes in {}: {}", path, e))?;
     info!("Loaded searcher keypair from {}: {}", path, keypair.pubkey());
     Ok(keypair)
+}
+
+/// Simulate a bundle's first transaction via RPC simulateTransaction.
+/// Logs the result (success/failure + program logs) for debugging.
+async fn simulate_bundle_tx(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    bundle_txs: &[Vec<u8>],
+) {
+    use base64::{engine::general_purpose, Engine as _};
+
+    if bundle_txs.is_empty() {
+        return;
+    }
+
+    let tx_b64 = general_purpose::STANDARD.encode(&bundle_txs[0]);
+
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "simulateTransaction",
+        "params": [
+            tx_b64,
+            {
+                "encoding": "base64",
+                "replaceRecentBlockhash": true,
+                "commitment": "processed"
+            }
+        ]
+    });
+
+    match client
+        .post(rpc_url)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            match resp.json::<serde_json::Value>().await {
+                Ok(json) => {
+                    let result = &json["result"]["value"];
+                    let err = &result["err"];
+                    let logs = result["logs"]
+                        .as_array()
+                        .map(|a| a.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n  "))
+                        .unwrap_or_default();
+
+                    if err.is_null() {
+                        info!("SIM SUCCESS | logs:\n  {}", logs);
+                    } else {
+                        warn!("SIM FAILED | err={} | logs:\n  {}", err, logs);
+                    }
+                }
+                Err(e) => warn!("Simulation response parse error: {}", e),
+            }
+        }
+        Err(e) => warn!("Simulation request failed: {}", crate::config::redact_url(&e.to_string())),
+    }
 }
