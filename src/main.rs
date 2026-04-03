@@ -284,7 +284,13 @@ async fn main() -> Result<()> {
 
                 // Filter: only keep routes that start/end with SOL (the token we hold)
                 let sol = config::sol_mint();
+                let total_before = routes.len();
                 routes.retain(|r| r.base_mint == sol);
+                if total_before > 0 && routes.is_empty() {
+                    tracing::debug!("Filtered {} routes (none SOL-base)", total_before);
+                } else if total_before > 0 {
+                    tracing::debug!("{} routes found, {} SOL-base", total_before, routes.len());
+                }
 
                 // Deduplicate by sorting and taking best
                 routes.sort_by(|a, b| b.estimated_profit.cmp(&a.estimated_profit));
@@ -295,6 +301,8 @@ async fn main() -> Result<()> {
 
                 // Simulate the best route
                 let best_route = &routes[0];
+                tracing::debug!("Best route: {} hops, est_profit={}, base_mint={}",
+                    best_route.hop_count(), best_route.estimated_profit, best_route.base_mint);
                 let sim_result = profit_simulator.simulate(best_route);
 
                 match sim_result {

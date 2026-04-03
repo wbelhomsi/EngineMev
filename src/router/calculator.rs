@@ -61,14 +61,23 @@ impl RouteCalculator {
             self.find_3_hop_routes(&base_mint, &swap.pool_address, &mut routes);
         }
 
-        // Also search with SOL as base — we hold SOL, so SOL→X→SOL routes
-        // are always executable regardless of what token the Geyser trigger was for.
-        // Any pool state change that affects a token traded against SOL could create an arb.
+        // ALWAYS search with SOL as base — we hold SOL, so SOL→X→SOL routes
+        // are always executable. Any pool state change could create a SOL arb.
         let sol = crate::config::sol_mint();
         if base_mint != sol {
-            self.find_2_hop_routes(&sol, &swap.pool_address, &mut routes);
+            // Search SOL-base routes through ALL pools (not just trigger pool)
+            let sol_trigger = crate::router::pool::DetectedSwap {
+                signature: String::new(),
+                dex_type: swap.dex_type,
+                pool_address: swap.pool_address,
+                input_mint: sol,
+                output_mint: swap.input_mint, // use the other token
+                amount: None,
+                observed_slot: swap.observed_slot,
+            };
+            self.find_2_hop_routes(&sol, &sol_trigger.pool_address, &mut routes);
             if self.max_hops >= 3 {
-                self.find_3_hop_routes(&sol, &swap.pool_address, &mut routes);
+                self.find_3_hop_routes(&sol, &sol_trigger.pool_address, &mut routes);
             }
         }
 
