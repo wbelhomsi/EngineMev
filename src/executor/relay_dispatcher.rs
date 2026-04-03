@@ -18,6 +18,10 @@ impl RelayDispatcher {
         Self { relays, signer }
     }
 
+    pub fn signer(&self) -> Arc<Keypair> {
+        self.signer.clone()
+    }
+
     /// Fire all configured relays concurrently. No relay waits for another.
     /// Each relay task logs its own result. Returns immediately.
     pub fn dispatch(
