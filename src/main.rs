@@ -190,6 +190,14 @@ async fn main() -> Result<()> {
 
             let mut recent_pools: std::collections::HashMap<solana_sdk::pubkey::Pubkey, u64> = std::collections::HashMap::new();
 
+            // Arb dedup: track recent submissions by route signature (token path).
+            // Key = sorted intermediate mints in the route. Value = (count, first_seen).
+            // Allows up to MAX_SUBS_PER_ARB submissions per arb per DEDUP_WINDOW.
+            const MAX_SUBS_PER_ARB: u32 = 5;
+            const DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+            let mut recent_arbs: std::collections::HashMap<Vec<solana_sdk::pubkey::Pubkey>, (u32, std::time::Instant)>
+                = std::collections::HashMap::new();
+
             loop {
                 // Check shutdown
                 if *shutdown_rx.borrow() {
@@ -291,6 +299,22 @@ async fn main() -> Result<()> {
                             tracing::debug!("Route has unsupported DEX, skipping submission");
                             continue;
                         }
+
+                        // Arb dedup: extract token path signature and cap submissions.
+                        // For SOL→TOKEN→SOL, key = [TOKEN]. For SOL→A→B→SOL, key = [A, B].
+                        let arb_key: Vec<solana_sdk::pubkey::Pubkey> = route.hops.iter()
+                            .map(|h| h.output_mint)
+                            .filter(|m| *m != route.base_mint)
+                            .collect();
+                        let now_dedup = std::time::Instant::now();
+                        // Evict expired entries
+                        recent_arbs.retain(|_, (_, t)| now_dedup.duration_since(*t) < DEDUP_WINDOW);
+                        let entry = recent_arbs.entry(arb_key).or_insert((0, now_dedup));
+                        if entry.0 >= MAX_SUBS_PER_ARB {
+                            tracing::trace!("Arb dedup: already submitted {} times, skipping", entry.0);
+                            continue;
+                        }
+                        entry.0 += 1;
 
                         // Get recent blockhash from cache
                         let blockhash = match blockhash_cache.get() {
