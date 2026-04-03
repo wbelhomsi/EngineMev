@@ -436,10 +436,16 @@ impl MultiRelay {
         match result {
             Ok(resp) => match resp.json::<serde_json::Value>().await {
                 Ok(body) => {
-                    let bundle_id = body.get("result").and_then(|v| v.as_str()).map(String::from);
+                    debug!("Astralane response: {}", body);
+                    // Astralane send_bundle may return result as string or object
+                    let bundle_id = body.get("result")
+                        .and_then(|v| v.as_str().map(String::from)
+                            .or_else(|| v.get("bundle_id").and_then(|b| b.as_str()).map(String::from))
+                            .or_else(|| if !v.is_null() { Some(format!("{}", v)) } else { None })
+                        );
                     let success = bundle_id.is_some();
                     let error = if !success {
-                        body.get("error").map(|e| format!("{}", e))
+                        Some(format!("Astralane: {}", body))
                     } else {
                         None
                     };
