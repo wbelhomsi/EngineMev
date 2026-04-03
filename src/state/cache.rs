@@ -1,5 +1,6 @@
 use dashmap::DashMap;
 use solana_sdk::pubkey::Pubkey;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,16 @@ struct CacheEntry {
     last_updated: Instant,
 }
 
+/// Normalize a token pair key so (A,B) and (B,A) map to the same entry.
+#[inline]
+fn normalize_pair(a: &Pubkey, b: &Pubkey) -> (Pubkey, Pubkey) {
+    if a <= b {
+        (*a, *b)
+    } else {
+        (*b, *a)
+    }
+}
+
 /// Thread-safe pool state cache using DashMap for lock-free reads.
 ///
 /// Every pool we've seen gets cached here. The TTL determines how long
@@ -27,8 +38,12 @@ struct CacheEntry {
 #[derive(Clone)]
 pub struct StateCache {
     pools: Arc<DashMap<PoolKey, CacheEntry>>,
-    /// Index: token_mint -> list of pools containing that token
-    token_to_pools: Arc<DashMap<Pubkey, Vec<Pubkey>>>,
+    /// Index: token_mint -> set of pools containing that token.
+    /// HashSet gives O(1) dedup on upsert instead of O(n) Vec::contains.
+    token_to_pools: Arc<DashMap<Pubkey, HashSet<Pubkey>>>,
+    /// Index: normalized (min_mint, max_mint) -> list of pools trading that pair.
+    /// Direct O(1) lookup replaces O(n) set intersection in pools_for_pair().
+    pair_to_pools: Arc<DashMap<(Pubkey, Pubkey), Vec<Pubkey>>>,
     /// Index: vault_address -> (pool_address, is_token_a_vault)
     /// Populated during pool bootstrapping. Geyser gives us vault updates —
     /// this index tells us which pool was affected and which side changed.
@@ -44,6 +59,7 @@ impl StateCache {
         Self {
             pools: Arc::new(DashMap::with_capacity(10_000)),
             token_to_pools: Arc::new(DashMap::with_capacity(5_000)),
+            pair_to_pools: Arc::new(DashMap::with_capacity(20_000)),
             vault_to_pool: Arc::new(DashMap::with_capacity(20_000)),
             mint_programs: Arc::new(DashMap::with_capacity(1_000)),
             ttl,
@@ -52,17 +68,30 @@ impl StateCache {
 
     /// Insert or update a pool's state, refreshing the TTL.
     pub fn upsert(&self, pool_address: Pubkey, state: PoolState) {
-        // Update token index
+        // Update token index (HashSet gives O(1) dedup)
         for mint in &[state.token_a_mint, state.token_b_mint] {
             self.token_to_pools
                 .entry(*mint)
                 .and_modify(|pools| {
-                    if !pools.contains(&pool_address) {
-                        pools.push(pool_address);
-                    }
+                    pools.insert(pool_address);
                 })
-                .or_insert_with(|| vec![pool_address]);
+                .or_insert_with(|| {
+                    let mut s = HashSet::with_capacity(4);
+                    s.insert(pool_address);
+                    s
+                });
         }
+
+        // Update pair index with normalized key (min, max) to avoid (A,B)/(B,A) dupes
+        let pair_key = normalize_pair(&state.token_a_mint, &state.token_b_mint);
+        self.pair_to_pools
+            .entry(pair_key)
+            .and_modify(|pools| {
+                if !pools.contains(&pool_address) {
+                    pools.push(pool_address);
+                }
+            })
+            .or_insert_with(|| vec![pool_address]);
 
         let key = PoolKey {
             address: pool_address,
@@ -103,20 +132,18 @@ impl StateCache {
     pub fn pools_for_token(&self, mint: &Pubkey) -> Vec<Pubkey> {
         self.token_to_pools
             .get(mint)
-            .map(|v| v.value().clone())
+            .map(|v| v.value().iter().copied().collect())
             .unwrap_or_default()
     }
 
     /// Find pools that share a trading pair (both mints present).
+    /// O(1) lookup via pre-computed pair index instead of O(n) set intersection.
     pub fn pools_for_pair(&self, mint_a: &Pubkey, mint_b: &Pubkey) -> Vec<Pubkey> {
-        let pools_a = self.pools_for_token(mint_a);
-        let pools_b: std::collections::HashSet<Pubkey> =
-            self.pools_for_token(mint_b).into_iter().collect();
-
-        pools_a
-            .into_iter()
-            .filter(|p| pools_b.contains(p))
-            .collect()
+        let pair_key = normalize_pair(mint_a, mint_b);
+        self.pair_to_pools
+            .get(&pair_key)
+            .map(|v| v.value().clone())
+            .unwrap_or_default()
     }
 
     /// Total number of cached pools.
@@ -144,7 +171,44 @@ impl StateCache {
     /// The strict TTL (400ms) is enforced in `get()` for the simulator's fresh-state check.
     pub fn evict_stale(&self) {
         const EVICTION_AGE: Duration = Duration::from_secs(600);
-        self.pools.retain(|_, entry| entry.last_updated.elapsed() < EVICTION_AGE);
+
+        // Collect stale pools and their mints before removing
+        let mut stale: Vec<(Pubkey, Pubkey, Pubkey)> = Vec::new();
+        self.pools.retain(|key, entry| {
+            let keep = entry.last_updated.elapsed() < EVICTION_AGE;
+            if !keep {
+                stale.push((
+                    key.address,
+                    entry.state.token_a_mint,
+                    entry.state.token_b_mint,
+                ));
+            }
+            keep
+        });
+
+        // Clean token_to_pools and pair_to_pools indices for evicted pools
+        for (pool_addr, mint_a, mint_b) in &stale {
+            // Remove from token index
+            for mint in &[mint_a, mint_b] {
+                if let Some(mut entry) = self.token_to_pools.get_mut(mint) {
+                    entry.value_mut().remove(pool_addr);
+                    if entry.value().is_empty() {
+                        drop(entry);
+                        self.token_to_pools.remove(mint);
+                    }
+                }
+            }
+
+            // Remove from pair index
+            let pair_key = normalize_pair(mint_a, mint_b);
+            if let Some(mut entry) = self.pair_to_pools.get_mut(&pair_key) {
+                entry.value_mut().retain(|p| p != pool_addr);
+                if entry.value().is_empty() {
+                    drop(entry);
+                    self.pair_to_pools.remove(&pair_key);
+                }
+            }
+        }
     }
 
     /// Register a vault address → pool mapping.

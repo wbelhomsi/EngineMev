@@ -9,9 +9,34 @@ use solana_sdk::{
     transaction::Transaction,
 };
 use std::str::FromStr;
+use std::sync::LazyLock;
 use tracing::debug;
 
 use crate::router::pool::{ArbRoute, DexType};
+
+// ─── Static Pubkeys (parsed once, reused everywhere) ───────────────────────
+
+static SPL_TOKEN_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap()
+});
+static TOKEN_2022_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb").unwrap()
+});
+static ATA_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap()
+});
+static COMPUTE_BUDGET_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("ComputeBudget111111111111111111111111111111").unwrap()
+});
+static MEMO_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr").unwrap()
+});
+static WSOL_MINT: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap()
+});
+static WSOL_CALCULATOR: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("wsoGmxQLSvwWpuaidCApxN5kEowLe2HLQLJhCQnj4bE").unwrap()
+});
 
 /// Jito tip accounts — bundles must include a SOL transfer to one of these.
 /// These are fetched via getTipAccounts RPC but hardcoded as fallback.
@@ -28,6 +53,28 @@ const JITO_TIP_ACCOUNTS: &[&str] = &[
 
 /// Jito tip floor API endpoints for dynamic tip pricing.
 const JITO_TIP_FLOOR_REST: &str = "https://bundles-api-rest.jito.wtf/api/v1/bundles/tip_floor";
+
+/// Default Astralane tip in lamports (0.0001 SOL).
+/// Override via ASTRALANE_TIP_LAMPORTS env var.
+pub const DEFAULT_ASTRALANE_TIP_LAMPORTS: u64 = 100_000;
+
+/// Returns the configured Astralane tip amount, or the default.
+pub fn astralane_tip_lamports() -> u64 {
+    std::env::var("ASTRALANE_TIP_LAMPORTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_ASTRALANE_TIP_LAMPORTS)
+}
+
+/// Returns the total extra relay tips (beyond Jito) that will be added to bundles.
+/// Currently this is only Astralane when configured.
+pub fn relay_extra_tips() -> u64 {
+    if std::env::var("ASTRALANE_RELAY_URL").is_ok() {
+        astralane_tip_lamports()
+    } else {
+        0
+    }
+}
 
 /// Builds Jito-compatible transaction bundles for backrun arbitrage.
 ///
@@ -61,7 +108,7 @@ impl BundleBuilder {
     /// Build a standalone arb bundle (no target tx — we're post-block, not same-block).
     ///
     /// `route` - the profitable arb route to execute
-    /// `tip_lamports` - SOL tip (should be >= tip floor from API)
+    /// `tip_lamports` - total tip budget (Jito + all relay extras like Astralane)
     /// `recent_blockhash` - current blockhash for transaction validity
     pub fn build_arb_bundle(
         &self,
@@ -71,10 +118,29 @@ impl BundleBuilder {
     ) -> Result<Vec<Vec<u8>>> {
         let mut bundle_txs: Vec<Vec<u8>> = Vec::with_capacity(2);
 
+        // Determine Astralane tip from total budget
+        let astralane_tip = if std::env::var("ASTRALANE_RELAY_URL").is_ok() {
+            astralane_tip_lamports()
+        } else {
+            0
+        };
+        // Jito gets the remainder of the total tip budget
+        let jito_tip = tip_lamports.saturating_sub(astralane_tip);
+
+        // Safety: reject if total tips exceed estimated profit
+        if tip_lamports >= route.estimated_profit_lamports {
+            anyhow::bail!(
+                "Total tips ({}) >= estimated profit ({}), would lose money",
+                tip_lamports,
+                route.estimated_profit_lamports
+            );
+        }
+
         // Calculate minimum output for profit enforcement on final hop
+        // Must account for ALL tips (Jito + Astralane)
         let min_final_output = route.input_amount + route.estimated_profit_lamports.saturating_sub(tip_lamports);
 
-        let arb_tx = self.build_arb_transaction_with_tip(route, tip_lamports, min_final_output, recent_blockhash)?;
+        let arb_tx = self.build_arb_transaction_with_tip(route, jito_tip, astralane_tip, min_final_output, recent_blockhash)?;
         bundle_txs.push(bincode::serialize(&arb_tx)?);
 
         // Log the base64 transaction for simulation debugging
@@ -82,9 +148,11 @@ impl BundleBuilder {
             use base64::{engine::general_purpose, Engine as _};
             let tx_b64 = general_purpose::STANDARD.encode(&bundle_txs[0]);
             debug!(
-                "Built bundle: {} txs, tip={} lamports, min_out={}, route={} hops, tx_b64={}",
+                "Built bundle: {} txs, total_tip={} (jito={}, astralane={}), min_out={}, route={} hops, tx_b64={}",
                 bundle_txs.len(),
                 tip_lamports,
+                jito_tip,
+                astralane_tip,
                 min_final_output,
                 route.hop_count(),
                 tx_b64,
@@ -96,17 +164,19 @@ impl BundleBuilder {
 
     /// Build arb transaction with tip as last instruction.
     /// `min_final_output` is set on the final hop to guarantee profit on-chain.
+    /// `jito_tip` and `astralane_tip` are the split tip amounts (already derived from total budget).
     fn build_arb_transaction_with_tip(
         &self,
         route: &ArbRoute,
-        tip_lamports: u64,
+        jito_tip: u64,
+        astralane_tip: u64,
         min_final_output: u64,
         recent_blockhash: Hash,
     ) -> Result<Transaction> {
         let mut instructions = Vec::with_capacity(route.hop_count() * 3 + 4);
 
         // Compute budget: set unit limit and priority fee for Jito auction placement
-        let compute_budget_program = Pubkey::from_str("ComputeBudget111111111111111111111111111111").unwrap();
+        let compute_budget_program = *COMPUTE_BUDGET_PROGRAM;
         // SetComputeUnitLimit: instruction index 2, data = [2, limit_u32_le]
         let mut cu_limit_data = vec![2u8];
         cu_limit_data.extend_from_slice(&400_000u32.to_le_bytes());
@@ -125,13 +195,13 @@ impl BundleBuilder {
         });
 
         let signer_pubkey = self.searcher_keypair.pubkey();
-        let ata_program = Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap();
-        let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+        let ata_program = *ATA_PROGRAM;
+        let token_program = *SPL_TOKEN_PROGRAM;
 
         // Collect unique mints and resolve their token program from cache.
         // The Geyser stream fetches mint owners (SPL Token vs Token-2022) asynchronously
         // and caches them in StateCache.mint_programs. This is the authoritative source.
-        let wsol = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
+        let wsol = *WSOL_MINT;
         let mut ata_mints: Vec<(Pubkey, Pubkey)> = Vec::new();
         for hop in &route.hops {
             for mint in [hop.input_mint, hop.output_mint] {
@@ -174,21 +244,28 @@ impl BundleBuilder {
             instructions.push(create_ata_ix);
         }
 
-        // Swap instructions — intermediate hops get min_out=0, final hop gets profit floor
+        // Swap instructions — intermediate hops get min_out=0, final hop gets profit floor.
+        // Track amount_in per hop: first hop uses route.input_amount,
+        // subsequent hops use the previous hop's estimated_output.
         let last_idx = route.hops.len() - 1;
         for (i, hop) in route.hops.iter().enumerate() {
             let min_out = if i == last_idx { min_final_output } else { 0 };
-            let ix = self.build_swap_instruction_with_min_out(hop, min_out)?;
+            let amount_in = if i == 0 {
+                route.input_amount
+            } else {
+                route.hops[i - 1].estimated_output
+            };
+            let ix = self.build_swap_instruction_with_min_out(hop, amount_in, min_out)?;
             instructions.push(ix);
         }
 
         // Tip instructions — each relay needs its own tip
         // Jito tip (rotated across 8 accounts)
-        let tip_ix = self.build_tip_instruction(tip_lamports)?;
+        let tip_ix = self.build_tip_instruction(jito_tip)?;
         instructions.push(tip_ix);
 
-        // Astralane tip (if configured) — min 100,000 lamports, rotated across tip accounts
-        if std::env::var("ASTRALANE_RELAY_URL").is_ok() {
+        // Astralane tip — deducted from total tip budget, not added on top
+        if astralane_tip > 0 {
             const ASTRALANE_TIP_ACCOUNTS: &[&str] = &[
                 "astrazznxsGUhWShqgNtAdfrzP2G83DzcWVJDxwV9bF",
                 "astra4uejePWneqNaJKuFFA8oonqCE1sqF6b45kDMZm",
@@ -210,11 +287,11 @@ impl BundleBuilder {
             ];
             let idx = self.tip_account_index.load(std::sync::atomic::Ordering::Relaxed)
                 % ASTRALANE_TIP_ACCOUNTS.len();
-            let astralane_tip: Pubkey = ASTRALANE_TIP_ACCOUNTS[idx].parse().unwrap();
+            let astralane_tip_account: Pubkey = ASTRALANE_TIP_ACCOUNTS[idx].parse().unwrap();
             instructions.push(system_instruction::transfer(
                 &self.searcher_keypair.pubkey(),
-                &astralane_tip,
-                100_000, // 0.0001 SOL minimum
+                &astralane_tip_account,
+                astralane_tip,
             ));
         }
 
@@ -228,20 +305,28 @@ impl BundleBuilder {
         Ok(tx)
     }
 
-    /// Build a single swap instruction for one hop with minimum_amount_out.
+    /// Build a single swap instruction for one hop with correct amount_in and minimum_amount_out.
     fn build_swap_instruction_with_min_out(
         &self,
         hop: &crate::router::pool::RouteHop,
+        amount_in: u64,
         minimum_amount_out: u64,
     ) -> Result<Instruction> {
         match hop.dex_type {
-            DexType::RaydiumAmm => self.build_raydium_amm_swap(hop, minimum_amount_out),
+            DexType::RaydiumAmm => {
+                let pool = self.state_cache.get_any(&hop.pool_address)
+                    .ok_or_else(|| anyhow::anyhow!("Pool not found for Raydium AMM: {}", hop.pool_address))?;
+                build_raydium_amm_swap_ix(
+                    &self.searcher_keypair.pubkey(), &pool, hop.input_mint,
+                    amount_in, minimum_amount_out,
+                ).ok_or_else(|| anyhow::anyhow!("Missing pool data for Raydium AMM v4"))
+            }
             DexType::RaydiumClmm => {
                 let pool = self.state_cache.get_any(&hop.pool_address)
                     .ok_or_else(|| anyhow::anyhow!("Pool not found for CLMM: {}", hop.pool_address))?;
                 build_raydium_clmm_swap_ix(
                     &self.searcher_keypair.pubkey(), &pool, hop.input_mint,
-                    hop.estimated_output, minimum_amount_out,
+                    amount_in, minimum_amount_out,
                 ).ok_or_else(|| anyhow::anyhow!("Missing pool data for Raydium CLMM"))
             }
             DexType::RaydiumCp => {
@@ -249,7 +334,7 @@ impl BundleBuilder {
                     .ok_or_else(|| anyhow::anyhow!("Pool not found for Raydium CP: {}", hop.pool_address))?;
                 build_raydium_cp_swap_ix(
                     &self.searcher_keypair.pubkey(), &pool, hop.input_mint,
-                    hop.estimated_output, minimum_amount_out,
+                    amount_in, minimum_amount_out,
                 ).ok_or_else(|| anyhow::anyhow!("Missing pool data for Raydium CP"))
             }
             DexType::OrcaWhirlpool => {
@@ -257,7 +342,7 @@ impl BundleBuilder {
                     .ok_or_else(|| anyhow::anyhow!("Pool not found for Orca: {}", hop.pool_address))?;
                 build_orca_whirlpool_swap_ix(
                     &self.searcher_keypair.pubkey(), &pool, hop.input_mint,
-                    hop.estimated_output, minimum_amount_out,
+                    amount_in, minimum_amount_out,
                 ).ok_or_else(|| anyhow::anyhow!("Missing pool data for Orca Whirlpool"))
             }
             DexType::MeteoraDlmm => {
@@ -265,7 +350,7 @@ impl BundleBuilder {
                     .ok_or_else(|| anyhow::anyhow!("Pool not found for DLMM: {}", hop.pool_address))?;
                 build_meteora_dlmm_swap_ix(
                     &self.searcher_keypair.pubkey(), &pool, hop.input_mint,
-                    hop.estimated_output, minimum_amount_out,
+                    amount_in, minimum_amount_out,
                 ).ok_or_else(|| anyhow::anyhow!("Missing pool data for Meteora DLMM"))
             }
             DexType::MeteoraDammV2 => {
@@ -273,16 +358,24 @@ impl BundleBuilder {
                     .ok_or_else(|| anyhow::anyhow!("Pool not found for DAMM v2: {}", hop.pool_address))?;
                 build_damm_v2_swap_ix(
                     &self.searcher_keypair.pubkey(), &pool, hop.input_mint,
-                    hop.estimated_output, minimum_amount_out,
+                    amount_in, minimum_amount_out,
                 ).ok_or_else(|| anyhow::anyhow!("Missing pool data for DAMM v2"))
             }
-            DexType::SanctumInfinity => self.build_sanctum_swap(hop, minimum_amount_out),
+            DexType::SanctumInfinity => {
+                build_sanctum_swap_ix(
+                    &self.searcher_keypair.pubkey(),
+                    &hop.input_mint,
+                    &hop.output_mint,
+                    amount_in,
+                    minimum_amount_out,
+                ).ok_or_else(|| anyhow::anyhow!("Failed to build Sanctum swap IX"))
+            }
             DexType::Phoenix => {
                 let pool = self.state_cache.get_any(&hop.pool_address)
                     .ok_or_else(|| anyhow::anyhow!("Pool not found for Phoenix: {}", hop.pool_address))?;
                 build_phoenix_swap_ix(
                     &self.searcher_keypair.pubkey(), &pool, hop.input_mint,
-                    hop.estimated_output, minimum_amount_out,
+                    amount_in, minimum_amount_out,
                 ).ok_or_else(|| anyhow::anyhow!("Missing pool data for Phoenix"))
             }
             DexType::Manifest => {
@@ -290,62 +383,10 @@ impl BundleBuilder {
                     .ok_or_else(|| anyhow::anyhow!("Pool not found for Manifest: {}", hop.pool_address))?;
                 build_manifest_swap_ix(
                     &self.searcher_keypair.pubkey(), &pool, hop.input_mint,
-                    hop.estimated_output, minimum_amount_out,
+                    amount_in, minimum_amount_out,
                 ).ok_or_else(|| anyhow::anyhow!("Missing pool data for Manifest"))
             }
         }
-    }
-
-    /// Raydium AMM v4 swap.
-    ///
-    /// Supports both V1 (18 accounts, discriminator 9) and V2 (8 accounts).
-    /// V2 deployed Sept 2025 — removes OpenBook market accounts.
-    /// Both V1 and V2 remain functional. We use V2 when possible (fewer accounts = smaller tx).
-    fn build_raydium_amm_swap(
-        &self,
-        hop: &crate::router::pool::RouteHop,
-        minimum_amount_out: u64,
-    ) -> Result<Instruction> {
-        // Swap V2 instruction data: discriminator + amount_in + minimum_amount_out
-        let mut data = vec![9u8]; // swap discriminator (same for V1/V2)
-        data.extend_from_slice(&hop.estimated_output.to_le_bytes());
-        data.extend_from_slice(&minimum_amount_out.to_le_bytes());
-
-        // TODO: populate full account list from cached pool state
-        // V2 accounts (8): token_program, amm_id, amm_authority, amm_open_orders,
-        //   pool_coin_vault, pool_pc_vault, user_source, user_dest
-        Ok(Instruction {
-            program_id: crate::config::programs::raydium_amm(),
-            accounts: vec![
-                AccountMeta::new_readonly(hop.pool_address, false),
-            ],
-            data,
-        })
-    }
-
-    fn build_sanctum_swap(
-        &self,
-        hop: &crate::router::pool::RouteHop,
-        minimum_amount_out: u64,
-    ) -> Result<Instruction> {
-        let accounts = sanctum_swap_accounts(
-            &self.searcher_keypair.pubkey(),
-            &hop.input_mint,
-            &hop.output_mint,
-        );
-
-        // SwapExactIn instruction data: discriminator (8 bytes) + amount (u64) + min_out (u64)
-        let mut data = Vec::with_capacity(24);
-        // Anchor discriminator for "swap_exact_in": sha256("global:swap_exact_in")[..8]
-        data.extend_from_slice(&[0x0a, 0xd3, 0xc8, 0x1a, 0x3e, 0x4d, 0x2b, 0x1c]);
-        data.extend_from_slice(&hop.estimated_output.to_le_bytes()); // amount_in
-        data.extend_from_slice(&minimum_amount_out.to_le_bytes()); // profit enforcement on final hop
-
-        Ok(Instruction {
-            program_id: crate::config::programs::sanctum_s_controller(),
-            accounts,
-            data,
-        })
     }
 
     /// Build tip instruction to a Jito tip account (rotated per bundle).
@@ -388,21 +429,88 @@ impl BundleBuilder {
     }
 }
 
-/// Derive an Associated Token Account address.
+/// Derive an Associated Token Account address (SPL Token only).
 /// ATA = PDA([wallet, TOKEN_PROGRAM_ID, mint], ATA_PROGRAM_ID)
 fn derive_ata(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
-    derive_ata_with_program(wallet, mint, &Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap())
+    derive_ata_with_program(wallet, mint, &SPL_TOKEN_PROGRAM)
 }
 
 fn derive_ata_with_program(wallet: &Pubkey, mint: &Pubkey, token_program: &Pubkey) -> Pubkey {
-    let ata_program = Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap();
     let seeds = &[
         wallet.as_ref(),
         token_program.as_ref(),
         mint.as_ref(),
     ];
-    let (ata, _) = Pubkey::find_program_address(seeds, &ata_program);
+    let (ata, _) = Pubkey::find_program_address(seeds, &ATA_PROGRAM);
     ata
+}
+
+/// Build a Raydium AMM v4 swap instruction with 9 accounts.
+pub fn build_raydium_amm_swap_ix(
+    signer: &Pubkey,
+    pool: &crate::router::pool::PoolState,
+    input_mint: Pubkey,
+    amount_in: u64,
+    minimum_amount_out: u64,
+) -> Option<Instruction> {
+    let extra = &pool.extra;
+    let vault_a = extra.vault_a?;
+    let vault_b = extra.vault_b?;
+    let open_orders = extra.open_orders?;
+    let nonce = extra.amm_nonce?;
+
+    let amm_program = crate::config::programs::raydium_amm();
+    let amm_authority = Pubkey::create_program_address(
+        &[&[nonce]],
+        &amm_program,
+    ).ok()?;
+
+    let a_to_b = input_mint == pool.token_a_mint;
+    let output_mint = if a_to_b { pool.token_b_mint } else { pool.token_a_mint };
+    let user_source_ata = derive_ata(signer, &input_mint);
+    let user_dest_ata = derive_ata(signer, &output_mint);
+
+    let mut data = Vec::with_capacity(17);
+    data.push(9u8);
+    data.extend_from_slice(&amount_in.to_le_bytes());
+    data.extend_from_slice(&minimum_amount_out.to_le_bytes());
+
+    let accounts = vec![
+        AccountMeta::new_readonly(*SPL_TOKEN_PROGRAM, false),
+        AccountMeta::new(pool.address, false),
+        AccountMeta::new_readonly(amm_authority, false),
+        AccountMeta::new(open_orders, false),
+        AccountMeta::new(vault_a, false),
+        AccountMeta::new(vault_b, false),
+        AccountMeta::new(user_source_ata, false),
+        AccountMeta::new(user_dest_ata, false),
+        AccountMeta::new_readonly(*signer, true),
+    ];
+
+    Some(Instruction { program_id: amm_program, accounts, data })
+}
+
+/// Anchor discriminator for Sanctum S Controller `swap_exact_in`
+const SANCTUM_SWAP_EXACT_IN_DISCRIMINATOR: [u8; 8] = [0x68, 0x68, 0x83, 0x56, 0xa1, 0xbd, 0xb4, 0xd8];
+
+/// Build a Sanctum Infinity SwapExactIn instruction.
+pub fn build_sanctum_swap_ix(
+    signer: &Pubkey,
+    input_mint: &Pubkey,
+    output_mint: &Pubkey,
+    amount_in: u64,
+    minimum_amount_out: u64,
+) -> Option<Instruction> {
+    let accounts = sanctum_swap_accounts(signer, input_mint, output_mint);
+    let mut data = Vec::with_capacity(24);
+    data.extend_from_slice(&SANCTUM_SWAP_EXACT_IN_DISCRIMINATOR);
+    data.extend_from_slice(&amount_in.to_le_bytes());
+    data.extend_from_slice(&minimum_amount_out.to_le_bytes());
+    Some(Instruction {
+        program_id: crate::config::programs::sanctum_s_controller(),
+        accounts,
+        data,
+    })
 }
 
 /// Build a Raydium CP-Swap instruction with the full 13-account layout.
@@ -423,7 +531,7 @@ pub fn build_raydium_cp_swap_ix(
     let token_prog_a = extra.token_program_a?;
     let token_prog_b = extra.token_program_b?;
 
-    let cp_program = Pubkey::from_str("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C").unwrap();
+    let cp_program = crate::config::programs::raydium_cp();
     let (authority, _) = Pubkey::find_program_address(&[], &cp_program);
     let (observation, _) = Pubkey::find_program_address(
         &[b"observation", pool.address.as_ref()], &cp_program,
@@ -434,8 +542,9 @@ pub fn build_raydium_cp_swap_ix(
     let (input_token_prog, output_token_prog) = if a_to_b { (token_prog_a, token_prog_b) } else { (token_prog_b, token_prog_a) };
     let output_mint = if a_to_b { pool.token_b_mint } else { pool.token_a_mint };
 
-    let user_input_ata = derive_ata(signer, &input_mint);
-    let user_output_ata = derive_ata(signer, &output_mint);
+    // Use derive_ata_with_program — Raydium CP supports Token-2022 per side
+    let user_input_ata = derive_ata_with_program(signer, &input_mint, &input_token_prog);
+    let user_output_ata = derive_ata_with_program(signer, &output_mint, &output_token_prog);
 
     let mut data = Vec::with_capacity(24);
     data.extend_from_slice(&[0x8f, 0xbe, 0x5a, 0xda, 0xc4, 0x1e, 0x33, 0xde]);
@@ -476,7 +585,7 @@ pub fn build_damm_v2_swap_ix(
     let vault_a = extra.vault_a?;
     let vault_b = extra.vault_b?;
 
-    let damm_program = Pubkey::from_str("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG").unwrap();
+    let damm_program = crate::config::programs::meteora_damm_v2();
     let (pool_authority, _) = Pubkey::find_program_address(&[], &damm_program);
     let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &damm_program);
 
@@ -487,7 +596,7 @@ pub fn build_damm_v2_swap_ix(
     let user_input_ata = derive_ata(signer, &input_mint);
     let user_output_ata = derive_ata(signer, &output_mint);
 
-    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+    let token_program = *SPL_TOKEN_PROGRAM;
 
     let mut data = Vec::with_capacity(25);
     data.extend_from_slice(&[0x41, 0x4b, 0x3f, 0x4c, 0xeb, 0x5b, 0x5b, 0x88]);
@@ -540,9 +649,9 @@ pub fn build_orca_whirlpool_swap_ix(
     let vault_b = extra.vault_b?;
     let tick_spacing = extra.tick_spacing?;
 
-    let whirlpool_program = Pubkey::from_str("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc").unwrap();
-    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
-    let memo_program = Pubkey::from_str("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr").unwrap();
+    let whirlpool_program = crate::config::programs::orca_whirlpool();
+    let token_program = *SPL_TOKEN_PROGRAM;
+    let memo_program = *MEMO_PROGRAM;
 
     let a_to_b = input_mint == pool.token_a_mint;
     let tick_current = pool.current_tick.unwrap_or(0);
@@ -628,10 +737,10 @@ pub fn build_raydium_clmm_swap_ix(
     let amm_config = extra.config?;
     let observation_state = extra.observation?;
 
-    let clmm_program = Pubkey::from_str("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK").unwrap();
-    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
-    let token_2022_program = Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb").unwrap();
-    let memo_program = Pubkey::from_str("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr").unwrap();
+    let clmm_program = crate::config::programs::raydium_clmm();
+    let token_program = *SPL_TOKEN_PROGRAM;
+    let token_2022_program = *TOKEN_2022_PROGRAM;
+    let memo_program = *MEMO_PROGRAM;
 
     let a_to_b = input_mint == pool.token_a_mint;
     let tick_current = pool.current_tick.unwrap_or(0);
@@ -717,9 +826,9 @@ pub fn build_meteora_dlmm_swap_ix(
     let vault_a = extra.vault_a?;  // reserve_x
     let vault_b = extra.vault_b?;  // reserve_y
 
-    let dlmm_program = Pubkey::from_str("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo").unwrap();
-    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
-    let memo_program = Pubkey::from_str("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr").unwrap();
+    let dlmm_program = crate::config::programs::meteora_dlmm();
+    let token_program = *SPL_TOKEN_PROGRAM;
+    let memo_program = *MEMO_PROGRAM;
 
     let a_to_b = input_mint == pool.token_a_mint; // X -> Y
     let active_id = pool.current_tick.unwrap_or(0);
@@ -829,8 +938,8 @@ pub fn build_phoenix_swap_ix(
     let vault_a = pool.extra.vault_a?; // base vault
     let vault_b = pool.extra.vault_b?; // quote vault
 
-    let phoenix_program = Pubkey::from_str("PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY").unwrap();
-    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+    let phoenix_program = crate::config::programs::phoenix_v1();
+    let token_program = *SPL_TOKEN_PROGRAM;
 
     let (log_authority, _) = Pubkey::find_program_address(&[b"log"], &phoenix_program);
 
@@ -887,8 +996,8 @@ pub fn build_manifest_swap_ix(
     let vault_a = pool.extra.vault_a?; // base vault
     let vault_b = pool.extra.vault_b?; // quote vault
 
-    let manifest_program = Pubkey::from_str("MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms").unwrap();
-    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+    let manifest_program = crate::config::programs::manifest();
+    let token_program = *SPL_TOKEN_PROGRAM;
     let system_program = solana_sdk::system_program::id();
 
     // token_a_mint = base, token_b_mint = quote
@@ -941,16 +1050,11 @@ pub fn sanctum_swap_accounts(
 
     // SOL Value Calculators
     let source_calc = crate::config::sanctum_sol_value_calculator(input_mint)
-        .unwrap_or_else(|| {
-            // For SOL (wSOL), use the wSOL calculator
-            Pubkey::from_str("wsoGmxQLSvwWpuaidCApxN5kEowLe2HLQLJhCQnj4bE").unwrap()
-        });
+        .unwrap_or(*WSOL_CALCULATOR);
     let dest_calc = crate::config::sanctum_sol_value_calculator(output_mint)
-        .unwrap_or_else(|| {
-            Pubkey::from_str("wsoGmxQLSvwWpuaidCApxN5kEowLe2HLQLJhCQnj4bE").unwrap()
-        });
+        .unwrap_or(*WSOL_CALCULATOR);
 
-    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+    let token_program = *SPL_TOKEN_PROGRAM;
     let system_program = solana_sdk::system_program::id();
 
     vec![

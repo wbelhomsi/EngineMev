@@ -1,5 +1,6 @@
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 /// Redact API keys from URLs and error messages for safe logging.
@@ -19,83 +20,99 @@ pub fn redact_url(s: &str) -> String {
     result
 }
 
-/// Known DEX program IDs on Solana
+/// Known DEX program IDs on Solana (parsed once via LazyLock, returned by copy).
 pub mod programs {
     use super::*;
 
-    pub fn raydium_amm() -> Pubkey {
+    static RAYDIUM_AMM: LazyLock<Pubkey> = LazyLock::new(|| {
         Pubkey::from_str("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8").unwrap()
-    }
-
-    pub fn raydium_clmm() -> Pubkey {
+    });
+    static RAYDIUM_CLMM: LazyLock<Pubkey> = LazyLock::new(|| {
         Pubkey::from_str("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK").unwrap()
-    }
-
-    pub fn orca_whirlpool() -> Pubkey {
+    });
+    static ORCA_WHIRLPOOL: LazyLock<Pubkey> = LazyLock::new(|| {
         Pubkey::from_str("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc").unwrap()
-    }
-
-    pub fn meteora_dlmm() -> Pubkey {
+    });
+    static METEORA_DLMM: LazyLock<Pubkey> = LazyLock::new(|| {
         Pubkey::from_str("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo").unwrap()
-    }
-
-    pub fn raydium_cp() -> Pubkey {
+    });
+    static RAYDIUM_CP: LazyLock<Pubkey> = LazyLock::new(|| {
         Pubkey::from_str("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C").unwrap()
-    }
-
-    pub fn meteora_damm_v2() -> Pubkey {
+    });
+    static METEORA_DAMM_V2: LazyLock<Pubkey> = LazyLock::new(|| {
         Pubkey::from_str("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG").unwrap()
-    }
-
-    pub fn jupiter_v6() -> Pubkey {
+    });
+    static JUPITER_V6: LazyLock<Pubkey> = LazyLock::new(|| {
         Pubkey::from_str("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4").unwrap()
-    }
-
-    pub fn sanctum_s_controller() -> Pubkey {
+    });
+    static SANCTUM_S_CONTROLLER: LazyLock<Pubkey> = LazyLock::new(|| {
         Pubkey::from_str("5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx").unwrap()
-    }
-
-    pub fn sanctum_flat_fee_pricing() -> Pubkey {
+    });
+    static SANCTUM_FLAT_FEE_PRICING: LazyLock<Pubkey> = LazyLock::new(|| {
         Pubkey::from_str("f1tUoNEKrDp1oeGn4zxr7bh41eN6VcfHjfrL3ZqQday").unwrap()
-    }
-
-    pub fn phoenix_v1() -> Pubkey {
+    });
+    static PHOENIX_V1: LazyLock<Pubkey> = LazyLock::new(|| {
         Pubkey::from_str("PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY").unwrap()
-    }
-
-    pub fn manifest() -> Pubkey {
+    });
+    static MANIFEST: LazyLock<Pubkey> = LazyLock::new(|| {
         Pubkey::from_str("MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms").unwrap()
-    }
+    });
+
+    pub fn raydium_amm() -> Pubkey { *RAYDIUM_AMM }
+    pub fn raydium_clmm() -> Pubkey { *RAYDIUM_CLMM }
+    pub fn orca_whirlpool() -> Pubkey { *ORCA_WHIRLPOOL }
+    pub fn meteora_dlmm() -> Pubkey { *METEORA_DLMM }
+    pub fn raydium_cp() -> Pubkey { *RAYDIUM_CP }
+    pub fn meteora_damm_v2() -> Pubkey { *METEORA_DAMM_V2 }
+    pub fn jupiter_v6() -> Pubkey { *JUPITER_V6 }
+    pub fn sanctum_s_controller() -> Pubkey { *SANCTUM_S_CONTROLLER }
+    pub fn sanctum_flat_fee_pricing() -> Pubkey { *SANCTUM_FLAT_FEE_PRICING }
+    pub fn phoenix_v1() -> Pubkey { *PHOENIX_V1 }
+    pub fn manifest() -> Pubkey { *MANIFEST }
 }
+
+// ─── Static mints and calculators (parsed once) ────────────────────────────
+
+static JITOSOL_MINT: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn").unwrap()
+});
+static MSOL_MINT: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So").unwrap()
+});
+static BSOL_MINT: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1").unwrap()
+});
+static SOL_MINT: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap()
+});
+static SPL_STAKE_POOL_CALC: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("sp1V4h2gWorkGhVcazBc22Hfo2f5sd7jcjT4EDPrWFF").unwrap()
+});
+static MARINADE_CALC: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("mare3SCyfZkAndpBRBeonETmkCCB3TJTTrz8ZN2dnhP").unwrap()
+});
 
 /// Supported LST mints and their human-readable names.
 pub fn lst_mints() -> Vec<(Pubkey, &'static str)> {
     vec![
-        (Pubkey::from_str("J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn").unwrap(), "jitoSOL"),
-        (Pubkey::from_str("mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So").unwrap(), "mSOL"),
-        (Pubkey::from_str("bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1").unwrap(), "bSOL"),
+        (*JITOSOL_MINT, "jitoSOL"),
+        (*MSOL_MINT, "mSOL"),
+        (*BSOL_MINT, "bSOL"),
     ]
 }
 
 /// Native SOL mint (wrapped SOL).
 pub fn sol_mint() -> Pubkey {
-    Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap()
+    *SOL_MINT
 }
 
 /// Map an LST mint to its Sanctum SOL Value Calculator program.
 /// Returns None for unknown mints.
 pub fn sanctum_sol_value_calculator(mint: &Pubkey) -> Option<Pubkey> {
-    let jitosol = Pubkey::from_str("J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn").unwrap();
-    let msol = Pubkey::from_str("mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So").unwrap();
-    let bsol = Pubkey::from_str("bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1").unwrap();
-
-    let spl_calc = Pubkey::from_str("sp1V4h2gWorkGhVcazBc22Hfo2f5sd7jcjT4EDPrWFF").unwrap();
-    let marinade_calc = Pubkey::from_str("mare3SCyfZkAndpBRBeonETmkCCB3TJTTrz8ZN2dnhP").unwrap();
-
-    if *mint == jitosol || *mint == bsol {
-        Some(spl_calc)
-    } else if *mint == msol {
-        Some(marinade_calc)
+    if *mint == *JITOSOL_MINT || *mint == *BSOL_MINT {
+        Some(*SPL_STAKE_POOL_CALC)
+    } else if *mint == *MSOL_MINT {
+        Some(*MARINADE_CALC)
     } else {
         None
     }

@@ -15,6 +15,10 @@ deploy_key_engineme.pub
 *.pem
 *.key
 
+# Claude Code / ruflo local state
+.claude/
+.claude-flow/
+
 # IDE
 .vscode/
 .idea/
