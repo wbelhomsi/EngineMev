@@ -1,47 +1,52 @@
 # Next Session TODO
 
-## Status: Jito accepts bundles at 66ms. Need rate limiter + verify on-chain landing.
+## Status: Engine runs on mainnet. 136 opportunities in ~10 min. Bundles building but mostly rate-limited.
 
-## 1. Add Jito rate limiter (CRITICAL)
-Jito allows 1 bundle/sec unauthenticated. We're submitting every opportunity (~5/sec), triggering rate limit backoff after the first bundle. Only the first bundle per session gets accepted.
+## Issues Found During 10-Min Live Run (2026-04-03)
 
-**Fix:** Add rate limiter back in `src/main.rs` router loop:
-```rust
-let mut last_submission = Instant::now() - Duration::from_secs(5);
-const MIN_INTERVAL: Duration = Duration::from_millis(1500);
+### CRITICAL: 124 of 135 bundles submitted to 0 relays (rate limiter too aggressive)
+Most bundles fire during a burst (all from same pool state change) and the rate limiter blocks all but the first. Only 11 bundles actually reached any relay. The per-relay rate limiter is working correctly, but the BURST of 130+ opportunities from a single event means only 1 gets through.
 
-// Before submitting:
-if last_submission.elapsed() < MIN_INTERVAL { continue; }
-// After submitting:
-last_submission = Instant::now();
-```
+**Root cause:** Dedup issue — 131 of 136 opportunities have identical profit (1,794,666 lamports). These are the SAME arb opportunity detected across different pool addresses for the same token pair. The route calculator finds the same price dislocation through every pool that trades the pair.
 
-## 2. Verify Astralane auth fix works
-Changed from `api_key` header to `?api-key=` query param. Was getting 401 Unauthorized. Need to test if the query param approach works.
+**Fix:** Dedup opportunities by (base_mint, intermediate_mint) pair BEFORE submission. Only submit the most profitable route per pair per slot.
 
-## 3. Check if Jito-accepted bundles land on-chain
-Previous accepted bundle IDs:
-- `659231248cc2a7f39adb8e6d8038191423d4316ef287db1520cfcdd3934681d8`
-- `cf6ec769977e815666c46bcc0eb9ef337877e11e8e088a71a3c4f7064a6235b5`
+### HIGH: 2,392 DLMM bitmap check failures + 720 vault fetch failures
+Helius RPC is being hammered by fire-and-forget bitmap checks and vault fetches. Every DLMM pool state update triggers a bitmap PDA existence check via RPC. Every Raydium AMM/CP update triggers a vault balance fetch.
 
-Check: https://explorer.jito.wtf/bundle/<id>
-If they show as "landed" — we're making money. If "dropped" — the arb was already captured by faster searchers.
+**Fix options:**
+1. Cache bitmap existence permanently (it either exists or doesn't — won't change)
+2. Batch vault fetches instead of one-per-pool
+3. Rate limit RPC calls to stay within Helius free tier
 
-## 4. Apply for Jito UUID (pending)
-Application submitted via pastebin. Once approved, set `JITO_AUTH_UUID` in .env for higher rate limits.
+### MEDIUM: 76 blockhash fetch failures
+RPC rate limiting cascades — vault/bitmap fetches consume the RPC quota, leaving blockhash fetches to fail. When blockhash is stale, ALL opportunities get skipped.
 
-## What's working
-- Full pipeline: Geyser → 8 DEX parsers → route → simulate → build bundle → ATA creation → compute budget → tip → submit
-- Mint program cache (SPL Token vs Token-2022) — correctly identifies pump.fun tokens
-- Fire-and-forget mint fetch with router gating (race condition fixed)
-- Jito Frankfurt at 66ms, Astralane FRA with revert_protect
-- Compute budget IX (400K CU limit, 1000 micro-lamport priority)
-- 66 tests passing
-- Balance: 0.75 SOL (untouched — minimum_amount_out + revert_protect)
+**Fix:** Use a separate RPC endpoint for blockhash (or prioritize it). Blockhash is the most critical RPC call.
 
-## Key findings from this session
-- Jito rate limit: 1/sec unauth, "Network congested" after backoff
-- Astralane was 401 (wrong auth method) — fixed to query param
-- Mint cache race condition — fixed (fire-and-forget + gate router on cached mints)
-- DLMM bitmap extension — pass program ID for Option<UncheckedAccount> None
-- Token-2022 detection — getAccountInfo(mint).owner via RPC, cached in DashMap
+### MEDIUM: 7 Geyser disconnects in 10 minutes
+LaserStream connection drops every ~90 seconds. Reconnect works (1s backoff), but each disconnect loses ~1-2 seconds of data.
+
+**Fix:** Check if this is a LaserStream plan limit. May need to upgrade Helius plan or use a different Geyser provider.
+
+### MEDIUM: Jito rate limit (-32097) hit 3 times
+"Network congested. Endpoint is globally rate limited." — this is the unauth rate limit (1 bundle/sec). Need Jito UUID approval for higher limits.
+
+### LOW: All opportunities use same profit amount (no dedup)
+131 opportunities with gross=1,794,666 and 4 with gross=6,736,352. The engine finds the same arb through dozens of different pool paths. This is wasted computation and relay bandwidth.
+
+## Key Metrics From Run
+- 1,196 pools tracked
+- 136 opportunities detected
+- 135 bundles built
+- 11 bundles reached a relay
+- 3 Jito rejections (rate limited)
+- Tip accounting working: total_tip=1,445,999 (jito=1,345,999, astralane=100,000)
+- Balance: untouched (revert protection + min_amount_out)
+
+## Priority for Next Session
+1. **Opportunity deduplication** (biggest bang — 10x fewer bundles, 10x more relay throughput)
+2. **Cache DLMM bitmap existence** (eliminate 2,392 unnecessary RPC calls)
+3. **Batch/throttle vault fetches** (eliminate 720 RPC calls)
+4. **Separate RPC for blockhash** (ensure blockhash never stale)
+5. **Jito UUID** (higher rate limits)
