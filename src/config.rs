@@ -48,8 +48,9 @@ pub mod programs {
     static SANCTUM_S_CONTROLLER: LazyLock<Pubkey> = LazyLock::new(|| {
         Pubkey::from_str("5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx").unwrap()
     });
-    static SANCTUM_FLAT_FEE_PRICING: LazyLock<Pubkey> = LazyLock::new(|| {
-        Pubkey::from_str("f1tUoNEKrDp1oeGn4zxr7bh41eN6VcfHjfrL3ZqQday").unwrap()
+    // Fix: pricing program updated from old f1tU... to on-chain verified s1b6...
+    static SANCTUM_PRICING: LazyLock<Pubkey> = LazyLock::new(|| {
+        Pubkey::from_str("s1b6NRXj6ygNu1QMKXh2H9LUR2aPApAAm1UQ2DjdhNV").unwrap()
     });
     static PHOENIX_V1: LazyLock<Pubkey> = LazyLock::new(|| {
         Pubkey::from_str("PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY").unwrap()
@@ -66,7 +67,7 @@ pub mod programs {
     pub fn meteora_damm_v2() -> Pubkey { *METEORA_DAMM_V2 }
     pub fn jupiter_v6() -> Pubkey { *JUPITER_V6 }
     pub fn sanctum_s_controller() -> Pubkey { *SANCTUM_S_CONTROLLER }
-    pub fn sanctum_flat_fee_pricing() -> Pubkey { *SANCTUM_FLAT_FEE_PRICING }
+    pub fn sanctum_pricing() -> Pubkey { *SANCTUM_PRICING }
     pub fn phoenix_v1() -> Pubkey { *PHOENIX_V1 }
     pub fn manifest() -> Pubkey { *MANIFEST }
 }
@@ -91,6 +92,87 @@ static SPL_STAKE_POOL_CALC: LazyLock<Pubkey> = LazyLock::new(|| {
 static MARINADE_CALC: LazyLock<Pubkey> = LazyLock::new(|| {
     Pubkey::from_str("mare3SCyfZkAndpBRBeonETmkCCB3TJTTrz8ZN2dnhP").unwrap()
 });
+
+// ─── Sanctum static addresses (verified on-chain 2026-04-03) ──────────────
+
+static WSOL_CALCULATOR: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("wsoGmxQLSvwWpuaidCApxN5kEowLe2HLQLJhCQnj4bE").unwrap()
+});
+
+// SPL Stake Pool Calculator accounts
+static SPL_CALC_STATE: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("7orJ4kDhn1Ewp54j29tBzUWDFGhyimhYi7sxybZcphHd").unwrap()
+});
+static SPL_STAKE_POOL_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("SPoo1Ku8WFXoNDMHPsrGSTSG1Y47rzgn41SLUNakuHy").unwrap()
+});
+static SPL_STAKE_POOL_PROG_DATA: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("EmiU8AQkB2sswTxVB6aCmsAJftoowZGGDXuytm6X65R3").unwrap()
+});
+static JITO_STAKE_POOL: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("Jito4APyf642JPZPx3hGc6WWJ8zPKtRbRs4P815Awbb").unwrap()
+});
+static BLAZE_STAKE_POOL: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("stk9ApL5HeVAwPLr3TLhDXdZS8ptVu7zp6ov8HFDuMi").unwrap()
+});
+
+// Marinade Calculator accounts
+static MARINADE_CALC_STATE: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("FMbUjYFtqgm4Zfpg7MguZp33RQ3tvkd22NgaCCAs3M6E").unwrap()
+});
+static MARINADE_STATE: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("8szGkuLTAux9XMgZ2vtY39jVSowEcpBfFfD8hXSEqdGC").unwrap()
+});
+static MARINADE_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("MarBmsSgKXdrN1egZf5sqe1TMai9K1rChYNDJgjq7aD").unwrap()
+});
+static MARINADE_PROG_DATA: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("4PQH9YmfuKrVyZaibkLYpJZPv2FPaybhq2GAuBcWMSBf").unwrap()
+});
+
+// Pricing program state
+static SANCTUM_PRICING_STATE: LazyLock<Pubkey> = LazyLock::new(|| {
+    Pubkey::from_str("4T9YzXnmQFMyYi2nrxyXjhtUANavmCkxGCsU3GKaNjwT").unwrap()
+});
+
+/// Sanctum pricing program state account.
+pub fn sanctum_pricing_state() -> Pubkey { *SANCTUM_PRICING_STATE }
+
+/// Returns (calculator_program, remaining_accounts, calc_accs_count) for a given LST mint.
+/// The remaining_accounts are the suffix accounts after the calculator program.
+pub fn sanctum_calculator_accounts(mint: &Pubkey) -> (Pubkey, Vec<Pubkey>, u8) {
+    if *mint == sol_mint() {
+        // wSOL: just the calculator program, no extra accounts
+        (*WSOL_CALCULATOR, vec![], 1)
+    } else if *mint == *JITOSOL_MINT {
+        // jitoSOL: SPL Stake Pool calculator
+        (*SPL_STAKE_POOL_CALC, vec![
+            *SPL_CALC_STATE,
+            *JITO_STAKE_POOL,
+            *SPL_STAKE_POOL_PROGRAM,
+            *SPL_STAKE_POOL_PROG_DATA,
+        ], 5)
+    } else if *mint == *BSOL_MINT {
+        // bSOL: SPL Stake Pool calculator (different pool)
+        (*SPL_STAKE_POOL_CALC, vec![
+            *SPL_CALC_STATE,
+            *BLAZE_STAKE_POOL,
+            *SPL_STAKE_POOL_PROGRAM,
+            *SPL_STAKE_POOL_PROG_DATA,
+        ], 5)
+    } else if *mint == *MSOL_MINT {
+        // mSOL: Marinade calculator
+        (*MARINADE_CALC, vec![
+            *MARINADE_CALC_STATE,
+            *MARINADE_STATE,
+            *MARINADE_PROGRAM,
+            *MARINADE_PROG_DATA,
+        ], 5)
+    } else {
+        // Unknown LST: fallback to wSOL calculator (will fail on-chain but safe)
+        (*WSOL_CALCULATOR, vec![], 1)
+    }
+}
 
 /// Supported LST mints and their human-readable names.
 pub fn lst_mints() -> Vec<(Pubkey, &'static str)> {
