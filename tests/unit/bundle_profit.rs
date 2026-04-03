@@ -70,13 +70,13 @@ fn test_bundle_sets_min_out_on_final_hop() {
         estimated_profit_lamports: 50_000_000,
     };
 
-    let tip_lamports = 25_000_000; // 50% of profit
+    let min_final_output = route.input_amount
+        + route.estimated_profit_lamports.saturating_sub(25_000_000);
 
-    let result = builder.build_arb_bundle(&route, tip_lamports, Hash::default());
-    assert!(result.is_ok(), "Bundle build should succeed");
+    let result = builder.build_arb_instructions(&route, min_final_output);
+    assert!(result.is_ok(), "Instruction build should succeed");
 
-    // Verify the bundle was built (detailed IX inspection requires deserializing,
-    // but we verify it doesn't error)
-    let bundle = result.unwrap();
-    assert_eq!(bundle.len(), 1, "Single tx bundle (arb + tip in one tx)");
+    // Verify instructions were built (no tips — relays add their own)
+    let instructions = result.unwrap();
+    assert!(instructions.len() >= 3, "Should have compute budget + ATA + swap IXs");
 }

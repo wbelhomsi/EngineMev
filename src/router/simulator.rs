@@ -18,9 +18,6 @@ pub struct ProfitSimulator {
     state_cache: StateCache,
     tip_fraction: f64,
     min_profit_lamports: u64,
-    /// Extra relay tips beyond Jito (e.g., Astralane) in lamports.
-    /// These are deducted from profit alongside the Jito tip.
-    relay_extra_tips: u64,
 }
 
 /// Result of profit simulation — either a confirmed opportunity or a rejection.
@@ -30,9 +27,9 @@ pub enum SimulationResult {
     Profitable {
         route: ArbRoute,
         net_profit_lamports: u64,
-        /// Total tip budget (Jito + relay extras like Astralane)
-        total_tip_lamports: u64,
-        /// Profit after all tips
+        /// Tip amount (same tip sent to each relay independently)
+        tip_lamports: u64,
+        /// Profit after tip
         final_profit_lamports: u64,
     },
     /// Route is not profitable. Reason provided for logging.
@@ -43,18 +40,7 @@ pub enum SimulationResult {
 
 impl ProfitSimulator {
     pub fn new(state_cache: StateCache, tip_fraction: f64, min_profit_lamports: u64) -> Self {
-        Self {
-            state_cache,
-            tip_fraction,
-            min_profit_lamports,
-            relay_extra_tips: 0,
-        }
-    }
-
-    /// Set extra relay tip amount (e.g., Astralane tip) that must be deducted from profit.
-    pub fn with_relay_extra_tips(mut self, extra_tips: u64) -> Self {
-        self.relay_extra_tips = extra_tips;
-        self
+        Self { state_cache, tip_fraction, min_profit_lamports }
     }
 
     /// Run full simulation on a candidate route.
@@ -137,24 +123,21 @@ impl ProfitSimulator {
             };
         }
 
-        // Step 4: Calculate Jito tip
-        let jito_tip_lamports = (gross_profit_u64 as f64 * self.tip_fraction) as u64;
+        // Step 4: Calculate tip (same amount sent to each relay independently)
+        let tip_lamports = (gross_profit_u64 as f64 * self.tip_fraction) as u64;
 
-        // Step 5: Total tips = Jito + relay extras (Astralane, etc.)
-        let total_tip_lamports = jito_tip_lamports + self.relay_extra_tips;
-
-        // Step 5a: Reject if total tips would exceed or equal profit (would lose money)
-        if total_tip_lamports >= gross_profit_u64 {
+        // Step 5: Reject if tip would exceed or equal profit
+        if tip_lamports >= gross_profit_u64 {
             return SimulationResult::Unprofitable {
                 reason: format!(
-                    "Total tips ({}) >= gross profit ({}), would lose money",
-                    total_tip_lamports, gross_profit_u64
+                    "Tip ({}) >= gross profit ({}), would lose money",
+                    tip_lamports, gross_profit_u64
                 ),
             };
         }
 
-        // Step 6: Final profit after ALL tips
-        let final_profit = gross_profit_u64.saturating_sub(total_tip_lamports);
+        // Step 6: Final profit after tip
+        let final_profit = gross_profit_u64.saturating_sub(tip_lamports);
 
         // Step 7: Check minimum threshold
         if final_profit < self.min_profit_lamports {
@@ -175,19 +158,14 @@ impl ProfitSimulator {
         }
 
         debug!(
-            "Profitable route: {} hops, gross={}, total_tips={} (jito={}, relay_extra={}), net={}",
-            fresh_route.hop_count(),
-            gross_profit_u64,
-            total_tip_lamports,
-            jito_tip_lamports,
-            self.relay_extra_tips,
-            final_profit
+            "Profitable route: {} hops, gross={}, tip={}, net={}",
+            fresh_route.hop_count(), gross_profit_u64, tip_lamports, final_profit
         );
 
         SimulationResult::Profitable {
             route: fresh_route,
             net_profit_lamports: gross_profit_u64,
-            total_tip_lamports,
+            tip_lamports,
             final_profit_lamports: final_profit,
         }
     }
