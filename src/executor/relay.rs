@@ -449,9 +449,9 @@ impl MultiRelay {
 
     /// Submit to Astralane Iris aggregator.
     ///
-    /// Astralane routes bundles through Jito, Paladin, and swQoS paths.
-    /// Uses send_bundle with revert_protect=true for zero-loss failed bundles.
-    /// Auth via api_key header. Frankfurt IP endpoint for lowest latency.
+    /// Uses Jito-compatible sendBundle format with revertProtection option.
+    /// Auth via api_key header OR ?api-key= query param.
+    /// Response: {"result": ["tx_sig_1", ...]} on success.
     async fn submit_to_astralane(
         client: &reqwest::Client,
         url: &str,
@@ -459,31 +459,25 @@ impl MultiRelay {
     ) -> RelayResult {
         let start = std::time::Instant::now();
 
+        // Jito-compatible sendBundle format
         let payload = json!({
             "jsonrpc": "2.0",
             "id": 1,
-            "method": "send_bundle",
-            "params": [{
-                "encoded_transactions": encoded_txs,
-                "revert_protect": true
-            }]
+            "method": "sendBundle",
+            "params": [
+                encoded_txs,
+                {
+                    "encoding": "base64",
+                    "revertProtection": true
+                }
+            ]
         });
 
         let api_key = std::env::var("ASTRALANE_API_KEY").unwrap_or_default();
 
-        // Astralane accepts api-key as query parameter
-        let url_with_key = if api_key.is_empty() {
-            url.to_string()
-        } else {
-            if url.contains('?') {
-                format!("{}&api-key={}", url, api_key)
-            } else {
-                format!("{}?api-key={}", url, api_key)
-            }
-        };
-
         let result = client
-            .post(&url_with_key)
+            .post(url)
+            .header("api_key", &api_key)
             .json(&payload)
             .send()
             .await;
@@ -494,15 +488,27 @@ impl MultiRelay {
             Ok(resp) => match resp.json::<serde_json::Value>().await {
                 Ok(body) => {
                     debug!("Astralane response: {}", body);
-                    // Astralane send_bundle may return result as string or object
+                    // Astralane returns {"result": ["tx_sig_1", ...]} on success
                     let bundle_id = body.get("result")
-                        .and_then(|v| v.as_str().map(String::from)
-                            .or_else(|| v.get("bundle_id").and_then(|b| b.as_str()).map(String::from))
-                            .or_else(|| if !v.is_null() { Some(format!("{}", v)) } else { None })
-                        );
+                        .and_then(|v| {
+                            // Array of signatures
+                            if let Some(arr) = v.as_array() {
+                                arr.first().and_then(|s| s.as_str()).map(String::from)
+                            } else if let Some(s) = v.as_str() {
+                                Some(s.to_string())
+                            } else if !v.is_null() {
+                                Some(format!("{}", v))
+                            } else {
+                                None
+                            }
+                        });
                     let success = bundle_id.is_some();
                     let error = if !success {
-                        Some(format!("Astralane: {}", body))
+                        if let Some(err) = body.get("error") {
+                            Some(format!("{}", err))
+                        } else {
+                            Some(format!("Astralane: {}", body))
+                        }
                     } else {
                         None
                     };
