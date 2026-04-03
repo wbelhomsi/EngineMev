@@ -2,6 +2,7 @@ use solana_mev_bot::{config, executor, mempool, router, state};
 
 use anyhow::Result;
 use crossbeam_channel::bounded;
+use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Keypair;
 use solana_sdk::signer::Signer;
 use std::sync::Arc;
@@ -73,6 +74,11 @@ async fn main() -> Result<()> {
     if config.lst_arb_enabled {
         bootstrap_sanctum_pools(&state_cache);
         info!("LST arb enabled: {} Sanctum virtual pools bootstrapped", config::lst_mints().len());
+
+        // Bootstrap Sanctum LST indices from on-chain LstStateList
+        if let Err(e) = bootstrap_lst_indices(&http_client, &config.rpc_url, &state_cache).await {
+            warn!("Failed to bootstrap LST indices: {} — Sanctum routes will be disabled", e);
+        }
     }
 
     // Shutdown signal
@@ -403,10 +409,65 @@ fn can_submit_route(route: &router::pool::ArbRoute) -> bool {
         | router::pool::DexType::OrcaWhirlpool
         | router::pool::DexType::MeteoraDlmm
         | router::pool::DexType::MeteoraDammV2
-        // SanctumInfinity disabled — IX format is Shank (not Anchor), needs full rewrite
+        | router::pool::DexType::SanctumInfinity
         | router::pool::DexType::Phoenix
         | router::pool::DexType::Manifest
     ))
+}
+
+/// Fetch the Sanctum LstStateList from on-chain and populate mint->index mapping.
+/// Each entry is 80 bytes: padding(16) + mint(32) + calculator(32).
+async fn bootstrap_lst_indices(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    state_cache: &state::StateCache,
+) -> Result<()> {
+    use base64::{engine::general_purpose, Engine as _};
+
+    let s_controller = config::programs::sanctum_s_controller();
+    let (lst_state_list_pda, _) = Pubkey::find_program_address(&[b"lst-state-list"], &s_controller);
+
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "getAccountInfo",
+        "params": [lst_state_list_pda.to_string(), {"encoding": "base64"}]
+    });
+
+    let resp = client.post(rpc_url)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(10))
+        .send().await?
+        .json::<serde_json::Value>().await?;
+
+    let b64 = resp["result"]["value"]["data"][0]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("LstStateList account not found"))?;
+
+    let data = general_purpose::STANDARD.decode(b64)?;
+    info!("LstStateList: {} bytes", data.len());
+
+    // Parse as array of 80-byte entries, skip 16-byte header
+    let header_size = 16;
+    if data.len() < header_size { return Ok(()); }
+    let entry_data = &data[header_size..];
+    let entry_size = 80;
+    let count = entry_data.len() / entry_size;
+
+    let mut found = 0;
+    for i in 0..count {
+        let offset = i * entry_size;
+        if offset + entry_size > entry_data.len() { break; }
+        // mint is at bytes 16..48 within each entry
+        let mint_bytes: [u8; 32] = entry_data[offset + 16..offset + 48]
+            .try_into().unwrap_or([0u8; 32]);
+        let mint = Pubkey::new_from_array(mint_bytes);
+        if mint == Pubkey::default() { continue; }
+        state_cache.set_lst_index(mint, i as u32);
+        found += 1;
+    }
+
+    info!("Bootstrapped {} LST indices from LstStateList", found);
+    Ok(())
 }
 
 /// Create Sanctum virtual pools for each supported LST.
