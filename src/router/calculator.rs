@@ -61,6 +61,16 @@ impl RouteCalculator {
             self.find_3_hop_routes(&base_mint, &swap.pool_address, &mut routes);
         }
 
+        // Also search with SOL as base — we hold SOL, so SOL→X→SOL routes
+        // are always executable regardless of what token the Geyser trigger was for.
+        let sol = crate::config::sol_mint();
+        if base_mint != sol && (swap.input_mint == sol || swap.output_mint == sol) {
+            self.find_2_hop_routes(&sol, &swap.pool_address, &mut routes);
+            if self.max_hops >= 3 {
+                self.find_3_hop_routes(&sol, &swap.pool_address, &mut routes);
+            }
+        }
+
         // Sort by estimated profit descending
         routes.sort_by(|a, b| b.estimated_profit.cmp(&a.estimated_profit));
 
