@@ -98,11 +98,9 @@ impl BundleBuilder {
                         match self.state_cache.get_mint_program(&mint) {
                             Some(p) => p,
                             None => {
-                                // Mint program not cached — default to SPL Token.
-                                // The Geyser stream gates notifications on cached mints,
-                                // so this should rarely be hit.
-                                debug!("Mint program not cached for {}, defaulting SPL Token", mint);
-                                token_program
+                                // Mint program not cached — can't safely create ATA.
+                                // Using wrong program causes "Incorrect program ID" on-chain.
+                                anyhow::bail!("Mint program not cached for {} — skipping route", mint);
                             }
                         }
                     };
