@@ -1,42 +1,40 @@
 # Next Session TODO
 
-## Status: Engine production-ready. Jito + Astralane accepting bundles. Bundles not yet landing (auction competition).
+## Status: All IX formats verified on-chain. First DLMM swap executed. Need real-time Sanctum rates.
 
-## Key Metrics (last live run)
-- 1,143 opportunities in 30 min
-- 71 Jito bundles accepted, 109 Astralane accepted
-- Zero format/decode errors
-- Zero crashes, zero blockhash failures
-- 85 unit tests passing
-- Balance: 0.75 SOL (untouched — minimum_amount_out protects)
+## The Final Blocker: Hardcoded Sanctum Rates
 
-## Why Bundles Don't Land (404 on Jito Explorer)
-Accepted by relay != landed on-chain. Our bundles enter the Jito auction but get outbid by faster searchers (co-located, <10ms latency vs our ~300ms).
+Sanctum virtual pools use hardcoded rates (jitoSOL=1.082, mSOL=1.075, bSOL=1.06) that never update. The real on-chain rate changes continuously. With stale rates, SOL-base arb profits are ~684 lamports (below 100K min_profit threshold).
 
-## To Get First Landed Bundle
+### Fix: Real-Time SOL Value from LstStateList
 
-### Speed optimizations (highest impact)
-1. **Skip simulator re-check** — rely on minimum_amount_out for safety. Saves ~100ms.
-2. **Pre-compute common route templates** — have instructions ready, just swap amounts + sign
-3. **Reduce tip_fraction to 50%** — currently 85%. Higher tip means we bid more but keep less. Try different fractions.
-4. **Run 24/7** — less competitive hours (nights, weekends) may have easier arbs
+We already parse the LstStateList at startup (117 entries). Each entry has a `sol_value: u64` field at offset 8 within the 80-byte entry. This is the on-chain SOL value per LST token. 
 
-### Structural improvements
-5. **Address Lookup Tables (ALT)** — enables 3-hop routes, reduces tx size
-6. **Raydium AMM v4** — enable in can_submit_route() (IX builder is done)
-7. **Fix Jito write-lock rejection** — 40% of Jito submissions fail with "must write lock tip account". Not tx size (verified). Possibly Jito-side quirk with transaction message compilation.
+**Plan:**
+1. During bootstrap, read `sol_value` from each LstStateList entry (already have the data)
+2. Compute rate as `sol_value / 10^9` (lamports to SOL ratio)
+3. Update Sanctum virtual pool reserves using the real rate
+4. Periodically re-fetch LstStateList (every 30s) to keep rates current
+5. OR: subscribe to Sanctum pool reserve ATAs via Geyser for real-time updates
 
-### Investigate
-8. **Check if any bundle TX appeared on-chain** — even as failed. Search signer pubkey on Solscan.
-9. **Verify Nozomi/bloXroute tip accounts** — currently using Jito accounts, may need relay-specific ones.
-10. **Speculative multi-route submission** — submit top 3-5 routes without simulation
+### Alternative: DEX↔DEX Arbs (No Sanctum)
 
-## Architecture (completed this session)
-- 9 DEX swap IX builders (all verified)
-- Per-relay bundle architecture (5 independent relay modules)
-- Sanctum Shank IX (1-byte discriminant, verified on-chain)
-- Orca swap_v2 (15-account layout, verified)
-- RPC flood protection (semaphore + bitmap cache + vault throttle)
-- Arb dedup (max 5 per token path per 2s)
-- Total tip accounting (single tip per relay, not summed)
-- LazyLock static Pubkeys + O(1) pair index
+Pure DEX arbs: SOL/USDC on Raydium vs Orca, SOL/TOKEN on different AMMs. These don't need Sanctum at all. The route calculator already finds them, but profits are tiny because spreads between DEXes on the same pair are razor-thin (<1 bps).
+
+## Issues Fixed This Session
+
+| Issue | Status |
+|-------|--------|
+| Sanctum Shank IX (1-byte discriminant) | Fixed, 29 SIM SUCCESS |
+| Orca swap_v2 (15 accounts) | Fixed |
+| Per-relay bundles (own tip+sign+send) | Fixed |
+| wSOL wrap before first swap | Fixed |
+| SOL-only route filter | Fixed |
+| Non-SOL routes (can't execute) | Fixed |
+| First DLMM swap on-chain | Hop 1 SUCCESS, hop 2 needs bitmap |
+
+## Architecture Complete
+
+- 85 unit tests, 5 relay modules, 9 DEX IX builders
+- Jito + Astralane accepting bundles (71 + 109 in 30-min run)
+- Balance: 0.75 SOL (untouched)
