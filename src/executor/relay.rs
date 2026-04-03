@@ -475,8 +475,19 @@ impl MultiRelay {
 
         let api_key = std::env::var("ASTRALANE_API_KEY").unwrap_or_default();
 
+        // Auth: try both query param and header (docs say both work)
+        let url_with_auth = if !api_key.is_empty() {
+            if url.contains('?') {
+                format!("{}&api-key={}", url, api_key)
+            } else {
+                format!("{}?api-key={}", url, api_key)
+            }
+        } else {
+            url.to_string()
+        };
+
         let result = client
-            .post(url)
+            .post(&url_with_auth)
             .header("api_key", &api_key)
             .json(&payload)
             .send()
@@ -485,7 +496,14 @@ impl MultiRelay {
         let latency = start.elapsed().as_micros() as u64;
 
         match result {
-            Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.text().await {
+                    Ok(text) => {
+                        if !status.is_success() {
+                            warn!("Astralane HTTP {}: {}", status, &text[..text.len().min(200)]);
+                        }
+                        match serde_json::from_str::<serde_json::Value>(&text) {
                 Ok(body) => {
                     debug!("Astralane response: {}", body);
                     // Astralane returns {"result": ["tx_sig_1", ...]} on success
@@ -520,14 +538,24 @@ impl MultiRelay {
                         error,
                     }
                 }
-                Err(e) => RelayResult {
-                    relay_name: "astralane".to_string(),
-                    bundle_id: None,
-                    success: false,
-                    latency_us: latency,
-                    error: Some(format!("Parse error: {}", e)),
-                },
-            },
+                            Err(e) => RelayResult {
+                                relay_name: "astralane".to_string(),
+                                bundle_id: None,
+                                success: false,
+                                latency_us: latency,
+                                error: Some(format!("JSON parse error: {} (raw: {})", e, &text[..text.len().min(200)])),
+                            },
+                        }
+                    }
+                    Err(e) => RelayResult {
+                        relay_name: "astralane".to_string(),
+                        bundle_id: None,
+                        success: false,
+                        latency_us: latency,
+                        error: Some(format!("Body read error: {}", e)),
+                    },
+                }
+            }
             Err(e) => RelayResult {
                 relay_name: "astralane".to_string(),
                 bundle_id: None,
