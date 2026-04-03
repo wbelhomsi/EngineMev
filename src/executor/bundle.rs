@@ -1039,7 +1039,7 @@ pub fn sanctum_swap_accounts(
     output_mint: &Pubkey,
 ) -> Vec<AccountMeta> {
     let s_controller = crate::config::programs::sanctum_s_controller();
-    let pricing_program = crate::config::programs::sanctum_flat_fee_pricing();
+    let pricing_program = crate::config::programs::sanctum_pricing();
 
     // PDAs
     let (pool_state_pda, _) = Pubkey::find_program_address(&[b"state"], &s_controller);

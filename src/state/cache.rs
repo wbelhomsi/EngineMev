@@ -51,6 +51,9 @@ pub struct StateCache {
     /// Mint address → token program (SPL Token or Token-2022).
     /// Populated by async getAccountInfo lookups, read by bundle builder.
     mint_programs: Arc<DashMap<Pubkey, Pubkey>>,
+    /// Sanctum LstStateList: mint → index in the on-chain list.
+    /// Populated at startup by fetching the LstStateList account.
+    lst_indices: Arc<DashMap<Pubkey, u32>>,
     ttl: Duration,
 }
 
@@ -62,6 +65,7 @@ impl StateCache {
             pair_to_pools: Arc::new(DashMap::with_capacity(20_000)),
             vault_to_pool: Arc::new(DashMap::with_capacity(20_000)),
             mint_programs: Arc::new(DashMap::with_capacity(1_000)),
+            lst_indices: Arc::new(DashMap::with_capacity(200)),
             ttl,
         }
     }
@@ -163,6 +167,16 @@ impl StateCache {
     /// Set the token program for a mint.
     pub fn set_mint_program(&self, mint: Pubkey, program: Pubkey) {
         self.mint_programs.insert(mint, program);
+    }
+
+    /// Get the Sanctum LstStateList index for a given mint.
+    pub fn get_lst_index(&self, mint: &Pubkey) -> Option<u32> {
+        self.lst_indices.get(mint).map(|v| *v)
+    }
+
+    /// Set the Sanctum LstStateList index for a mint.
+    pub fn set_lst_index(&self, mint: Pubkey, index: u32) {
+        self.lst_indices.insert(mint, index);
     }
 
     /// Evict pools that haven't been updated in 10 minutes.

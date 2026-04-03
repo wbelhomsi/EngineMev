@@ -37,9 +37,9 @@ fn test_sanctum_program_ids() {
         "5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx"
     );
 
-    let pricing = config::programs::sanctum_flat_fee_pricing();
+    let pricing = config::programs::sanctum_pricing();
     assert_eq!(
         pricing.to_string(),
-        "f1tUoNEKrDp1oeGn4zxr7bh41eN6VcfHjfrL3ZqQday"
+        "s1b6NRXj6ygNu1QMKXh2H9LUR2aPApAAm1UQ2DjdhNV"
     );
 }
