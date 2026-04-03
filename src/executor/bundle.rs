@@ -182,9 +182,41 @@ impl BundleBuilder {
             instructions.push(ix);
         }
 
-        // Tip instruction as last ix in the same tx
+        // Tip instructions — each relay needs its own tip
+        // Jito tip (rotated across 8 accounts)
         let tip_ix = self.build_tip_instruction(tip_lamports)?;
         instructions.push(tip_ix);
+
+        // Astralane tip (if configured) — min 100,000 lamports, rotated across tip accounts
+        if std::env::var("ASTRALANE_RELAY_URL").is_ok() {
+            const ASTRALANE_TIP_ACCOUNTS: &[&str] = &[
+                "astrazznxsGUhWShqgNtAdfrzP2G83DzcWVJDxwV9bF",
+                "astra4uejePWneqNaJKuFFA8oonqCE1sqF6b45kDMZm",
+                "astra9xWY93QyfG6yM8zwsKsRodscjQ2uU2HKNL5prk",
+                "astraRVUuTHjpwEVvNBeQEgwYx9w9CFyfxjYoobCZhL",
+                "astraEJ2fEj8Xmy6KLG7B3VfbKfsHXhHrNdCQx7iGJK",
+                "astraubkDw81n4LuutzSQ8uzHCv4BhPVhfvTcYv8SKC",
+                "astraZW5GLFefxNPAatceHhYjfA1ciq9gvfEg2S47xk",
+                "astrawVNP4xDBKT7rAdxrLYiTSTdqtUr63fSMduivXK",
+                "AstrA1ejL4UeXC2SBP4cpeEmtcFPZVLxx3XGKXyCW6to",
+                "AsTra79FET4aCKWspPqeSFvjJNyp96SvAnrmyAxqg5b7",
+                "AstrABAu8CBTyuPXpV4eSCJ5fePEPnxN8NqBaPKQ9fHR",
+                "AsTRADtvb6tTmrsqULQ9Wji9PigDMjhfEMza6zkynEvV",
+                "AsTRAEoyMofR3vUPpf9k68Gsfb6ymTZttEtsAbv8Bk4d",
+                "AStrAJv2RN2hKCHxwUMtqmSxgdcNZbihCwc1mCSnG83W",
+                "Astran35aiQUF57XZsmkWMtNCtXGLzs8upfiqXxth2bz",
+                "AStRAnpi6kFrKypragExgeRoJ1QnKH7pbSjLAKQVWUum",
+                "ASTRaoF93eYt73TYvwtsv6fMWHWbGmMUZfVZPo3CRU9C",
+            ];
+            let idx = self.tip_account_index.load(std::sync::atomic::Ordering::Relaxed)
+                % ASTRALANE_TIP_ACCOUNTS.len();
+            let astralane_tip: Pubkey = ASTRALANE_TIP_ACCOUNTS[idx].parse().unwrap();
+            instructions.push(system_instruction::transfer(
+                &self.searcher_keypair.pubkey(),
+                &astralane_tip,
+                100_000, // 0.0001 SOL minimum
+            ));
+        }
 
         let tx = Transaction::new_signed_with_payer(
             &instructions,
