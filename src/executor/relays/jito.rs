@@ -157,6 +157,15 @@ impl super::Relay for JitoRelay {
                 error: Some(format!("Serialize error: {}", e)),
             },
         };
+        if tx_bytes.len() > 1232 {
+            return RelayResult {
+                relay_name: "jito".to_string(),
+                bundle_id: None,
+                success: false,
+                latency_us: start.elapsed().as_micros() as u64,
+                error: Some(format!("Tx too large: {} bytes (limit 1232)", tx_bytes.len())),
+            };
+        }
         let encoded = general_purpose::STANDARD.encode(&tx_bytes);
 
         // JSON-RPC payload
