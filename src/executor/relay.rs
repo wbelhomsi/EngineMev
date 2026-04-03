@@ -91,6 +91,37 @@ impl MultiRelay {
         self.last_submit.insert(relay_name.to_string(), std::time::Instant::now());
     }
 
+    /// Spawn a background keepalive loop for Astralane.
+    /// Pings getHealth every 5s to keep the TCP connection hot and avoid cold-start latency.
+    pub fn spawn_astralane_keepalive(&self, shutdown_rx: tokio::sync::watch::Receiver<bool>) {
+        if let Some(ref url) = self.config.relay_endpoints.astralane {
+            let client = self.http_client.clone();
+            let api_key = std::env::var("ASTRALANE_API_KEY").unwrap_or_default();
+            let url = url.clone();
+            let mut shutdown = shutdown_rx;
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = shutdown.changed() => {
+                            if *shutdown.borrow() { break; }
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                            let payload = serde_json::json!({
+                                "jsonrpc": "2.0", "id": 1, "method": "getHealth"
+                            });
+                            let _ = client
+                                .post(&url)
+                                .header("api_key", &api_key)
+                                .json(&payload)
+                                .send()
+                                .await;
+                        }
+                    }
+                }
+            });
+        }
+    }
+
     /// Warm up connections to all configured relays.
     /// Call at startup to pre-establish TCP+TLS+HTTP2 connections
     /// so the first bundle submission doesn't pay cold-connect latency.
