@@ -409,7 +409,9 @@ pub fn build_raydium_cp_swap_ix(
     let token_prog_b = extra.token_program_b?;
 
     let cp_program = crate::config::programs::raydium_cp();
-    let (authority, _) = Pubkey::find_program_address(&[], &cp_program);
+    let (authority, _) = Pubkey::find_program_address(
+        &[b"vault_and_lp_mint_auth_seed"], &cp_program,
+    );
     let (observation, _) = Pubkey::find_program_address(
         &[b"observation", pool.address.as_ref()], &cp_program,
     );
@@ -658,7 +660,15 @@ pub fn build_raydium_clmm_swap_ix(
     }).collect();
 
     // sqrt_price_limit
-    let sqrt_price_limit: u128 = if a_to_b { 4295048016u128 } else { 79226673521066979257578248091u128 };
+    // Raydium CLMM sqrt price bounds
+    // MIN_SQRT_PRICE_X64 + 1 and MAX_SQRT_PRICE_X64 - 1 to stay within valid range
+    let sqrt_price_limit: u128 = if a_to_b {
+        4295048017u128 // MIN + 1
+    } else {
+        // Raydium CLMM MAX is different from Orca — use the value from their source
+        // https://github.com/raydium-io/raydium-clmm MAX_SQRT_PRICE_X64
+        79226673515401279992447579054u128
+    };
 
     // Discriminator: swap_v2
     let mut data = Vec::with_capacity(41);

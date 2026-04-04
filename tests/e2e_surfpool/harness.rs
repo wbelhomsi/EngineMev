@@ -154,6 +154,10 @@ impl SurfpoolHarness {
         &self.rpc_url
     }
 
+    pub fn client(&self) -> &reqwest::blocking::Client {
+        &self.client
+    }
+
     /// Get the latest blockhash from Surfpool.
     pub fn get_latest_blockhash(&self) -> Hash {
         let body = json!({

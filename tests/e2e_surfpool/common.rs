@@ -166,9 +166,9 @@ pub fn build_single_swap_tx(
         );
     };
 
-    // Resolve token programs for each mint
+    // Resolve token programs for each mint via RPC (authoritative, not pool flags)
     let input_token_program = spl_token_program(); // wSOL is always SPL Token
-    let output_token_program = resolve_token_program(&pool_state, &output_mint);
+    let output_token_program = resolve_token_program_via_rpc(harness, &output_mint);
 
     let mut instructions = Vec::with_capacity(10);
 
@@ -300,9 +300,11 @@ fn build_swap_ix(
                 .expect("Failed to build Raydium CP swap IX")
         }
         DexType::MeteoraDlmm => {
-            // Pass None for mint programs — let the builder use pool.extra flags
+            // Pass RPC-resolved mint programs to ensure ATA addresses match
+            let prog_a = Some(resolve_token_program_via_rpc(_harness, &pool.token_a_mint));
+            let prog_b = Some(resolve_token_program_via_rpc(_harness, &pool.token_b_mint));
             build_meteora_dlmm_swap_ix(
-                signer, pool, input_mint, amount_in, minimum_amount_out, None, None,
+                signer, pool, input_mint, amount_in, minimum_amount_out, prog_a, prog_b,
             )
             .expect("Failed to build DLMM swap IX")
         }
@@ -316,6 +318,9 @@ fn build_swap_ix(
 
 /// Resolve the token program for a non-wSOL mint from PoolExtra flags.
 fn resolve_token_program(pool: &PoolState, mint: &Pubkey) -> Pubkey {
+    // Pool.extra flags can be wrong for Token-2022 mints.
+    // Prefer the pool flags but fall back to SPL Token.
+    // For accurate resolution, use resolve_token_program_via_rpc below.
     let extra = &pool.extra;
     if *mint == pool.token_a_mint {
         extra.token_program_a.unwrap_or_else(spl_token_program)
@@ -324,6 +329,32 @@ fn resolve_token_program(pool: &PoolState, mint: &Pubkey) -> Pubkey {
     } else {
         spl_token_program()
     }
+}
+
+/// Fetch the actual token program owning a mint via RPC getAccountInfo.
+/// This is the authoritative source — pool flags can be stale.
+fn resolve_token_program_via_rpc(harness: &SurfpoolHarness, mint: &Pubkey) -> Pubkey {
+    use base64::{engine::general_purpose, Engine as _};
+
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "getAccountInfo",
+        "params": [mint.to_string(), {"encoding": "base64", "dataSlice": {"offset": 0, "length": 0}}]
+    });
+
+    let resp: serde_json::Value = harness.client()
+        .post(harness.rpc_url())
+        .json(&payload)
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+
+    let owner_str = resp["result"]["value"]["owner"]
+        .as_str()
+        .unwrap_or("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+
+    Pubkey::from_str(owner_str).unwrap_or_else(|_| spl_token_program())
 }
 
 /// Build a CreateIdempotent ATA instruction.
