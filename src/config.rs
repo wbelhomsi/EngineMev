@@ -33,7 +33,6 @@ pub mod programs {
     pub fn meteora_dlmm() -> Pubkey { addresses::METEORA_DLMM }
     pub fn raydium_cp() -> Pubkey { addresses::RAYDIUM_CP }
     pub fn meteora_damm_v2() -> Pubkey { addresses::METEORA_DAMM_V2 }
-    pub fn jupiter_v6() -> Pubkey { addresses::JUPITER_V6 }
     pub fn sanctum_s_controller() -> Pubkey { addresses::SANCTUM_S_CONTROLLER }
     pub fn sanctum_pricing() -> Pubkey { addresses::SANCTUM_PRICING }
     pub fn phoenix_v1() -> Pubkey { addresses::PHOENIX_V1 }

@@ -287,7 +287,6 @@ impl SurfpoolHarness {
         // Check for RPC-level error
         if let Some(err) = resp.get("error") {
             return TxResult {
-                signature: String::new(),
                 success: false,
                 logs: Vec::new(),
                 error: Some(format!("{}", err)),

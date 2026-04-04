@@ -286,7 +286,6 @@ async fn main() -> Result<()> {
                 // We don't know the exact swap direction, so we set output_mint
                 // to token_a — the route calculator will search both directions.
                 let trigger = DetectedSwap {
-                    signature: String::new(), // No tx sig in post-block model
                     dex_type: pool_state.dex_type,
                     pool_address,
                     input_mint: pool_state.token_a_mint,
@@ -297,7 +296,6 @@ async fn main() -> Result<()> {
 
                 // Also search with reversed direction for full coverage.
                 let trigger_reverse = DetectedSwap {
-                    signature: String::new(),
                     dex_type: pool_state.dex_type,
                     pool_address,
                     input_mint: pool_state.token_b_mint,

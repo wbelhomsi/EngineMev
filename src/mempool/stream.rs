@@ -379,15 +379,6 @@ impl GeyserStream {
 }
 
 /// Stats for monitoring Geyser stream health.
-#[derive(Debug, Default)]
-#[allow(dead_code)]
-pub struct StreamStats {
-    pub account_updates_received: u64,
-    pub vault_changes_detected: u64,
-    pub channel_full_drops: u64,
-    pub reconnects: u64,
-}
-
 // ─── Per-DEX pool state parsers ───────────────────────────────────────────────
 
 use crate::router::pool::{DexType, PoolExtra, PoolState};
