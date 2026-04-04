@@ -1,7 +1,7 @@
 use solana_sdk::pubkey::Pubkey;
 use tracing::{debug, trace};
 
-use crate::router::pool::{ArbRoute, DetectedSwap, RouteHop};
+use crate::router::pool::{ArbRoute, DexType, DetectedSwap, RouteHop};
 use crate::state::StateCache;
 
 /// Finds profitable circular arbitrage routes after a detected swap.
@@ -353,4 +353,19 @@ impl RouteCalculator {
         // 1% of smaller reserve, minimum 10000 lamports
         (min_reserve / 100).max(10_000)
     }
+}
+
+/// Check if all hops in a route use DEXes with real swap IX builders.
+pub fn can_submit_route(route: &ArbRoute) -> bool {
+    route.hops.iter().all(|hop| matches!(
+        hop.dex_type,
+        DexType::RaydiumCp
+        | DexType::RaydiumClmm
+        | DexType::OrcaWhirlpool
+        | DexType::MeteoraDlmm
+        | DexType::MeteoraDammV2
+        | DexType::SanctumInfinity
+        | DexType::Phoenix
+        | DexType::Manifest
+    ))
 }
