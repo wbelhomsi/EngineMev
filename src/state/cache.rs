@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::router::pool::PoolState;
+use crate::router::pool::{DlmmBinArray, PoolState};
 
 /// Cache key combining pool address for O(1) lookup
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -50,6 +50,9 @@ pub struct StateCache {
     /// Sanctum LstStateList: mint → index in the on-chain list.
     /// Populated at startup by fetching the LstStateList account.
     lst_indices: Arc<DashMap<Pubkey, u32>>,
+    /// DLMM bin arrays: pool_address -> Vec<DlmmBinArray>.
+    /// Fetched lazily on first DLMM pool discovery, used for bin-by-bin quoting.
+    bin_arrays: Arc<DashMap<Pubkey, Vec<DlmmBinArray>>>,
     ttl: Duration,
 }
 
@@ -61,6 +64,7 @@ impl StateCache {
             pair_to_pools: Arc::new(DashMap::with_capacity(20_000)),
             mint_programs: Arc::new(DashMap::with_capacity(1_000)),
             lst_indices: Arc::new(DashMap::with_capacity(200)),
+            bin_arrays: Arc::new(DashMap::with_capacity(1_000)),
             ttl,
         }
     }
@@ -173,6 +177,16 @@ impl StateCache {
     /// Set the Sanctum LstStateList index for a mint.
     pub fn set_lst_index(&self, mint: Pubkey, index: u32) {
         self.lst_indices.insert(mint, index);
+    }
+
+    /// Store DLMM bin arrays for a pool.
+    pub fn set_bin_arrays(&self, pool: Pubkey, arrays: Vec<DlmmBinArray>) {
+        self.bin_arrays.insert(pool, arrays);
+    }
+
+    /// Get DLMM bin arrays for a pool, if available.
+    pub fn get_bin_arrays(&self, pool: &Pubkey) -> Option<Vec<DlmmBinArray>> {
+        self.bin_arrays.get(pool).map(|v| v.value().clone())
     }
 
     /// Evict pools that haven't been updated in 10 minutes.

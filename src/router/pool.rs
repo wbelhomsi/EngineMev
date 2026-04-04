@@ -1,5 +1,27 @@
 use solana_sdk::pubkey::Pubkey;
 
+/// A single bin in a Meteora DLMM bin array.
+/// On-chain layout: amountX (i64), amountY (i64), price (u128 Q64.64).
+#[derive(Debug, Clone)]
+pub struct DlmmBin {
+    pub amount_x: u64,
+    pub amount_y: u64,
+    /// Pre-stored Q64.64 fixed-point price.
+    /// X->Y: out = in * price >> 64.
+    /// Y->X: out = in << 64 / price.
+    pub price_q64: u128,
+}
+
+/// Maximum number of bins per bin array account.
+pub const DLMM_MAX_BIN_PER_ARRAY: usize = 70;
+
+/// A parsed DLMM bin array (70 bins per array).
+#[derive(Debug, Clone)]
+pub struct DlmmBinArray {
+    pub index: i64,
+    pub bins: Vec<DlmmBin>,
+}
+
 /// Supported DEX types on Solana.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DexType {
@@ -301,6 +323,174 @@ impl PoolState {
         Some(output as u64)
     }
 
+    /// Compute output amount for a swap, using DLMM bin arrays when available.
+    /// Falls back to `get_output_amount` when bin data is not provided or not applicable.
+    pub fn get_output_amount_with_bins(
+        &self,
+        input_amount: u64,
+        a_to_b: bool,
+        bin_arrays: Option<&[DlmmBinArray]>,
+    ) -> Option<u64> {
+        if self.dex_type == DexType::MeteoraDlmm {
+            if let (Some(active_id), Some(bins)) = (self.current_tick, bin_arrays) {
+                if !bins.is_empty() {
+                    return self
+                        .get_dlmm_bin_output(input_amount, a_to_b, active_id, bins)
+                        .or_else(|| self.get_output_amount(input_amount, a_to_b));
+                }
+            }
+        }
+        self.get_output_amount(input_amount, a_to_b)
+    }
+
+    /// DLMM bin-by-bin swap simulation.
+    /// Walks bins starting from active_id, consuming liquidity at each bin's price.
+    ///
+    /// Per-bin swap formulas (from DEX reference):
+    ///   X->Y: out = (in_after_fee * price) >> 64;  max_in_after_fee = (amountY << 64) / price
+    ///   Y->X: out = (in_after_fee << 64) / price;  max_in_after_fee = (amountX * price) >> 64
+    ///
+    /// Fee is applied as fee-on-amount: fee = ceil(amount * totalFee / (10^9 - totalFee))
+    /// For simplicity we use base fee only: baseFee = baseFactor * binStep * 10
+    /// The pool's fee_bps is used as an approximation (converted to the 10^9 scale).
+    pub fn get_dlmm_bin_output(
+        &self,
+        input_amount: u64,
+        a_to_b: bool,
+        active_id: i32,
+        bin_arrays: &[DlmmBinArray],
+    ) -> Option<u64> {
+        if input_amount == 0 {
+            return Some(0);
+        }
+
+        let swap_for_y = a_to_b; // X->Y when a_to_b
+        let mut amount_left = input_amount as u128;
+        let mut total_out: u128 = 0;
+        let mut current_id = active_id;
+        let q64: u128 = 1u128 << 64;
+
+        // Convert fee_bps to the 10^9 scale used by DLMM.
+        // fee_bps=1 means 0.01% = 100_000 in 10^9 scale.
+        // totalFee in 10^9 scale: fee_bps * 100_000.
+        // fee_on_amount = ceil(amount * totalFee / (10^9 - totalFee))
+        let total_fee_rate = (self.fee_bps as u128) * 100_000;
+        let fee_denom = 1_000_000_000u128.saturating_sub(total_fee_rate);
+        if fee_denom == 0 {
+            return None;
+        }
+
+        // Walk bins, max 200 as safety limit
+        for _ in 0..200 {
+            if amount_left == 0 {
+                break;
+            }
+
+            // Find the bin in our cached arrays
+            let array_idx = if current_id >= 0 {
+                current_id as i64 / DLMM_MAX_BIN_PER_ARRAY as i64
+            } else {
+                (current_id as i64 - (DLMM_MAX_BIN_PER_ARRAY as i64 - 1))
+                    / DLMM_MAX_BIN_PER_ARRAY as i64
+            };
+            let bin_offset =
+                (current_id as i64 - array_idx * DLMM_MAX_BIN_PER_ARRAY as i64) as usize;
+
+            let bin = bin_arrays
+                .iter()
+                .find(|a| a.index == array_idx)
+                .and_then(|a| a.bins.get(bin_offset));
+
+            let bin = match bin {
+                Some(b) => b,
+                None => break, // No more bin data available
+            };
+
+            if bin.price_q64 == 0 {
+                break;
+            }
+
+            if swap_for_y {
+                // X->Y: need Y liquidity in this bin
+                if bin.amount_y == 0 {
+                    current_id -= 1;
+                    continue;
+                }
+
+                // Max input (after fee) that this bin can absorb:
+                // max_in_after_fee = ceil((amountY << 64) / price)
+                let max_in_after_fee = ((bin.amount_y as u128) << 64)
+                    .checked_add(bin.price_q64 - 1)?
+                    .checked_div(bin.price_q64)?;
+
+                // Compute fee on amount_left to get amount_after_fee
+                // fee = ceil(amount_left * total_fee_rate / fee_denom)
+                // Simplification: amount_after_fee = amount_left - fee
+                //                = amount_left - ceil(amount_left * total_fee_rate / fee_denom)
+                // Equivalently: amount_after_fee = floor(amount_left * fee_denom / (fee_denom + total_fee_rate))
+                // But the DLMM protocol computes fee-on-amount as:
+                //   feeAmount = ceil(amountIn * totalFee / (10^9 - totalFee))
+                //   amountInAfterFee = amountIn - feeAmount
+                let fee_amount = ceil_div(amount_left * total_fee_rate, fee_denom);
+                let amount_after_fee = amount_left.saturating_sub(fee_amount);
+
+                if amount_after_fee >= max_in_after_fee {
+                    // Consume entire bin
+                    total_out += bin.amount_y as u128;
+                    // Gross input consumed = max_in_after_fee + fee on that amount
+                    // fee = ceil(max_in_after_fee * total_fee_rate / fee_denom)
+                    let consumed_fee = ceil_div(max_in_after_fee * total_fee_rate, fee_denom);
+                    let consumed = max_in_after_fee + consumed_fee;
+                    amount_left = amount_left.saturating_sub(consumed);
+                    current_id -= 1;
+                } else {
+                    // Partial fill: out = (amount_after_fee * price) >> 64
+                    let out = amount_after_fee
+                        .checked_mul(bin.price_q64)?
+                        .checked_div(q64)?;
+                    total_out += out;
+                    amount_left = 0;
+                }
+            } else {
+                // Y->X: need X liquidity in this bin
+                if bin.amount_x == 0 {
+                    current_id += 1;
+                    continue;
+                }
+
+                // Max input (after fee) that this bin can absorb:
+                // max_in_after_fee = ceil((amountX * price) >> 64)
+                // = ceil(amountX * price / 2^64)
+                let max_in_after_fee = ceil_div(
+                    (bin.amount_x as u128).checked_mul(bin.price_q64)?,
+                    q64,
+                );
+
+                let fee_amount = ceil_div(amount_left * total_fee_rate, fee_denom);
+                let amount_after_fee = amount_left.saturating_sub(fee_amount);
+
+                if amount_after_fee >= max_in_after_fee {
+                    // Consume entire bin
+                    total_out += bin.amount_x as u128;
+                    let consumed_fee = ceil_div(max_in_after_fee * total_fee_rate, fee_denom);
+                    let consumed = max_in_after_fee + consumed_fee;
+                    amount_left = amount_left.saturating_sub(consumed);
+                    current_id += 1;
+                } else {
+                    // Partial fill: out = (amount_after_fee << 64) / price
+                    let out = (amount_after_fee << 64).checked_div(bin.price_q64)?;
+                    total_out += out;
+                    amount_left = 0;
+                }
+            }
+        }
+
+        if total_out > u64::MAX as u128 {
+            return None;
+        }
+        Some(total_out as u64)
+    }
+
     /// Check if this pool contains the given token mint on either side.
     pub fn has_token(&self, mint: &Pubkey) -> bool {
         self.token_a_mint == *mint || self.token_b_mint == *mint
@@ -390,4 +580,13 @@ pub struct DetectedSwap {
     pub amount: Option<u64>,
     /// The slot this was observed in
     pub observed_slot: u64,
+}
+
+/// Ceiling division: ceil(a / b). Returns 0 if b == 0.
+#[inline]
+fn ceil_div(a: u128, b: u128) -> u128 {
+    if b == 0 {
+        return 0;
+    }
+    a.div_ceil(b)
 }
