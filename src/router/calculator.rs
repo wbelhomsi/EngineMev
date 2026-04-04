@@ -241,7 +241,7 @@ impl RouteCalculator {
         let a_to_b_b = pool_b.is_a_to_b(other_mint)?;
         let final_amount = pool_b.get_output_amount(mid_amount, a_to_b_b)?;
 
-        let profit = final_amount as i64 - input_amount as i64;
+        let profit = (final_amount as i128) - (input_amount as i128);
 
         Some(ArbRoute {
             hops: vec![
@@ -262,7 +262,7 @@ impl RouteCalculator {
             ],
             base_mint: *base_mint,
             input_amount,
-            estimated_profit: profit,
+            estimated_profit: profit as i64,
             estimated_profit_lamports: if profit > 0 { profit as u64 } else { 0 },
         })
     }
@@ -292,7 +292,7 @@ impl RouteCalculator {
         let a_to_b_c = pool_c.is_a_to_b(mid2_mint)?;
         let final_amount = pool_c.get_output_amount(amount_2, a_to_b_c)?;
 
-        let profit = final_amount as i64 - input_amount as i64;
+        let profit = (final_amount as i128) - (input_amount as i128);
 
         Some(ArbRoute {
             hops: vec![
@@ -320,7 +320,7 @@ impl RouteCalculator {
             ],
             base_mint: *base_mint,
             input_amount,
-            estimated_profit: profit,
+            estimated_profit: profit as i64,
             estimated_profit_lamports: if profit > 0 { profit as u64 } else { 0 },
         })
     }

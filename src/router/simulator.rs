@@ -1,6 +1,6 @@
 use tracing::debug;
 
-use crate::router::pool::ArbRoute;
+use crate::router::pool::{ArbRoute, DexType};
 use crate::state::StateCache;
 
 /// Final profit simulation before bundle submission.
@@ -48,13 +48,20 @@ impl ProfitSimulator {
     /// This re-simulates with the freshest cached state and applies
     /// all cost deductions before making the go/no-go call.
     pub fn simulate(&self, route: &ArbRoute) -> SimulationResult {
-        // Step 1: Re-read pool states from cache (use get_any to include
-        // virtual pools like Sanctum that don't get Geyser updates).
-        // The on-chain minimum_amount_out guard protects against truly stale state.
+        // Step 1: Re-read pool states from cache with TTL enforcement.
+        // Sanctum virtual pools don't get frequent Geyser updates, so use
+        // get_any() (no TTL) for them. All other DEXes use get() with TTL
+        // to ensure the simulator gates on fresh state.
         let fresh_states: Vec<_> = route
             .hops
             .iter()
-            .map(|hop| self.state_cache.get_any(&hop.pool_address))
+            .map(|hop| {
+                if hop.dex_type == DexType::SanctumInfinity {
+                    self.state_cache.get_any(&hop.pool_address)
+                } else {
+                    self.state_cache.get(&hop.pool_address)
+                }
+            })
             .collect();
 
         if fresh_states.iter().any(|s| s.is_none()) {
@@ -97,8 +104,8 @@ impl ProfitSimulator {
             fresh_hop_outputs.push(current_amount);
         }
 
-        // Step 3: Calculate profit
-        let gross_profit = current_amount as i64 - route.input_amount as i64;
+        // Step 3: Calculate profit (use i128 to avoid overflow with large u64 amounts)
+        let gross_profit = (current_amount as i128) - (route.input_amount as i128);
 
         if gross_profit <= 0 {
             return SimulationResult::Unprofitable {
@@ -152,7 +159,7 @@ impl ProfitSimulator {
 
         // Step 8: Reconstruct route with fresh estimates and fresh hop outputs
         let mut fresh_route = route.clone();
-        fresh_route.estimated_profit = gross_profit;
+        fresh_route.estimated_profit = gross_profit as i64;
         fresh_route.estimated_profit_lamports = gross_profit_u64;
         for (hop, &fresh_output) in fresh_route.hops.iter_mut().zip(fresh_hop_outputs.iter()) {
             hop.estimated_output = fresh_output;

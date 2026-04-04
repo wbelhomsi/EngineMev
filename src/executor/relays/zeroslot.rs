@@ -108,9 +108,9 @@ impl super::Relay for ZeroSlotRelay {
         match result {
             Ok(resp) => match resp.json::<serde_json::Value>().await {
                 Ok(body) => common::parse_jsonrpc_response("zeroslot", &body, latency),
-                Err(e) => common::fail_with_latency("zeroslot", format!("Parse error: {}", e), latency),
+                Err(e) => common::fail_with_latency("zeroslot", crate::config::redact_url(&format!("Parse error: {}", e)), latency),
             },
-            Err(e) => common::fail_with_latency("zeroslot", format!("Request failed: {}", e), latency),
+            Err(e) => common::fail_with_latency("zeroslot", crate::config::redact_url(&format!("Request failed: {}", e)), latency),
         }
     }
 }

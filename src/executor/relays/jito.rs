@@ -129,9 +129,9 @@ impl super::Relay for JitoRelay {
                     debug!("Jito response: {}", body);
                     common::parse_jsonrpc_response("jito", &body, latency)
                 }
-                Err(e) => common::fail_with_latency("jito", format!("Response parse error: {}", e), latency),
+                Err(e) => common::fail_with_latency("jito", crate::config::redact_url(&format!("Response parse error: {}", e)), latency),
             },
-            Err(e) => common::fail_with_latency("jito", format!("Request failed: {}", e), latency),
+            Err(e) => common::fail_with_latency("jito", crate::config::redact_url(&format!("Request failed: {}", e)), latency),
         }
     }
 }
