@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::TokenAccount;
 
-declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
+declare_id!("CbjPG5TEEhZGXsA8prmJPfvgH51rudYgcubRUtCCGyUw");
 
 #[program]
 pub mod arb_guard {
