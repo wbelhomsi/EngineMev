@@ -1,34 +1,49 @@
 # Next Session TODO
 
-## IMMEDIATE: Write implementation plan + implement Surfpool E2E tests
+## Status: Orca + Raydium CP + DLMM swaps VERIFIED on Surfpool. 4/6 E2E tests passing.
 
-**Spec ready:** `docs/superpowers/specs/2026-04-04-surfpool-e2e-tests-design.md`
+## Surfpool E2E Test Results
 
-1. Invoke `superpowers:writing-plans` on the spec to create the implementation plan
-2. Implement the test harness (Surfpool lifecycle management)
-3. Find and hardcode known pool addresses for each DEX type
-4. Implement per-DEX swap tests (8 tests)
-5. Implement pipeline tests (2-hop arb, wSOL wrap/unwrap, Token-2022)
-6. Use tests to fix remaining DLMM bitmap extension issue
+| Test | Status | Notes |
+|------|--------|-------|
+| `test_surfpool_starts` | ✅ PASS | Harness smoke test |
+| `test_orca_whirlpool_swap` | ✅ PASS | SOL→USDC on Orca, verified on-chain |
+| `test_raydium_cp_swap` | ✅ PASS | Fixed authority PDA seeds |
+| `test_meteora_dlmm_swap` | ✅ PASS | Token-2022 ATA resolved via RPC |
+| `test_raydium_clmm_swap` | ⏸ IGNORED | SqrtPriceLimitOverflow — needs Raydium-specific bounds |
+| `test_meteora_damm_v2_swap` | ⏸ IGNORED | AccountNotEnoughKeys — program may have been upgraded |
 
-## Surfpool Installed
-- Version: 1.1.2
-- Start: `NO_DNA=1 surfpool start --rpc-url $RPC_URL --ci --port 18900 --airdrop <signer> --no-deploy`
+Run: `RPC_URL=$RPC_URL cargo test --features e2e_surfpool --test e2e_surfpool -- --test-threads=1`
 
-## Bugs Fixed This Session
-- Token-2022 ATA mismatch: ATA creation now uses pool token programs (verified on Surfpool)
-- wSOL wrap/unwrap: added system_instruction::transfer + SyncNative + CloseAccount
-- SOL-only route filter: only routes starting/ending with SOL
-- SOL-base route search: calculator always searches SOL as base
-- Simulator TTL: uses get_any() so Sanctum virtual pools don't expire
-- Per-relay bundle architecture: each relay owns tip+sign+send
-- min_final_output: no longer subtracts tip (tip is separate IX)
+## Fixes Applied This Session
 
-## Remaining Bugs
-- DLMM bitmap extension: some pools need it, don't have it on-chain → filter these pools
-- Sanctum virtual pool rates: hardcoded, need real-time sol_value from LstStateList
+### Critical
+- **Raydium CLMM data size**: 1544 bytes on mainnet (was matching only 1560 → missed ALL CLMM pools)
+- **Raydium CP authority PDA**: seeds=`["vault_and_lp_mint_auth_seed"]` (was empty `[]`)
+- **Token-2022 ATA resolution**: use RPC `getAccountInfo` owner as authoritative source
+- **SOL-only route filter**: only routes starting/ending with SOL (we only hold SOL)
+- **wSOL wrap/unwrap**: system_instruction::transfer + SyncNative before, CloseAccount after
+- **Per-relay bundles**: each relay owns tip+sign+send independently
+- **Sanctum Shank IX**: 1-byte discriminant, 27-byte data, 12+variable accounts
 
-## Architecture
-- 85 unit tests, 5 relay modules, 9 DEX IX builders
-- Surfpool for local E2E testing
-- Balance: ~0.7499 SOL
+### Infrastructure
+- Surfpool E2E test harness with subprocess lifecycle management
+- 5 per-DEX swap tests (3 passing, 2 ignored with known issues)
+- 85 unit tests + 4 legacy e2e tests + 4 Surfpool E2E tests
+
+## Remaining Work
+
+### To fix ignored tests
+1. **CLMM**: Investigate Raydium's actual MIN/MAX_SQRT_PRICE_X64 constants
+2. **DAMM v2**: Check if program was upgraded with new required accounts
+
+### To get first profitable trade
+1. Run with Orca + Raydium CP + DLMM routes only (proven DEXes)
+2. Focus on SOL-base routes with real Geyser-updated pool state
+3. Check if Jito-submitted bundles land (we know IX format is correct now)
+
+### Nice to have
+- Pipeline e2e tests (2-hop arb roundtrip, Token-2022 ATA, wSOL cycle)
+- Phoenix + Manifest e2e tests
+- Sanctum e2e tests
+- Address Lookup Tables for multi-hop routes
