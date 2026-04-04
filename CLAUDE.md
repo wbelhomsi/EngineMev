@@ -1,5 +1,12 @@
 # EngineMev — Solana MEV Backrun Arbitrage Engine
 
+## Git Co-Author
+
+When committing, always use this co-author line (not the claude-flow default):
+```
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+
 ## What This Is
 
 Halal-compliant MEV backrun engine on Solana. Detects price dislocations across 8 DEXes (6 AMMs + 2 CLOBs) via Yellowstone Geyser (Helius LaserStream) account streaming, then submits atomic arbitrage bundles via multi-relay fan-out (Jito, Nozomi, bloXroute, Astralane, ZeroSlot).

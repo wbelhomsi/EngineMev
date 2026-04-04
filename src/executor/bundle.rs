@@ -659,16 +659,10 @@ pub fn build_raydium_clmm_swap_ix(
         ).0
     }).collect();
 
-    // sqrt_price_limit
-    // Raydium CLMM sqrt price bounds
-    // MIN_SQRT_PRICE_X64 + 1 and MAX_SQRT_PRICE_X64 - 1 to stay within valid range
-    let sqrt_price_limit: u128 = if a_to_b {
-        4295048017u128 // MIN + 1
-    } else {
-        // Raydium CLMM MAX is different from Orca — use the value from their source
-        // https://github.com/raydium-io/raydium-clmm MAX_SQRT_PRICE_X64
-        79226673515401279992447579054u128
-    };
+    // Pass 0 — on-chain program substitutes correct MIN+1/MAX-1 and determines
+    // direction from input vault mint. Eliminates wrong-constant failures.
+    // Ref: raydium-clmm/programs/amm/src/instructions/swap_v2.rs lines 153-158
+    let sqrt_price_limit: u128 = 0u128;
 
     // Discriminator: swap_v2
     let mut data = Vec::with_capacity(41);

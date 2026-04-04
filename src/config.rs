@@ -138,6 +138,13 @@ static SANCTUM_PRICING_STATE: LazyLock<Pubkey> = LazyLock::new(|| {
 /// Sanctum pricing program state account.
 pub fn sanctum_pricing_state() -> Pubkey { *SANCTUM_PRICING_STATE }
 
+/// Jito SPL Stake Pool account (for LST rate fetch).
+pub fn jito_stake_pool() -> Pubkey { *JITO_STAKE_POOL }
+/// Blaze SPL Stake Pool account (for LST rate fetch).
+pub fn blaze_stake_pool() -> Pubkey { *BLAZE_STAKE_POOL }
+/// Marinade state account (for LST rate fetch).
+pub fn marinade_state() -> Pubkey { *MARINADE_STATE }
+
 /// Returns (calculator_program, remaining_accounts, calc_accs_count) for a given LST mint.
 /// The remaining_accounts are the suffix accounts after the calculator program.
 pub fn sanctum_calculator_accounts(mint: &Pubkey) -> (Pubkey, Vec<Pubkey>, u8) {

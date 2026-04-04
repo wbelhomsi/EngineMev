@@ -81,6 +81,11 @@ async fn main() -> Result<()> {
         if let Err(e) = bootstrap_lst_indices(&http_client, &config.rpc_url, &state_cache).await {
             warn!("Failed to bootstrap LST indices: {} — Sanctum routes will be disabled", e);
         }
+
+        // Fetch real-time LST rates from on-chain stake pool accounts
+        if let Err(e) = fetch_lst_rates(&http_client, &config.rpc_url, &state_cache).await {
+            warn!("Failed to fetch LST rates: {} — using fallback rates", e);
+        }
     }
 
     // Shutdown signal
@@ -540,6 +545,141 @@ async fn bootstrap_lst_indices(
     Ok(())
 }
 
+/// Fetch real-time LST/SOL rates from on-chain stake pool accounts.
+///
+/// Jito + Blaze use SPL Stake Pool layout: total_lamports at offset 258, pool_token_supply at 266.
+/// Marinade uses its own layout: msol_price (u64) at offset 512, denominator = 2^32.
+///
+/// Updates the Sanctum virtual pool reserves in state_cache to reflect current rates.
+async fn fetch_lst_rates(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    state_cache: &state::StateCache,
+) -> Result<()> {
+    use base64::{engine::general_purpose, Engine as _};
+
+    let jito_pool = config::jito_stake_pool();
+    let blaze_pool = config::blaze_stake_pool();
+    let marinade = config::marinade_state();
+
+    // Batch 1: Jito + Blaze via getMultipleAccounts (SPL Stake Pool layout)
+    // total_lamports(u64) at offset 258, pool_token_supply(u64) at offset 266 => 16 bytes from 258
+    let payload_spl = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "getMultipleAccounts",
+        "params": [
+            [jito_pool.to_string(), blaze_pool.to_string()],
+            { "encoding": "base64", "dataSlice": { "offset": 258, "length": 16 } }
+        ]
+    });
+
+    // Batch 2: Marinade via getAccountInfo (custom layout)
+    // msol_price(u64) at offset 512 => 8 bytes
+    let payload_marinade = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2,
+        "method": "getAccountInfo",
+        "params": [
+            marinade.to_string(),
+            { "encoding": "base64", "dataSlice": { "offset": 512, "length": 8 } }
+        ]
+    });
+
+    // Send both requests concurrently
+    let (resp_spl, resp_marinade) = tokio::try_join!(
+        async {
+            client.post(rpc_url)
+                .json(&payload_spl)
+                .timeout(std::time::Duration::from_secs(10))
+                .send().await?
+                .json::<serde_json::Value>().await
+                .map_err(anyhow::Error::from)
+        },
+        async {
+            client.post(rpc_url)
+                .json(&payload_marinade)
+                .timeout(std::time::Duration::from_secs(10))
+                .send().await?
+                .json::<serde_json::Value>().await
+                .map_err(anyhow::Error::from)
+        },
+    )?;
+
+    // Parse Jito + Blaze (SPL Stake Pool)
+    let spl_values = resp_spl["result"]["value"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Invalid getMultipleAccounts response for stake pools"))?;
+
+    let lst_names = ["jitoSOL", "bSOL"];
+    for (i, value) in spl_values.iter().enumerate().take(2) {
+        if value.is_null() {
+            warn!("Stake pool account {} not found", if i == 0 { "Jito" } else { "Blaze" });
+            continue;
+        }
+        let b64 = value["data"][0].as_str().unwrap_or_default();
+        let data = general_purpose::STANDARD.decode(b64)?;
+        if data.len() < 16 {
+            warn!("Stake pool {} data too short: {} bytes", lst_names[i], data.len());
+            continue;
+        }
+        let total_lamports = u64::from_le_bytes(data[0..8].try_into().unwrap_or_default());
+        let supply = u64::from_le_bytes(data[8..16].try_into().unwrap_or_default());
+        if supply == 0 {
+            warn!("Stake pool {} has zero supply", lst_names[i]);
+            continue;
+        }
+        let rate = total_lamports as f64 / supply as f64;
+        if rate < 0.5 || rate > 5.0 {
+            warn!("Stake pool {} rate out of range: {:.6}", lst_names[i], rate);
+            continue;
+        }
+        let mint = config::lst_mints().into_iter()
+            .find(|(_, n)| *n == lst_names[i])
+            .map(|(m, _)| m);
+        if let Some(mint) = mint {
+            update_sanctum_virtual_pool(state_cache, &mint, rate);
+            info!("LST rate fetched: {} = {:.6} SOL", lst_names[i], rate);
+        }
+    }
+
+    // Parse Marinade
+    let marinade_b64 = resp_marinade["result"]["value"]["data"][0]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Marinade state account not found"))?;
+    let marinade_data = general_purpose::STANDARD.decode(marinade_b64)?;
+    if marinade_data.len() >= 8 {
+        let msol_price = u64::from_le_bytes(marinade_data[0..8].try_into().unwrap_or_default());
+        let rate = msol_price as f64 / 4_294_967_296.0; // 2^32 denominator
+        if rate > 0.5 && rate < 5.0 {
+            let mint = config::lst_mints().into_iter()
+                .find(|(_, n)| *n == "mSOL")
+                .map(|(m, _)| m);
+            if let Some(mint) = mint {
+                update_sanctum_virtual_pool(state_cache, &mint, rate);
+                info!("LST rate fetched: mSOL = {:.6} SOL", rate);
+            }
+        } else {
+            warn!("Marinade mSOL rate out of range: {:.6}", rate);
+        }
+    }
+
+    Ok(())
+}
+
+/// Update a Sanctum virtual pool's reserves to reflect a new LST/SOL rate.
+fn update_sanctum_virtual_pool(state_cache: &state::StateCache, lst_mint: &Pubkey, rate: f64) {
+    let (virtual_pool_addr, _) = Pubkey::find_program_address(
+        &[b"sanctum-virtual", lst_mint.as_ref()],
+        &solana_sdk::system_program::id(),
+    );
+    if let Some(mut pool) = state_cache.get_any(&virtual_pool_addr) {
+        let reserve_a: u64 = 1_000_000_000_000_000; // 1M SOL in lamports
+        pool.token_a_reserve = reserve_a;
+        pool.token_b_reserve = (reserve_a as f64 / rate) as u64;
+        state_cache.upsert(virtual_pool_addr, pool);
+        tracing::debug!("Updated Sanctum virtual pool {} rate={:.6}", virtual_pool_addr, rate);
+    }
+}
+
 /// Create Sanctum virtual pools for each supported LST.
 ///
 /// Each LST gets a virtual pool modeling the Sanctum Infinity oracle rate.
@@ -561,9 +701,9 @@ fn bootstrap_sanctum_pools(state_cache: &state::StateCache) {
         .into_iter()
         .map(|(mint, name)| {
             let rate = match name {
-                "jitoSOL" => 1.082,
-                "mSOL" => 1.075,
-                "bSOL" => 1.060,
+                "jitoSOL" => 1.271,
+                "mSOL" => 1.371,
+                "bSOL" => 1.286,
                 _ => 1.050, // conservative default
             };
             (mint, name, rate)

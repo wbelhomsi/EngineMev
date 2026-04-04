@@ -123,6 +123,22 @@ impl GeyserStream {
             );
         }
 
+        // Subscribe to stake pool state accounts for real-time LST rate updates
+        let stake_pool_accounts = vec![
+            crate::config::jito_stake_pool().to_string(),
+            crate::config::blaze_stake_pool().to_string(),
+            crate::config::marinade_state().to_string(),
+        ];
+        accounts_filter.insert(
+            "lst_stake_pools".to_string(),
+            SubscribeRequestFilterAccounts {
+                account: stake_pool_accounts,
+                owner: vec![],
+                filters: vec![],
+                nonempty_txn_signature: None,
+            },
+        );
+
         let subscribe_request = SubscribeRequest {
             accounts: accounts_filter,
             commitment: Some(CommitmentLevel::Processed as i32),
@@ -196,6 +212,57 @@ impl GeyserStream {
                     Err(_) => return,
                 };
                 let pool_address = Pubkey::new_from_array(pubkey_bytes);
+
+                // Check for stake pool account updates (LST rate changes)
+                let jito_pool = crate::config::jito_stake_pool();
+                let blaze_pool = crate::config::blaze_stake_pool();
+                let marinade = crate::config::marinade_state();
+
+                if pool_address == jito_pool || pool_address == blaze_pool {
+                    // SPL Stake Pool: total_lamports at offset 258, pool_token_supply at 266
+                    if data.len() >= 274 {
+                        let total_lamports = u64::from_le_bytes(
+                            data[258..266].try_into().unwrap_or_default(),
+                        );
+                        let supply = u64::from_le_bytes(
+                            data[266..274].try_into().unwrap_or_default(),
+                        );
+                        if supply > 0 {
+                            let rate = total_lamports as f64 / supply as f64;
+                            if rate > 0.5 && rate < 5.0 {
+                                let lst_name = if pool_address == jito_pool { "jitoSOL" } else { "bSOL" };
+                                let lst_mint = crate::config::lst_mints()
+                                    .into_iter()
+                                    .find(|(_, n)| *n == lst_name)
+                                    .map(|(m, _)| m);
+                                if let Some(mint) = lst_mint {
+                                    update_sanctum_virtual_pool(&self.state_cache, &mint, rate);
+                                    debug!("Geyser LST rate update: {} = {:.6} SOL", lst_name, rate);
+                                }
+                            }
+                        }
+                    }
+                    return;
+                } else if pool_address == marinade {
+                    // Marinade: msol_price at offset 512
+                    if data.len() >= 520 {
+                        let msol_price = u64::from_le_bytes(
+                            data[512..520].try_into().unwrap_or_default(),
+                        );
+                        let rate = msol_price as f64 / 4_294_967_296.0; // 2^32 denominator
+                        if rate > 0.5 && rate < 5.0 {
+                            let mint = crate::config::lst_mints()
+                                .into_iter()
+                                .find(|(_, n)| *n == "mSOL")
+                                .map(|(m, _)| m);
+                            if let Some(mint) = mint {
+                                update_sanctum_virtual_pool(&self.state_cache, &mint, rate);
+                                debug!("Geyser LST rate update: mSOL = {:.6} SOL", rate);
+                            }
+                        }
+                    }
+                    return;
+                }
 
                 // Route to per-DEX parser based on account data size
                 let parsed = match data.len() {
@@ -483,6 +550,22 @@ fn approx_reserves_from_sqrt_price(sqrt_price_x64: u128, liquidity: u128) -> (u6
     let ra = if reserve_a > u64::MAX as u128 { u64::MAX } else { reserve_a as u64 };
     let rb = if reserve_b > u64::MAX as u128 { u64::MAX } else { reserve_b as u64 };
     (ra, rb)
+}
+
+/// Update a Sanctum virtual pool's reserves to reflect a new LST/SOL rate.
+/// Derives the virtual pool PDA, reads from cache, updates reserves, and upserts.
+fn update_sanctum_virtual_pool(state_cache: &crate::state::StateCache, lst_mint: &Pubkey, rate: f64) {
+    let (virtual_pool_addr, _) = Pubkey::find_program_address(
+        &[b"sanctum-virtual", lst_mint.as_ref()],
+        &solana_sdk::system_program::id(),
+    );
+    if let Some(mut pool) = state_cache.get_any(&virtual_pool_addr) {
+        let reserve_a: u64 = 1_000_000_000_000_000; // 1M SOL in lamports
+        pool.token_a_reserve = reserve_a;
+        pool.token_b_reserve = (reserve_a as f64 / rate) as u64;
+        state_cache.upsert(virtual_pool_addr, pool);
+        debug!("Updated Sanctum virtual pool {} rate={:.6}", virtual_pool_addr, rate);
+    }
 }
 
 // ─── Category A: reserves embedded in pool account ────────────────────────────
