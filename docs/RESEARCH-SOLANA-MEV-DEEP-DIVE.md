@@ -1,7 +1,8 @@
 # Solana MEV Deep Dive — Research Compilation
 
 **Date:** 2026-04-04
-**Sources:** 10 parallel research agents, 200+ sources analyzed
+**Sources:** 17 parallel research agents across 2 swarm runs, 200+ sources analyzed
+**Updated:** Added per-project deep dives from 7 GitHub repos
 
 ---
 
@@ -278,3 +279,143 @@ Based on all research, the highest-impact next steps:
 5. **`ethnum` + `orca_whirlpools_core`** — Fix CLMM multi-tick math
 6. **Dynamic Jito tips** — Tip floor API tracking
 7. **Verify Nozomi API** — May not support bundles (single-TX only)
+
+---
+
+## 11. Per-Project Deep Dives (Swarm 2)
+
+### 0xNineteen/solana-arbitrage-bot (797★, Rust+TS) — LEGITIMATE
+
+**The gold standard for learning.** Key architectural patterns:
+
+**PDA SwapState for hop chaining:**
+```
+start_swap → record start_balance, set swap_input
+dex_swap_1 → read swap_input, CPI to DEX, reload() account, write output to swap_input
+dex_swap_2 → read swap_input (actual output of hop 1), CPI, write output
+profit_or_revert → if final_balance <= start_balance, REVERT
+```
+
+The `.reload()` trick after CPI is how you read actual post-swap balances within the same tx.
+
+**Route finding:** Recursive DFS through token graph. `graph_edges: Vec<HashSet<usize>>` for O(1) neighbor lookup. Max 3 hops.
+
+**Amount optimization:** Geometric halving (N, N/2, N/4, N/8). Spam strategy — let largest profitable one land.
+
+**What to adopt:**
+- PDA SwapState pattern for on-chain program (**#1 priority**)
+- `minimum_amount_out: 0` per-hop with final profit gate
+- Route dedup key: `{mint_path}{pool_names}` as HashSet
+
+### katlogic/solana-arbitrage-bot (TypeScript) — LEGITIMATE, VERY USEFUL
+
+**Most architecturally comparable to EngineMev.** 7 DEXes including PumpSwap.
+
+**Dual Geyser stream strategy:**
+- Stream 1: Transaction stream → extract pre/post token balances for AMM reserves
+- Stream 2: Account stream → CLMM/DLMM pool state by data.length (1544, 653, 904, 1112)
+
+**On-chain program** at `6UZznePGgoykwAutgJFmQce2QQzfYjVcsQesZbRq9Y3b` — atomic multi-hop CPI.
+
+**V0 transactions + ALT** at `4RqDUqkQqMkbQEAXvEBr5nFhh3hhfeHxeL9gUaMCFzyh` (34 addresses).
+
+**PumpSwap support** with 25-tier graduated fee schedule (1.25% at <$420 MC → 0.3% at >$98K MC).
+
+**What to adopt:**
+- PumpSwap DEX support (program: `pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA`, 301 bytes)
+- Transaction pre/post balance extraction from Geyser (avoids lazy vault fetch RPC)
+- Pre-created ALT with all common addresses
+- CU budget: 700,000 (vs our 400,000)
+
+### hodlwarden/solana-arbitrage-bot (157★, Rust) — LEGITIMATE
+
+**Jupiter-based, but has excellent infrastructure patterns.**
+
+**Durable nonce accounts:** Instead of blockhash cache, uses a nonce account polled every 200ms. Transaction uses `AdvanceNonceAccount` as first IX. Benefits:
+- No blockhash expiry (valid until nonce advanced)
+- Pre-sign and hold transactions
+- Safe for multi-relay fan-out
+
+**9 relay services:** Jito, LilJit, Helius, Astralane, ZeroSlot, Nozomi, BlockRazor, bloXroute, NextBlock — via `solana-relayer-adapter-rust` crate.
+
+**Geometric grid sweep for input amounts:**
+```rust
+let ratio = (to_f / from_f).powf(1.0 / (steps - 1));
+amounts = [from_f * ratio^0, from_f * ratio^1, ..., from_f * ratio^(steps-1)]
+```
+Logarithmic spacing — finer granularity at small amounts, wider at large.
+
+**What to adopt:**
+- Durable nonce accounts (eliminates blockhash staleness)
+- Geometric grid sweep for optimal input amount
+- Additional relays: LilJit, Helius, BlockRazor, NextBlock
+- Exclude-DEX on return leg (prevent routing through same pool both directions)
+
+### ARBProtocol/ARB-V2 (76★, closed-source Rust) — LEGITIMATE BUT CLOSED
+
+**HARBR on-chain profit guard** at `HARBRqBp3GL6BzN5CoSFnKVQMpGah4mkBCDFLxigGARB`:
+- Records balance before swaps
+- Lets Jupiter swap IXs execute
+- Checks balance after
+- Reverts if profit < min_profit_onchain (BPS)
+
+This is NOT a swap router — it's a **profit verification wrapper**. Jupiter does all routing.
+
+**What to adopt:**
+- On-chain profit guard pattern (defense-in-depth: simulator + on-chain check)
+- Route pruning with probabilistic re-add
+- Adaptive slippage (scale based on profit size)
+- Disable simulation for speed ("HARBR catches losses on-chain")
+
+### WSOL12/Solana-Arbitrage-Bot (498★) — CONFIRMED SCAM
+
+Repurposed 2013 scrapybook repo. SEO-stuffed description. Telegram funnel `@WSOL0012`. Single non-functional 6KB TypeScript file. Spam farm with 10+ identical repos across Solana/Polymarket topics.
+
+### ChangeYourself0613/Solana-Arbitrage-Bot (282★) — FRANKENREPO
+
+Marketing shell with one plagiarized real component. `solana-mev/` is 100% AI-generated stubs (empty strategy files, FlashbotsClient on Solana). `solana-arbitrage-bot2.0/` is copied from `0xTan1319` (deleted repo) with hardcoded fee collector you don't control. Contains Kamino flashloan integration pattern.
+
+### solanmevbot/solana-mev-bot (213★) — CONFIRMED MALWARE
+
+**SlowMist-flagged private key stealer.** Same author as `audiofilter/pumpfun-pumpswap-sniper-copy-trading-bot`. Exfiltrates `.env` private keys to remote server via disguised `create_coingecko_proxy()` function. Recycled 2013 GitHub account. **DO NOT CLONE OR RUN.**
+
+---
+
+## 12. Consolidated Learnings — What EngineMev Should Build Next
+
+### Tier 1: Highest Impact (based on ALL research)
+
+| # | Enhancement | Source | Impact |
+|---|------------|--------|--------|
+| 1 | **On-chain arb program** (PDA SwapState + profit_or_revert) | 0xNineteen, katlogic, ARBProtocol | Eliminates stale-state hop chaining bug, atomic profit guarantee |
+| 2 | **Address Lookup Tables** (V0 transactions) | katlogic, hodlwarden, ALT research | 77% size reduction, enables 3-hop routes |
+| 3 | **CEX-DEX arb** (Binance WebSocket) | Strategy research | Different latency competition, best fit for our profile |
+| 4 | **Durable nonce accounts** | hodlwarden | Eliminates blockhash staleness race |
+| 5 | **Geometric grid sweep** for input amounts | hodlwarden | Better profit capture, negligible compute cost |
+
+### Tier 2: Should Do
+
+| # | Enhancement | Source |
+|---|------------|--------|
+| 6 | PumpSwap DEX support (301 bytes, `pAMMBay...`) | katlogic |
+| 7 | Additional relays (LilJit, Helius, BlockRazor, NextBlock) | hodlwarden |
+| 8 | `ethnum` U256 + `orca_whirlpools_core` tick math | Crate research |
+| 9 | Dynamic Jito tips via tip floor API | Jito research |
+| 10 | Co-location in Frankfurt | Speed research |
+
+### Tier 3: Nice to Have
+
+| # | Enhancement | Source |
+|---|------------|--------|
+| 11 | Transaction-stream Geyser for AMM reserve extraction | katlogic |
+| 12 | Exclude-DEX constraint on return leg | hodlwarden |
+| 13 | Route pruning with probabilistic re-add | ARBProtocol |
+| 14 | Pre-build instruction templates + ATA cache | Speed research |
+
+### What NOT to Do (Halal + Safety)
+
+- Flashloan integration (Kamino/Solend) — **Haram** (debt/lending)
+- Sandwich attacks — **Haram** (exploitation)
+- Token sniping — **Haram** (maysir/gambling)
+- Run closed-source binaries (SaoXuan, solanmevbot) — **Malware risk**
+- Use hardcoded fee collectors from unknown repos — **Fund theft risk**
