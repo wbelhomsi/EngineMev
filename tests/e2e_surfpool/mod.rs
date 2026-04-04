@@ -2,6 +2,7 @@ mod harness;
 mod common;
 mod dex_swaps;
 mod pipeline;
+mod arb_guard_cpi;
 
 #[test]
 fn test_surfpool_starts() {
