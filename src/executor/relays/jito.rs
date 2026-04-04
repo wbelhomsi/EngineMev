@@ -1,22 +1,17 @@
-use base64::{engine::general_purpose, Engine as _};
 use serde_json::json;
 use solana_sdk::{
     address_lookup_table::AddressLookupTableAccount,
     hash::Hash,
     instruction::Instruction,
-    message::{v0, VersionedMessage},
     pubkey::Pubkey,
     signature::Keypair,
-    signer::Signer,
-    system_instruction,
-    transaction::{Transaction, VersionedTransaction},
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tracing::debug;
 
 use super::RelayResult;
+use super::common::{self, RateLimiter};
 use crate::config::BotConfig;
 
 /// Jito tip accounts — bundles must include a SOL transfer to one of these.
@@ -35,9 +30,8 @@ const JITO_TIP_ACCOUNTS: &[&str] = &[
 pub struct JitoRelay {
     endpoint: Option<String>,
     http_client: reqwest::Client,
-    last_submit: Mutex<Instant>,
+    rate_limiter: RateLimiter,
     tip_index: AtomicUsize,
-    min_interval: Duration,
     auth_uuid: Option<String>,
 }
 
@@ -48,33 +42,17 @@ impl JitoRelay {
             config.relay_endpoints.jito.trim_end_matches('/')
         ));
 
-        let tps: f64 = std::env::var("JITO_TPS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(5.0);
-        let min_interval = if tps > 0.0 {
-            Duration::from_millis((1000.0 / tps) as u64 + 10)
-        } else {
-            Duration::from_millis(1000)
-        };
-
+        let tps = common::tps_from_env("JITO_TPS", 5.0);
+        let min_interval = common::interval_from_tps(tps);
         let auth_uuid = std::env::var("JITO_AUTH_UUID").ok().filter(|s| !s.is_empty());
 
-        let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .pool_max_idle_per_host(4)
-            .pool_idle_timeout(Duration::from_secs(300))
-            .tcp_keepalive(Duration::from_secs(30))
-            .tcp_nodelay(true)
-            .build()
-            .expect("Failed to build Jito HTTP client");
+        let http_client = common::build_http_client("jito");
 
         Self {
             endpoint,
             http_client,
-            last_submit: Mutex::new(Instant::now() - Duration::from_secs(60)),
+            rate_limiter: RateLimiter::new(min_interval),
             tip_index: AtomicUsize::new(0),
-            min_interval,
             auth_uuid,
         }
     }
@@ -106,98 +84,25 @@ impl super::Relay for JitoRelay {
     ) -> RelayResult {
         let url = match &self.endpoint {
             Some(url) => url.clone(),
-            None => return RelayResult {
-                relay_name: "jito".to_string(),
-                bundle_id: None,
-                success: false,
-                latency_us: 0,
-                error: Some("Not configured".to_string()),
-            },
+            None => return common::fail("jito", "Not configured".to_string()),
         };
 
-        // Rate limit check
-        {
-            let mut last = self.last_submit.lock().unwrap_or_else(|e| e.into_inner());
-            if last.elapsed() < self.min_interval {
-                return RelayResult {
-                    relay_name: "jito".to_string(),
-                    bundle_id: None,
-                    success: false,
-                    latency_us: 0,
-                    error: Some("Rate limited".to_string()),
-                };
-            }
-            *last = Instant::now();
+        if let Err(r) = self.rate_limiter.check("jito") {
+            return r;
         }
 
         let start = Instant::now();
-
-        // Clone base instructions and append tip
-        let mut instructions = base_instructions.to_vec();
         let tip_account = self.next_tip_account();
-        instructions.push(system_instruction::transfer(
-            &signer.pubkey(),
-            &tip_account,
-            tip_lamports,
-        ));
 
-        // Build and sign transaction (V0 with ALT if available, legacy fallback)
-        let tx_bytes = if let Some(alt) = alt {
-            match v0::Message::try_compile(
-                &signer.pubkey(), &instructions, &[alt.clone()], recent_blockhash,
-            ) {
-                Ok(v0_msg) => {
-                    match VersionedTransaction::try_new(VersionedMessage::V0(v0_msg), &[signer]) {
-                        Ok(vtx) => match bincode::serialize(&vtx) {
-                            Ok(b) => b,
-                            Err(e) => return RelayResult {
-                                relay_name: "jito".to_string(),
-                                bundle_id: None, success: false,
-                                latency_us: start.elapsed().as_micros() as u64,
-                                error: Some(format!("V0 serialize error: {}", e)),
-                            },
-                        },
-                        Err(e) => return RelayResult {
-                            relay_name: "jito".to_string(),
-                            bundle_id: None, success: false,
-                            latency_us: start.elapsed().as_micros() as u64,
-                            error: Some(format!("V0 sign error: {}", e)),
-                        },
-                    }
-                }
-                Err(e) => return RelayResult {
-                    relay_name: "jito".to_string(),
-                    bundle_id: None, success: false,
-                    latency_us: start.elapsed().as_micros() as u64,
-                    error: Some(format!("V0 compile error: {}", e)),
-                },
-            }
-        } else {
-            let tx = Transaction::new_signed_with_payer(
-                &instructions, Some(&signer.pubkey()), &[signer], recent_blockhash,
-            );
-            match bincode::serialize(&tx) {
-                Ok(b) => b,
-                Err(e) => return RelayResult {
-                    relay_name: "jito".to_string(),
-                    bundle_id: None, success: false,
-                    latency_us: start.elapsed().as_micros() as u64,
-                    error: Some(format!("Serialize error: {}", e)),
-                },
+        let encoded = match common::build_signed_bundle_tx(
+            "jito", base_instructions, tip_lamports, &tip_account, signer, recent_blockhash, alt,
+        ) {
+            Ok(enc) => enc,
+            Err(mut r) => {
+                r.latency_us = start.elapsed().as_micros() as u64;
+                return r;
             }
         };
-        if tx_bytes.len() > 1232 {
-            return RelayResult {
-                relay_name: "jito".to_string(),
-                bundle_id: None, success: false,
-                latency_us: start.elapsed().as_micros() as u64,
-                error: Some(format!("Tx too large: {} bytes (limit 1232)", tx_bytes.len())),
-            };
-        }
-        if tx_bytes.len() > 1100 {
-            tracing::warn!("{}: tx near size limit ({} bytes)", self.name(), tx_bytes.len());
-        }
-        let encoded = general_purpose::STANDARD.encode(&tx_bytes);
 
         // JSON-RPC payload
         let payload = json!({
@@ -222,47 +127,11 @@ impl super::Relay for JitoRelay {
             Ok(resp) => match resp.json::<serde_json::Value>().await {
                 Ok(body) => {
                     debug!("Jito response: {}", body);
-                    if let Some(bundle_id) = body.get("result").and_then(|v| v.as_str()) {
-                        RelayResult {
-                            relay_name: "jito".to_string(),
-                            bundle_id: Some(bundle_id.to_string()),
-                            success: true,
-                            latency_us: latency,
-                            error: None,
-                        }
-                    } else if let Some(err) = body.get("error") {
-                        RelayResult {
-                            relay_name: "jito".to_string(),
-                            bundle_id: None,
-                            success: false,
-                            latency_us: latency,
-                            error: Some(format!("{}", err)),
-                        }
-                    } else {
-                        RelayResult {
-                            relay_name: "jito".to_string(),
-                            bundle_id: None,
-                            success: false,
-                            latency_us: latency,
-                            error: Some("Unexpected response format".to_string()),
-                        }
-                    }
+                    common::parse_jsonrpc_response("jito", &body, latency)
                 }
-                Err(e) => RelayResult {
-                    relay_name: "jito".to_string(),
-                    bundle_id: None,
-                    success: false,
-                    latency_us: latency,
-                    error: Some(format!("Response parse error: {}", e)),
-                },
+                Err(e) => common::fail_with_latency("jito", format!("Response parse error: {}", e), latency),
             },
-            Err(e) => RelayResult {
-                relay_name: "jito".to_string(),
-                bundle_id: None,
-                success: false,
-                latency_us: latency,
-                error: Some(format!("Request failed: {}", e)),
-            },
+            Err(e) => common::fail_with_latency("jito", format!("Request failed: {}", e), latency),
         }
     }
 }
