@@ -137,6 +137,12 @@ fn test_parse_damm_v2_compounding() {
 fn make_raydium_amm_data(base_vault: &Pubkey, quote_vault: &Pubkey, base_mint: &Pubkey, quote_mint: &Pubkey) -> Vec<u8> {
     let mut data = vec![0u8; 752];
     data[0..8].copy_from_slice(&6u64.to_le_bytes());
+    // nonce at offset 8 (low byte of u64)
+    data[8] = 253;
+    // trade_fee_numerator at offset 144
+    data[144..152].copy_from_slice(&25u64.to_le_bytes());
+    // trade_fee_denominator at offset 152
+    data[152..160].copy_from_slice(&10000u64.to_le_bytes());
     data[336..368].copy_from_slice(base_vault.as_ref());
     data[368..400].copy_from_slice(quote_vault.as_ref());
     data[400..432].copy_from_slice(base_mint.as_ref());
@@ -157,6 +163,13 @@ fn test_parse_raydium_amm_v4() {
     assert_eq!(pool.token_a_mint, bm);
     assert_eq!(pool.token_b_mint, qm);
     assert_eq!(vaults, (bv, qv));
+    assert_eq!(pool.fee_bps, 25, "Fee should be parsed from pool state");
+    assert_eq!(pool.extra.amm_nonce, Some(253));
+    // open_orders/market/market_program/target_orders are zeroed Pubkeys in test data
+    assert!(pool.extra.open_orders.is_some());
+    assert!(pool.extra.market.is_some());
+    assert!(pool.extra.market_program.is_some());
+    assert!(pool.extra.target_orders.is_some());
 }
 
 fn make_raydium_cp_data(vault_0: &Pubkey, vault_1: &Pubkey, mint_0: &Pubkey, mint_1: &Pubkey) -> Vec<u8> {

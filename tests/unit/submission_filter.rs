@@ -6,7 +6,8 @@ use solana_mev_bot::router::pool::{ArbRoute, DexType, RouteHop};
 fn can_submit_route(route: &ArbRoute) -> bool {
     route.hops.iter().all(|hop| matches!(
         hop.dex_type,
-        DexType::RaydiumCp
+        DexType::RaydiumAmm
+        | DexType::RaydiumCp
         | DexType::RaydiumClmm
         | DexType::OrcaWhirlpool
         | DexType::MeteoraDlmm
@@ -58,9 +59,9 @@ fn test_sanctum_route_accepted() {
 #[test]
 fn test_all_submittable_types_accepted() {
     for dex in [
-        DexType::RaydiumCp, DexType::RaydiumClmm, DexType::OrcaWhirlpool,
-        DexType::MeteoraDlmm, DexType::MeteoraDammV2, DexType::SanctumInfinity,
-        DexType::Phoenix, DexType::Manifest,
+        DexType::RaydiumAmm, DexType::RaydiumCp, DexType::RaydiumClmm,
+        DexType::OrcaWhirlpool, DexType::MeteoraDlmm, DexType::MeteoraDammV2,
+        DexType::SanctumInfinity, DexType::Phoenix, DexType::Manifest,
     ] {
         let route = make_route(vec![make_hop(dex)]);
         assert!(can_submit_route(&route), "Expected {:?} to be accepted", dex);
@@ -68,13 +69,13 @@ fn test_all_submittable_types_accepted() {
 }
 
 #[test]
-fn test_raydium_amm_rejected() {
+fn test_raydium_amm_accepted() {
     let route = make_route(vec![make_hop(DexType::RaydiumAmm), make_hop(DexType::OrcaWhirlpool)]);
-    assert!(!can_submit_route(&route));
+    assert!(can_submit_route(&route));
 }
 
 #[test]
-fn test_mixed_accepted_rejected_fails() {
+fn test_mixed_raydium_amm_phoenix_accepted() {
     let route = make_route(vec![make_hop(DexType::Phoenix), make_hop(DexType::RaydiumAmm)]);
-    assert!(!can_submit_route(&route));
+    assert!(can_submit_route(&route));
 }

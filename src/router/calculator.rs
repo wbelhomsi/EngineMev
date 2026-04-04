@@ -358,7 +358,8 @@ impl RouteCalculator {
 pub fn can_submit_route(route: &ArbRoute) -> bool {
     route.hops.iter().all(|hop| matches!(
         hop.dex_type,
-        DexType::RaydiumCp
+        DexType::RaydiumAmm
+        | DexType::RaydiumCp
         | DexType::RaydiumClmm
         | DexType::OrcaWhirlpool
         | DexType::MeteoraDlmm
