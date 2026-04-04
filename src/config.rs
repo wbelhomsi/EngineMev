@@ -239,6 +239,8 @@ pub struct BotConfig {
     pub lst_arb_enabled: bool,
     /// Minimum spread in basis points for LST arb routes
     pub lst_min_spread_bps: u64,
+    /// Optional arb-guard program ID for on-chain profit verification
+    pub arb_guard_program_id: Option<Pubkey>,
 }
 
 #[derive(Debug, Clone)]
@@ -300,6 +302,9 @@ impl BotConfig {
             lst_min_spread_bps: std::env::var("LST_MIN_SPREAD_BPS")
                 .unwrap_or_else(|_| "5".to_string())
                 .parse()?,
+            arb_guard_program_id: std::env::var("ARB_GUARD_PROGRAM_ID")
+                .ok()
+                .and_then(|s| Pubkey::from_str(&s).ok()),
         })
     }
 
