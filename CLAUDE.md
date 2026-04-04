@@ -173,6 +173,8 @@ Base DEX↔DEX backrun arb working live on mainnet.
 - LazyLock static Pubkeys — no more Pubkey::from_str() on hot path
 - Pre-computed pair index in StateCache for O(1) pool pair lookups
 - Token-2022 ATA derivation correct for Raydium CP and Meteora DLMM
+- arb-guard Phase A: on-chain profit guard (start_check/profit_check with reentrancy lock)
+- arb-guard Phase B: CPI executor for Orca Whirlpool (single execute_arb instruction, remaining_accounts, balance diffing)
 - 87 unit tests + 4 e2e tests passing
 - Tested on mainnet: ~300 realistic opportunities in 5 min, ~0.000189 SOL avg profit per opp
 
