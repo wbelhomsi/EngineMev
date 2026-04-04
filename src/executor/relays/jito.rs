@@ -1,13 +1,15 @@
 use base64::{engine::general_purpose, Engine as _};
 use serde_json::json;
 use solana_sdk::{
+    address_lookup_table::AddressLookupTableAccount,
     hash::Hash,
     instruction::Instruction,
+    message::{v0, VersionedMessage},
     pubkey::Pubkey,
     signature::Keypair,
     signer::Signer,
     system_instruction,
-    transaction::Transaction,
+    transaction::{Transaction, VersionedTransaction},
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -100,6 +102,7 @@ impl super::Relay for JitoRelay {
         tip_lamports: u64,
         signer: &Keypair,
         recent_blockhash: Hash,
+        alt: Option<&AddressLookupTableAccount>,
     ) -> RelayResult {
         let url = match &self.endpoint {
             Some(url) => url.clone(),
@@ -138,33 +141,61 @@ impl super::Relay for JitoRelay {
             tip_lamports,
         ));
 
-        // Build and sign transaction
-        let tx = Transaction::new_signed_with_payer(
-            &instructions,
-            Some(&signer.pubkey()),
-            &[signer],
-            recent_blockhash,
-        );
-
-        // Serialize and encode
-        let tx_bytes = match bincode::serialize(&tx) {
-            Ok(b) => b,
-            Err(e) => return RelayResult {
-                relay_name: "jito".to_string(),
-                bundle_id: None,
-                success: false,
-                latency_us: start.elapsed().as_micros() as u64,
-                error: Some(format!("Serialize error: {}", e)),
-            },
+        // Build and sign transaction (V0 with ALT if available, legacy fallback)
+        let tx_bytes = if let Some(alt) = alt {
+            match v0::Message::try_compile(
+                &signer.pubkey(), &instructions, &[alt.clone()], recent_blockhash,
+            ) {
+                Ok(v0_msg) => {
+                    match VersionedTransaction::try_new(VersionedMessage::V0(v0_msg), &[signer]) {
+                        Ok(vtx) => match bincode::serialize(&vtx) {
+                            Ok(b) => b,
+                            Err(e) => return RelayResult {
+                                relay_name: "jito".to_string(),
+                                bundle_id: None, success: false,
+                                latency_us: start.elapsed().as_micros() as u64,
+                                error: Some(format!("V0 serialize error: {}", e)),
+                            },
+                        },
+                        Err(e) => return RelayResult {
+                            relay_name: "jito".to_string(),
+                            bundle_id: None, success: false,
+                            latency_us: start.elapsed().as_micros() as u64,
+                            error: Some(format!("V0 sign error: {}", e)),
+                        },
+                    }
+                }
+                Err(e) => return RelayResult {
+                    relay_name: "jito".to_string(),
+                    bundle_id: None, success: false,
+                    latency_us: start.elapsed().as_micros() as u64,
+                    error: Some(format!("V0 compile error: {}", e)),
+                },
+            }
+        } else {
+            let tx = Transaction::new_signed_with_payer(
+                &instructions, Some(&signer.pubkey()), &[signer], recent_blockhash,
+            );
+            match bincode::serialize(&tx) {
+                Ok(b) => b,
+                Err(e) => return RelayResult {
+                    relay_name: "jito".to_string(),
+                    bundle_id: None, success: false,
+                    latency_us: start.elapsed().as_micros() as u64,
+                    error: Some(format!("Serialize error: {}", e)),
+                },
+            }
         };
         if tx_bytes.len() > 1232 {
             return RelayResult {
                 relay_name: "jito".to_string(),
-                bundle_id: None,
-                success: false,
+                bundle_id: None, success: false,
                 latency_us: start.elapsed().as_micros() as u64,
                 error: Some(format!("Tx too large: {} bytes (limit 1232)", tx_bytes.len())),
             };
+        }
+        if tx_bytes.len() > 1100 {
+            tracing::warn!("{}: tx near size limit ({} bytes)", self.name(), tx_bytes.len());
         }
         let encoded = general_purpose::STANDARD.encode(&tx_bytes);
 

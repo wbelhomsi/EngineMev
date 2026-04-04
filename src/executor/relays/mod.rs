@@ -5,6 +5,7 @@ pub mod bloxroute;
 pub mod zeroslot;
 
 use solana_sdk::{
+    address_lookup_table::AddressLookupTableAccount,
     hash::Hash,
     instruction::Instruction,
     signature::Keypair,
@@ -36,5 +37,6 @@ pub trait Relay: Send + Sync {
         tip_lamports: u64,
         signer: &Keypair,
         recent_blockhash: Hash,
+        alt: Option<&AddressLookupTableAccount>,
     ) -> RelayResult;
 }

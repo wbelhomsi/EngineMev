@@ -1,5 +1,8 @@
 use std::sync::Arc;
-use solana_sdk::{hash::Hash, instruction::Instruction, signature::Keypair};
+use solana_sdk::{
+    address_lookup_table::AddressLookupTableAccount,
+    hash::Hash, instruction::Instruction, signature::Keypair,
+};
 use tracing::{info, warn};
 
 use super::relays::{Relay, RelayResult};
@@ -11,11 +14,16 @@ use super::relays::{Relay, RelayResult};
 pub struct RelayDispatcher {
     relays: Vec<Arc<dyn Relay>>,
     signer: Arc<Keypair>,
+    alt: Option<Arc<AddressLookupTableAccount>>,
 }
 
 impl RelayDispatcher {
-    pub fn new(relays: Vec<Arc<dyn Relay>>, signer: Arc<Keypair>) -> Self {
-        Self { relays, signer }
+    pub fn new(
+        relays: Vec<Arc<dyn Relay>>,
+        signer: Arc<Keypair>,
+        alt: Option<Arc<AddressLookupTableAccount>>,
+    ) -> Self {
+        Self { relays, signer, alt }
     }
 
     pub fn signer(&self) -> Arc<Keypair> {
@@ -40,8 +48,9 @@ impl RelayDispatcher {
             let signer = self.signer.clone();
             let tip = tip_lamports;
             let bh = recent_blockhash;
+            let alt = self.alt.clone();
             rt.spawn(async move {
-                let result = relay.submit(&ixs, tip, &signer, bh).await;
+                let result = relay.submit(&ixs, tip, &signer, bh, alt.as_deref()).await;
                 if result.success {
                     info!(
                         "Bundle accepted by {}: id={:?} latency={}us",
