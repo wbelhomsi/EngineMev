@@ -366,8 +366,6 @@ impl ArbRoute {
 /// Represents a detected swap in the mempool that we might backrun.
 #[derive(Debug, Clone)]
 pub struct DetectedSwap {
-    /// The transaction signature
-    pub signature: String,
     /// Which DEX the swap targets
     pub dex_type: DexType,
     /// Pool being swapped on

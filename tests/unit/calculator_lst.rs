@@ -87,7 +87,6 @@ fn test_route_discovery_dex_to_sanctum() {
     // Trigger: someone just swapped on the Orca pool.
     // main.rs searches both directions — do the same here.
     let trigger_fwd = DetectedSwap {
-        signature: String::new(),
         dex_type: DexType::OrcaWhirlpool,
         pool_address: orca_addr,
         input_mint: sol_mint(),
@@ -96,7 +95,6 @@ fn test_route_discovery_dex_to_sanctum() {
         observed_slot: 100,
     };
     let trigger_rev = DetectedSwap {
-        signature: String::new(),
         dex_type: DexType::OrcaWhirlpool,
         pool_address: orca_addr,
         input_mint: jitosol_mint(),
@@ -137,7 +135,6 @@ fn test_no_route_when_no_spread() {
     let calculator = RouteCalculator::new(cache.clone(), 3);
 
     let trigger = DetectedSwap {
-        signature: String::new(),
         dex_type: DexType::OrcaWhirlpool,
         pool_address: orca_addr,
         input_mint: sol_mint(),

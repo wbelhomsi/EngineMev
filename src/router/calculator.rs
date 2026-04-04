@@ -67,7 +67,6 @@ impl RouteCalculator {
         if base_mint != sol {
             // Search SOL-base routes through ALL pools (not just trigger pool)
             let sol_trigger = crate::router::pool::DetectedSwap {
-                signature: String::new(),
                 dex_type: swap.dex_type,
                 pool_address: swap.pool_address,
                 input_mint: sol,

@@ -79,7 +79,6 @@ fn test_e2e_profitable_arb_pipeline() {
     // Simulate Geyser event: vault balance changed on Orca pool.
     // Search both directions like main.rs does.
     let trigger_fwd = DetectedSwap {
-        signature: String::new(),
         dex_type: DexType::OrcaWhirlpool,
         pool_address: orca_addr,
         input_mint: config::sol_mint(),
@@ -88,7 +87,6 @@ fn test_e2e_profitable_arb_pipeline() {
         observed_slot: 100,
     };
     let trigger_rev = DetectedSwap {
-        signature: String::new(),
         dex_type: DexType::OrcaWhirlpool,
         pool_address: orca_addr,
         input_mint: config::lst_mints()[0].0,
@@ -130,7 +128,6 @@ fn test_e2e_revert_unprofitable() {
     let simulator = ProfitSimulator::new(cache.clone(), 0.50, 1000);
 
     let trigger = DetectedSwap {
-        signature: String::new(),
         dex_type: DexType::OrcaWhirlpool,
         pool_address: orca_addr,
         input_mint: config::sol_mint(),
