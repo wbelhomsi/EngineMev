@@ -59,29 +59,39 @@ Subscribe by **DEX program owner** — NOT by individual vault accounts or Token
 
 ```
 src/
-├── main.rs              # Pipeline orchestration: Geyser → Router → Bundle → Relay
+├── main.rs              # Pipeline orchestration: Geyser → Router → Bundle → Relay (~515 lines)
 │                        # Geyser reconnect with exponential backoff (1s → 30s max)
-│                        # Sanctum virtual pool bootstrap, blockhash task spawn
 ├── lib.rs               # Re-exports modules for integration tests
-├── config.rs            # Env config, 9 DEX program IDs, relay endpoints, redact_url()
+├── addresses.rs         # Centralized const Pubkey for all program IDs, mints (compile-time, zero runtime cost)
+├── config.rs            # Env config, relay endpoints, redact_url()
+├── sanctum.rs           # Sanctum bootstrap: virtual pools, LST indices, rates, update_virtual_pool
+├── rpc_helpers.rs       # load_keypair, load_alt, simulate_bundle_tx, send_public_tx
 ├── mempool/
 │   ├── mod.rs           # Exports GeyserStream, PoolStateChange
 │   └── stream.rs        # Yellowstone gRPC subscription, per-DEX pool state parsers,
-│                        # lazy vault fetch for Raydium, approx_reserves_from_sqrt_price
+│                        # lazy vault/Serum/bin-array/tick-array fetches
 ├── router/
-│   ├── mod.rs           # Exports RouteCalculator, ProfitSimulator
-│   ├── pool.rs          # DexType (9 variants: 6 AMMs + Sanctum + PhoenixV1 + Manifest), PoolState, ArbRoute, RouteHop, DetectedSwap
-│   ├── calculator.rs    # 2-hop and 3-hop circular route discovery, O(1) via token→pool index
+│   ├── mod.rs           # Exports RouteCalculator, ProfitSimulator, can_submit_route
+│   ├── pool.rs          # DexType, PoolState, ArbRoute, RouteHop, DetectedSwap,
+│   │                    # CLMM multi-tick quoting, DLMM bin-by-bin quoting, CPMM math
+│   ├── calculator.rs    # 2-hop and 3-hop circular route discovery, O(1) via token→pool index, can_submit_route
 │   └── simulator.rs     # Final go/no-go gate: re-reads fresh state, calculates tip, checks min profit
 ├── executor/
-│   ├── mod.rs           # Exports BundleBuilder, MultiRelay
-│   ├── bundle.rs        # Builds arb tx + Jito tip, Sanctum SwapExactIn IX, minimum_amount_out enforcement
-│   └── relay.rs         # Multi-relay fan-out: Jito/Nozomi/bloXroute/Astralane/ZeroSlot JSON-RPC
+│   ├── mod.rs           # Exports BundleBuilder, RelayDispatcher
+│   ├── bundle.rs        # Builds arb IXs for all 9 DEXes + execute_arb CPI path for Orca
+│   ├── relay_dispatcher.rs  # Concurrent relay fan-out with ALT support
+│   └── relays/
+│       ├── mod.rs       # BundleRelay trait, RelayResult
+│       ├── common.rs    # Shared: RateLimiter, build_signed_bundle_tx, parse_jsonrpc_response
+│       ├── jito.rs      # Jito block engine relay
+│       ├── nozomi.rs    # Nozomi relay
+│       ├── bloxroute.rs # bloXroute relay
+│       ├── astralane.rs # Astralane relay (HTTP/2 keepalive)
+│       └── zeroslot.rs  # ZeroSlot relay
 └── state/
     ├── mod.rs           # Exports StateCache, BlockhashCache
-    ├── cache.rs         # DashMap pool cache with TTL, token→pool index, 10-min eviction
-    ├── blockhash.rs     # BlockhashCache: Arc<RwLock>, 5s staleness, background 2s fetch loop
-    └── bootstrap.rs     # DEPRECATED — replaced by lazy Geyser discovery
+    ├── cache.rs         # DashMap pool cache with TTL, token→pool index, bin/tick array caches
+    └── blockhash.rs     # BlockhashCache: Arc<RwLock>, 5s staleness, background 2s fetch loop
 ```
 
 ## DEX Program IDs (verified current)
@@ -125,8 +135,12 @@ DRY_RUN=true
 ### Tests
 
 ```bash
-cargo test --test unit                        # 87 unit tests
+make test                                     # 146 unit tests
+make lint                                     # clippy (warnings = errors)
+make coverage                                 # line coverage report (49.3%)
+make ci                                       # lint + test + coverage
 cargo test --features e2e --test e2e          # 4 e2e tests
+cargo test --features e2e_surfpool --test e2e_surfpool  # Surfpool E2E (needs RPC_URL + surfpool)
 ```
 
 ## Critical Rules for Development
@@ -170,20 +184,28 @@ Base DEX↔DEX backrun arb working live on mainnet.
 - API key redaction in all logs
 - LST rate arb (Sanctum virtual pools, enabled for submission)
 - Phoenix V1 + Manifest CLOB market parsing + swap IX builders (enabled for submission)
-- LazyLock static Pubkeys — no more Pubkey::from_str() on hot path
+- Compile-time const Pubkeys in addresses.rs (zero runtime base58 parsing)
 - Pre-computed pair index in StateCache for O(1) pool pair lookups
-- Token-2022 ATA derivation correct for Raydium CP and Meteora DLMM
+- Token-2022 support in Orca/CLMM/DAMM v2 IX builders (per-mint token program resolution)
+- Per-pool fee parsing: Orca from pool state offset 45, Raydium AMM from tradeFee fields
+- CLMM multi-tick crossing: walks initialized ticks with liquidity adjustment at boundaries
+- DLMM bin-by-bin simulation: real bin liquidity with Q64.64 pre-stored prices
+- Raydium AMM v4 full 18-account IX builder with lazy Serum market account fetch
 - arb-guard Phase A: on-chain profit guard (start_check/profit_check with reentrancy lock)
 - arb-guard Phase B: CPI executor for Orca Whirlpool (single execute_arb instruction, remaining_accounts, balance diffing)
-- 87 unit tests + 4 e2e tests passing
+- Shared relay common.rs: RateLimiter, build_signed_bundle_tx, parse_jsonrpc_response
+- Decomposed main.rs (994→515 lines): sanctum.rs, rpc_helpers.rs, can_submit_route in router
+- Safety: TIP_FRACTION validated, SKIP_SIMULATOR has sanity cap, i128 profit math, relay key redaction
+- 146 unit tests + 3 Surfpool E2E tests, 0 clippy warnings
+- Makefile: make lint, make test, make coverage, make ci
 - Tested on mainnet: ~300 realistic opportunities in 5 min, ~0.000189 SOL avg profit per opp
 
 **Remaining:**
-- CLMM multi-tick crossing (current: single-tick only, underestimates large swaps — conservative)
-- DLMM bin-by-bin simulation (current: synthetic reserves from active_id — needs bin array accounts for accuracy)
-- Raydium AMM v4 not yet in can_submit_route() — needs on-chain verification first
+- Deploy arb-guard to mainnet (~7 SOL for buffer)
+- Upgrade solana-sdk 2.2 → latest (unblocks LaserStream SDK + performance improvements)
+- Grafana + OpenTelemetry metrics
 - Deduplication of repeated opportunities on same pool pair
-- Metrics/Prometheus endpoint
+- Phoenix lot size conversion (Phoenix excluded from submission for now)
 
 ### Phase 3: CEX↔DEX Arb (SVM — new module)
 Binance websocket price feed + divergence detector. See `docs/STRATEGY-CEX-DEX-ARB.md`.
