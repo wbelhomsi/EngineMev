@@ -63,7 +63,6 @@ fn test_raydium_cp_swap() {
 
 /// Swap 0.001 SOL on Raydium CLMM and verify the TX succeeds.
 #[test]
-#[ignore = "CLMM sqrt_price_limit needs investigation — SqrtPriceLimitOverflow"]
 fn test_raydium_clmm_swap() {
     let harness = SurfpoolHarness::start();
     let signer = SurfpoolHarness::test_keypair();
