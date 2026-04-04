@@ -58,6 +58,9 @@ pub struct GeyserStream {
     bitmap_checked: Arc<DashMap<Pubkey, bool>>,
     /// Last vault fetch time per pool — prevents re-fetching within cooldown.
     vault_last_fetch: Arc<DashMap<Pubkey, Instant>>,
+    /// Tracks Raydium AMM v4 pools whose Serum market accounts have been fetched.
+    /// Once fetched, never re-fetch — Serum accounts don't change.
+    serum_checked: Arc<DashMap<Pubkey, bool>>,
 }
 
 impl GeyserStream {
@@ -69,6 +72,7 @@ impl GeyserStream {
             rpc_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_RPC)),
             bitmap_checked: Arc::new(DashMap::new()),
             vault_last_fetch: Arc::new(DashMap::new()),
+            serum_checked: Arc::new(DashMap::new()),
         }
     }
 
@@ -365,6 +369,49 @@ impl GeyserStream {
                     }
                 }
 
+                // For Raydium AMM v4: fetch Serum/OpenBook market accounts on first discovery.
+                // Cached permanently in serum_checked — never re-fetch the same pool.
+                if matches!(self.state_cache.get_any(&pool_address).map(|p| p.dex_type),
+                            Some(crate::router::pool::DexType::RaydiumAmm))
+                {
+                    if !self.serum_checked.contains_key(&pool_address) {
+                        // Only attempt if we have a market_id from the parser
+                        if let Some(market_id) = self.state_cache.get_any(&pool_address)
+                            .and_then(|p| p.extra.market)
+                        {
+                            self.serum_checked.insert(pool_address, false); // mark as in-flight
+                            let client = self.http_client.clone();
+                            let url = self.config.rpc_url.clone();
+                            let cache = self.state_cache.clone();
+                            let serum_checked = self.serum_checked.clone();
+                            let sem = self.rpc_semaphore.clone();
+                            tokio::spawn(async move {
+                                let _permit = sem.acquire().await;
+                                match fetch_serum_market_accounts(&client, &url, &market_id).await {
+                                    Some((bids, asks, event_q, coin_vault, pc_vault, nonce)) => {
+                                        if let Some(mut pool) = cache.get_any(&pool_address) {
+                                            pool.extra.serum_bids = Some(bids);
+                                            pool.extra.serum_asks = Some(asks);
+                                            pool.extra.serum_event_queue = Some(event_q);
+                                            pool.extra.serum_coin_vault = Some(coin_vault);
+                                            pool.extra.serum_pc_vault = Some(pc_vault);
+                                            pool.extra.serum_vault_signer_nonce = Some(nonce);
+                                            cache.upsert(pool_address, pool);
+                                        }
+                                        serum_checked.insert(pool_address, true);
+                                        debug!("Serum market accounts fetched for AMM {}", pool_address);
+                                    }
+                                    None => {
+                                        // Remove from checked so we retry on next update
+                                        serum_checked.remove(&pool_address);
+                                        debug!("Serum market fetch failed for AMM {}", pool_address);
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+
                 // Notify router — only if mint programs are cached
                 if mints_ready {
                     let event = PoolStateChange { pool_address, slot };
@@ -511,6 +558,51 @@ async fn fetch_vault_balances_for_pool(
     }
 
     Ok(())
+}
+
+/// Fetch Serum/OpenBook market account and extract bids, asks, event_queue, vaults, vault_signer_nonce.
+/// Returns (bids, asks, event_queue, coin_vault, pc_vault, vault_signer_nonce).
+async fn fetch_serum_market_accounts(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    market_id: &Pubkey,
+) -> Option<(Pubkey, Pubkey, Pubkey, Pubkey, Pubkey, u64)> {
+    use base64::{engine::general_purpose, Engine as _};
+
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getAccountInfo",
+        "params": [market_id.to_string(), {"encoding": "base64"}],
+    });
+
+    let resp: serde_json::Value = client.post(rpc_url)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(5))
+        .send().await.ok()?
+        .json().await.ok()?;
+
+    let data_arr = resp.get("result")?.get("value")?.get("data")?.as_array()?;
+    let b64_str = data_arr.first()?.as_str()?;
+    let data = general_purpose::STANDARD.decode(b64_str).ok()?;
+
+    // Serum market account layout (offsets from data start):
+    // 45: vault_signer_nonce (u64)
+    // 117: base_vault / coin_vault (Pubkey)
+    // 165: quote_vault / pc_vault (Pubkey)
+    // 245: event_queue (Pubkey)
+    // 277: bids (Pubkey)
+    // 309: asks (Pubkey)
+    if data.len() < 341 { return None; }
+
+    let vault_signer_nonce = u64::from_le_bytes(data[45..53].try_into().ok()?);
+    let coin_vault = Pubkey::new_from_array(data[117..149].try_into().ok()?);
+    let pc_vault = Pubkey::new_from_array(data[165..197].try_into().ok()?);
+    let event_queue = Pubkey::new_from_array(data[245..277].try_into().ok()?);
+    let bids = Pubkey::new_from_array(data[277..309].try_into().ok()?);
+    let asks = Pubkey::new_from_array(data[309..341].try_into().ok()?);
+
+    Some((bids, asks, event_queue, coin_vault, pc_vault, vault_signer_nonce))
 }
 
 /// Approximate token reserves from a CLMM sqrt_price_x64 + liquidity.
@@ -806,15 +898,30 @@ pub fn parse_raydium_amm_v4(
     data: &[u8],
     slot: u64,
 ) -> Option<(PoolState, (Pubkey, Pubkey))> {
-    const MIN_LEN: usize = 464;
+    const MIN_LEN: usize = 624; // need to read up to target_orders at offset 592+32
     if data.len() < MIN_LEN {
         return None;
     }
+
+    let nonce = data[8] as u8; // offset 8, u64 but only lowest byte used
+
+    // Extract trade fee from pool state (more accurate than hardcoded 25 bps)
+    let trade_fee_num = u64::from_le_bytes(data[144..152].try_into().ok()?);
+    let trade_fee_den = u64::from_le_bytes(data[152..160].try_into().ok()?);
+    let fee_bps = if trade_fee_den > 0 {
+        (trade_fee_num * 10000 / trade_fee_den) as u64
+    } else {
+        25 // fallback
+    };
 
     let base_vault = Pubkey::new_from_array(data[336..368].try_into().ok()?);
     let quote_vault = Pubkey::new_from_array(data[368..400].try_into().ok()?);
     let base_mint = Pubkey::new_from_array(data[400..432].try_into().ok()?);
     let quote_mint = Pubkey::new_from_array(data[432..464].try_into().ok()?);
+    let open_orders = Pubkey::new_from_array(data[496..528].try_into().ok()?);
+    let market_id = Pubkey::new_from_array(data[528..560].try_into().ok()?);
+    let market_program = Pubkey::new_from_array(data[560..592].try_into().ok()?);
+    let target_orders = Pubkey::new_from_array(data[592..624].try_into().ok()?);
 
     let pool = PoolState {
         address: *pool_address,
@@ -823,7 +930,7 @@ pub fn parse_raydium_amm_v4(
         token_b_mint: quote_mint,
         token_a_reserve: 0, // populated after vault fetch
         token_b_reserve: 0,
-        fee_bps: DexType::RaydiumAmm.base_fee_bps(),
+        fee_bps,
         current_tick: None,
         sqrt_price_x64: None,
         liquidity: None,
@@ -835,6 +942,11 @@ pub fn parse_raydium_amm_v4(
                 vault_b: Some(quote_vault),
                 token_program_a: Some(spl_token),
                 token_program_b: Some(spl_token),
+                open_orders: Some(open_orders),
+                market: Some(market_id),
+                market_program: Some(market_program),
+                target_orders: Some(target_orders),
+                amm_nonce: Some(nonce),
                 ..Default::default()
             }
         },

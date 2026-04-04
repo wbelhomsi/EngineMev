@@ -572,12 +572,29 @@ pub fn build_raydium_amm_swap_ix(
     let vault_a = extra.vault_a?;
     let vault_b = extra.vault_b?;
     let open_orders = extra.open_orders?;
+    let target_orders = extra.target_orders?;
+    let market_id = extra.market?;
+    let market_program = extra.market_program?;
     let nonce = extra.amm_nonce?;
+
+    // Serum accounts — return None if not yet fetched
+    let serum_bids = extra.serum_bids?;
+    let serum_asks = extra.serum_asks?;
+    let serum_event_queue = extra.serum_event_queue?;
+    let serum_coin_vault = extra.serum_coin_vault?;
+    let serum_pc_vault = extra.serum_pc_vault?;
+    let serum_vault_signer_nonce = extra.serum_vault_signer_nonce?;
 
     let amm_program = addresses::RAYDIUM_AMM;
     let amm_authority = Pubkey::create_program_address(
         &[&[nonce]],
         &amm_program,
+    ).ok()?;
+
+    // Serum vault signer PDA: seeds=[market_id, nonce_le_bytes], program=serum_program
+    let serum_vault_signer = Pubkey::create_program_address(
+        &[market_id.as_ref(), &serum_vault_signer_nonce.to_le_bytes()],
+        &market_program,
     ).ok()?;
 
     let a_to_b = input_mint == pool.token_a_mint;
@@ -586,20 +603,29 @@ pub fn build_raydium_amm_swap_ix(
     let user_dest_ata = derive_ata(signer, &output_mint);
 
     let mut data = Vec::with_capacity(17);
-    data.push(9u8);
+    data.push(9u8); // swap_base_in instruction discriminator
     data.extend_from_slice(&amount_in.to_le_bytes());
     data.extend_from_slice(&minimum_amount_out.to_le_bytes());
 
     let accounts = vec![
-        AccountMeta::new_readonly(addresses::SPL_TOKEN, false),
-        AccountMeta::new(pool.address, false),
-        AccountMeta::new_readonly(amm_authority, false),
-        AccountMeta::new(open_orders, false),
-        AccountMeta::new(vault_a, false),
-        AccountMeta::new(vault_b, false),
-        AccountMeta::new(user_source_ata, false),
-        AccountMeta::new(user_dest_ata, false),
-        AccountMeta::new_readonly(*signer, true),
+        AccountMeta::new_readonly(addresses::SPL_TOKEN, false),   // [0]
+        AccountMeta::new(pool.address, false),                     // [1] amm_id
+        AccountMeta::new_readonly(amm_authority, false),           // [2] amm_authority
+        AccountMeta::new(open_orders, false),                      // [3] amm_open_orders
+        AccountMeta::new(target_orders, false),                    // [4] amm_target_orders
+        AccountMeta::new(vault_a, false),                          // [5] pool_coin_token_account
+        AccountMeta::new(vault_b, false),                          // [6] pool_pc_token_account
+        AccountMeta::new_readonly(market_program, false),          // [7] serum_program_id
+        AccountMeta::new(market_id, false),                        // [8] serum_market
+        AccountMeta::new(serum_bids, false),                       // [9] serum_bids
+        AccountMeta::new(serum_asks, false),                       // [10] serum_asks
+        AccountMeta::new(serum_event_queue, false),                // [11] serum_event_queue
+        AccountMeta::new(serum_coin_vault, false),                 // [12] serum_coin_vault_account
+        AccountMeta::new(serum_pc_vault, false),                   // [13] serum_pc_vault_account
+        AccountMeta::new_readonly(serum_vault_signer, false),      // [14] serum_vault_signer
+        AccountMeta::new(user_source_ata, false),                  // [15] user_source_token_account
+        AccountMeta::new(user_dest_ata, false),                    // [16] user_destination_token_account
+        AccountMeta::new_readonly(*signer, true),                  // [17] user_source_owner
     ];
 
     Some(Instruction { program_id: amm_program, accounts, data })
