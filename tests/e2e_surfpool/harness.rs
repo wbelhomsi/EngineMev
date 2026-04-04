@@ -108,6 +108,64 @@ impl SurfpoolHarness {
         harness
     }
 
+    /// Start Surfpool with a custom program deployed.
+    /// `program_so_path` is the path to the .so file.
+    /// `program_id` is the on-chain program ID to deploy at.
+    pub fn start_with_program(program_so_path: &str, program_id: &str) -> Self {
+        let upstream_rpc =
+            std::env::var("RPC_URL").expect("RPC_URL env var required for Surfpool tests");
+
+        let signer = Self::test_keypair();
+        let signer_pubkey = signer.pubkey().to_string();
+
+        let port = 18900u16;
+        let ws_port = 18901u16;
+        let rpc_url = format!("http://127.0.0.1:{}", port);
+
+        println!(
+            "[surfpool-harness] Starting surfpool on port {} with program {}...",
+            port, program_id
+        );
+
+        let child = Command::new("surfpool")
+            .arg("start")
+            .arg("--rpc-url")
+            .arg(&upstream_rpc)
+            .arg("--ci")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--ws-port")
+            .arg(ws_port.to_string())
+            .arg("--airdrop")
+            .arg(&signer_pubkey)
+            .arg("--airdrop-amount")
+            .arg("100000000000") // 100 SOL in lamports
+            .arg("--deploy")
+            .arg(format!("{}:{}", program_so_path, program_id))
+            .env("NO_DNA", "1")
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("Failed to spawn surfpool with program deploy");
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("Failed to build reqwest client");
+
+        let harness = Self {
+            process: Some(child),
+            rpc_url,
+            client,
+        };
+
+        harness.wait_for_ready();
+        println!("[surfpool-harness] Health check passed, waiting 3s for account cloning...");
+        std::thread::sleep(Duration::from_secs(3));
+        println!("[surfpool-harness] Ready with deployed program.");
+        harness
+    }
+
     /// Poll `getHealth` every 500ms until it returns "ok" or timeout (30s).
     fn wait_for_ready(&self) {
         let start = Instant::now();

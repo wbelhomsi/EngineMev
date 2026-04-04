@@ -21,15 +21,15 @@ use super::harness::SurfpoolHarness;
 
 // ─── Well-known program IDs ─────────────────────────────────────────────────
 
-fn spl_token_program() -> Pubkey {
+pub fn spl_token_program() -> Pubkey {
     Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap()
 }
 
-fn ata_program() -> Pubkey {
+pub fn ata_program() -> Pubkey {
     Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap()
 }
 
-fn compute_budget_program() -> Pubkey {
+pub fn compute_budget_program() -> Pubkey {
     Pubkey::from_str("ComputeBudget111111111111111111111111111111").unwrap()
 }
 
@@ -102,11 +102,11 @@ pub fn pool_for_dex(dex_type: DexType) -> Option<KnownPool> {
 
 // ─── ATA derivation (mirrors bundle.rs logic) ──────────────────────────────
 
-fn derive_ata(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
+pub fn derive_ata(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
     derive_ata_with_program(wallet, mint, &spl_token_program())
 }
 
-fn derive_ata_with_program(wallet: &Pubkey, mint: &Pubkey, token_program: &Pubkey) -> Pubkey {
+pub fn derive_ata_with_program(wallet: &Pubkey, mint: &Pubkey, token_program: &Pubkey) -> Pubkey {
     let seeds = &[
         wallet.as_ref(),
         token_program.as_ref(),
@@ -358,7 +358,7 @@ fn resolve_token_program_via_rpc(harness: &SurfpoolHarness, mint: &Pubkey) -> Pu
 }
 
 /// Build a CreateIdempotent ATA instruction.
-fn create_ata_idempotent_ix(
+pub fn create_ata_idempotent_ix(
     payer: &Pubkey,
     ata: &Pubkey,
     mint: &Pubkey,
@@ -375,5 +375,129 @@ fn create_ata_idempotent_ix(
             AccountMeta::new_readonly(*token_program, false),
         ],
         data: vec![1], // 1 = CreateIdempotent
+    }
+}
+
+// ─── Arb-guard CPI helpers ─────────────────────────────────────────────────
+
+pub fn orca_whirlpool_program() -> Pubkey {
+    Pubkey::from_str("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc").unwrap()
+}
+
+pub fn memo_program() -> Pubkey {
+    Pubkey::from_str("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr").unwrap()
+}
+
+fn anchor_discriminator(name: &str) -> [u8; 8] {
+    use solana_sdk::hash::Hasher;
+    let mut hasher = Hasher::default();
+    hasher.hash(format!("global:{}", name).as_bytes());
+    let hash = hasher.result();
+    let mut disc = [0u8; 8];
+    disc.copy_from_slice(&hash.as_ref()[..8]);
+    disc
+}
+
+/// Floor division (handles negative dividends correctly for tick math).
+fn floor_div_e2e(a: i32, b: i32) -> i32 {
+    let d = a / b;
+    if a % b != 0 && (a ^ b) < 0 { d - 1 } else { d }
+}
+
+/// Build the execute_arb instruction for E2E tests.
+/// `hops` is a list of (pool_state, a_to_b, output_mint) tuples.
+pub fn build_execute_arb_ix_e2e(
+    guard_program_id: &Pubkey,
+    signer: &Pubkey,
+    input_mint: &Pubkey,
+    amount_in: u64,
+    min_amount_out: u64,
+    hops: &[(PoolState, bool, Pubkey)],
+) -> Instruction {
+    let token_program = spl_token_program();
+    let memo = memo_program();
+    let orca_program = orca_whirlpool_program();
+
+    let input_ata = derive_ata(signer, input_mint);
+
+    // Fixed accounts (6)
+    let mut accounts = vec![
+        AccountMeta::new(*signer, true),
+        AccountMeta::new_readonly(token_program, false),
+        AccountMeta::new_readonly(memo, false),
+        AccountMeta::new(input_ata, false),
+        AccountMeta::new_readonly(*input_mint, false),
+        AccountMeta::new_readonly(orca_program, false),
+    ];
+
+    let mut hop_data: Vec<(u8, bool)> = Vec::new();
+    for (pool, a_to_b, output_mint) in hops {
+        let vault_a = pool.extra.vault_a.unwrap();
+        let vault_b = pool.extra.vault_b.unwrap();
+        let tick_spacing = pool.extra.tick_spacing.unwrap();
+        let tick_current = pool.current_tick.unwrap_or(0);
+
+        let (oracle, _) = Pubkey::find_program_address(
+            &[b"oracle", pool.address.as_ref()],
+            &orca_program,
+        );
+
+        let ticks_in_array: i32 = 88 * tick_spacing as i32;
+        let start_base = floor_div_e2e(tick_current, ticks_in_array) * ticks_in_array;
+
+        let offsets: [i32; 3] = if *a_to_b {
+            [0, -1, -2]
+        } else if tick_current + tick_spacing as i32 >= start_base + ticks_in_array {
+            [1, 2, 3]
+        } else {
+            [0, 1, 2]
+        };
+
+        let tick_arrays: Vec<Pubkey> = offsets
+            .iter()
+            .map(|&o| {
+                let start = start_base + o * ticks_in_array;
+                Pubkey::find_program_address(
+                    &[
+                        b"tick_array",
+                        pool.address.as_ref(),
+                        start.to_string().as_bytes(),
+                    ],
+                    &orca_program,
+                )
+                .0
+            })
+            .collect();
+
+        let output_ata = derive_ata(signer, output_mint);
+
+        accounts.push(AccountMeta::new(pool.address, false));
+        accounts.push(AccountMeta::new(vault_a, false));
+        accounts.push(AccountMeta::new(vault_b, false));
+        accounts.push(AccountMeta::new(tick_arrays[0], false));
+        accounts.push(AccountMeta::new(tick_arrays[1], false));
+        accounts.push(AccountMeta::new(tick_arrays[2], false));
+        accounts.push(AccountMeta::new(oracle, false));
+        accounts.push(AccountMeta::new(output_ata, false));
+        accounts.push(AccountMeta::new_readonly(*output_mint, false));
+
+        hop_data.push((0u8, *a_to_b));
+    }
+
+    // Serialize instruction data
+    let disc = anchor_discriminator("execute_arb");
+    let mut data = disc.to_vec();
+    data.extend_from_slice(&amount_in.to_le_bytes());
+    data.extend_from_slice(&min_amount_out.to_le_bytes());
+    data.extend_from_slice(&(hop_data.len() as u32).to_le_bytes());
+    for (dex_type, a_to_b) in &hop_data {
+        data.push(*dex_type);
+        data.push(if *a_to_b { 1u8 } else { 0u8 });
+    }
+
+    Instruction {
+        program_id: *guard_program_id,
+        accounts,
+        data,
     }
 }
