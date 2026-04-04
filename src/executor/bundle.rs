@@ -779,9 +779,11 @@ pub fn build_meteora_dlmm_swap_ix(
     // remaining_accounts_info: empty Vec (Borsh: 4 bytes of 0)
     data.extend_from_slice(&0u32.to_le_bytes());
 
-    // Bitmap extension — Option<UncheckedAccount> in the DLMM program.
-    // If the pool doesn't have one, pass the DLMM program ID itself.
-    // Anchor interprets the executing program ID as None for Option accounts.
+    // Bitmap extension — use cached value if available (confirmed on-chain).
+    // If not cached, pass the DLMM program ID as Anchor's "None" marker.
+    // Pools needing the bitmap but not having it will fail, but that's expected
+    // (they can't be swapped without it). The bitmap_checked cache in stream.rs
+    // tracks which pools have been checked.
     let bitmap_extension = extra.bitmap_extension.unwrap_or(dlmm_program);
 
     let mut accounts = vec![
