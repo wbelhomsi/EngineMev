@@ -1,34 +1,34 @@
 # Next Session TODO
 
-## Status: On-chain TX sent but fails on Token-2022 ATA mismatch. Need Surfpool local testing.
+## IMMEDIATE: Write implementation plan + implement Surfpool E2E tests
 
-## Critical Bug: Token-2022 ATA Program Mismatch
+**Spec ready:** `docs/superpowers/specs/2026-04-04-surfpool-e2e-tests-design.md`
 
-Pool parser's `token_program_a/b` flags (offsets 878-879 in DLMM) sometimes say SPL Token when the actual mint is Token-2022. This causes:
-- ATA CreateIdempotent uses SPL Token → fails with "IncorrectProgramId"
-- The ATA address derived with wrong program doesn't match what the swap IX expects
+1. Invoke `superpowers:writing-plans` on the spec to create the implementation plan
+2. Implement the test harness (Surfpool lifecycle management)
+3. Find and hardcode known pool addresses for each DEX type
+4. Implement per-DEX swap tests (8 tests)
+5. Implement pipeline tests (2-hop arb, wSOL wrap/unwrap, Token-2022)
+6. Use tests to fix remaining DLMM bitmap extension issue
 
-### Fix approach:
-Use `get_mint_program()` (RPC-fetched owner) as the SINGLE source of truth for token programs everywhere:
-1. ATA creation in `build_arb_instructions` 
-2. All swap IX builders (`build_meteora_dlmm_swap_ix`, `build_raydium_cp_swap_ix`, etc.)
-3. Never trust pool.extra.token_program_a/b for ATA derivation
+## Surfpool Installed
+- Version: 1.1.2
+- Start: `NO_DNA=1 surfpool start --rpc-url $RPC_URL --ci --port 18900 --airdrop <signer> --no-deploy`
 
-### Testing approach:
-Use Surfpool for local testing (installing). Fork mainnet state, send txs locally, iterate without mainnet fees.
+## Bugs Fixed This Session
+- Token-2022 ATA mismatch: ATA creation now uses pool token programs (verified on Surfpool)
+- wSOL wrap/unwrap: added system_instruction::transfer + SyncNative + CloseAccount
+- SOL-only route filter: only routes starting/ending with SOL
+- SOL-base route search: calculator always searches SOL as base
+- Simulator TTL: uses get_any() so Sanctum virtual pools don't expire
+- Per-relay bundle architecture: each relay owns tip+sign+send
+- min_final_output: no longer subtracts tip (tip is separate IX)
 
-## What We Proved On-Chain
-- Tx structure is correct (9 instructions: CU + ATA creates + wSOL wrap + swaps + unwrap)
-- wSOL wrap/SyncNative works
-- DLMM Swap2 hop 1 executes successfully (TransferChecked both ways)
-- DLMM Swap2 hop 2 fails on bitmap extension or Token-2022 mismatch
-- Jito + Astralane accept our bundles (71 + 109 in 30 min)
+## Remaining Bugs
+- DLMM bitmap extension: some pools need it, don't have it on-chain → filter these pools
+- Sanctum virtual pool rates: hardcoded, need real-time sol_value from LstStateList
 
-## Balance
-0.75 SOL → ~0.7499 SOL (lost ~5400 lamports in failed tx fees from SEND_PUBLIC tests)
-
-## Architecture Complete
+## Architecture
 - 85 unit tests, 5 relay modules, 9 DEX IX builders
-- Per-relay bundle architecture (each relay owns tip+sign+send)
-- SOL-only route filter + wSOL wrap/unwrap
-- Sanctum Shank IX verified
+- Surfpool for local E2E testing
+- Balance: ~0.7499 SOL
