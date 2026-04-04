@@ -51,10 +51,12 @@ thiserror = "2"
 dotenv = "0.15"
 
 [dev-dependencies]
+reqwest = { version = "0.12", features = ["blocking", "json"] }
 
 [features]
 default = []
 e2e = []
+e2e_surfpool = []
 
 [[test]]
 name = "unit"
@@ -64,6 +66,11 @@ path = "tests/unit/mod.rs"
 name = "e2e"
 path = "tests/e2e/mod.rs"
 required-features = ["e2e"]
+
+[[test]]
+name = "e2e_surfpool"
+path = "tests/e2e_surfpool/mod.rs"
+required-features = ["e2e_surfpool"]
 
 [profile.release]
 opt-level = 3
