@@ -767,10 +767,18 @@ pub fn build_damm_v2_swap_ix(
     let (input_vault, output_vault) = if a_to_b { (vault_a, vault_b) } else { (vault_b, vault_a) };
     let output_mint = if a_to_b { pool.token_b_mint } else { pool.token_a_mint };
 
-    let user_input_ata = derive_ata(signer, &input_mint);
-    let user_output_ata = derive_ata(signer, &output_mint);
+    let token_program_a = extra.token_program_a.unwrap_or(*SPL_TOKEN_PROGRAM);
+    let token_program_b = extra.token_program_b.unwrap_or(*SPL_TOKEN_PROGRAM);
 
-    let token_program = *SPL_TOKEN_PROGRAM;
+    let input_token_program = if a_to_b { token_program_a } else { token_program_b };
+    let output_token_program = if a_to_b { token_program_b } else { token_program_a };
+
+    let user_input_ata = derive_ata_with_program(signer, &input_mint, &input_token_program);
+    let user_output_ata = derive_ata_with_program(signer, &output_mint, &output_token_program);
+
+    // DAMM v2 swap2 has a single token_program account (account 8).
+    // Use the input side's token program — the on-chain program handles both sides.
+    let token_program = input_token_program;
 
     let mut data = Vec::with_capacity(25);
     data.extend_from_slice(&[0x41, 0x4b, 0x3f, 0x4c, 0xeb, 0x5b, 0x5b, 0x88]);
@@ -825,7 +833,8 @@ pub fn build_orca_whirlpool_swap_ix(
     let tick_spacing = extra.tick_spacing?;
 
     let whirlpool_program = crate::config::programs::orca_whirlpool();
-    let token_program = *SPL_TOKEN_PROGRAM;
+    let token_program_a = extra.token_program_a.unwrap_or(*SPL_TOKEN_PROGRAM);
+    let token_program_b = extra.token_program_b.unwrap_or(*SPL_TOKEN_PROGRAM);
     let memo_program = *MEMO_PROGRAM;
 
     let a_to_b = input_mint == pool.token_a_mint;
@@ -860,8 +869,8 @@ pub fn build_orca_whirlpool_swap_ix(
     let sqrt_price_limit: u128 = if a_to_b { 4295048016u128 } else { 79226673515401279992447579055u128 };
 
     // User token accounts
-    let user_ata_a = derive_ata(signer, &pool.token_a_mint);
-    let user_ata_b = derive_ata(signer, &pool.token_b_mint);
+    let user_ata_a = derive_ata_with_program(signer, &pool.token_a_mint, &token_program_a);
+    let user_ata_b = derive_ata_with_program(signer, &pool.token_b_mint, &token_program_b);
 
     // Discriminator: swap_v2 [0x2b, 0x04, 0xed, 0x0b, 0x1a, 0xc9, 0x1e, 0x62]
     let mut data = Vec::with_capacity(43);
@@ -875,8 +884,8 @@ pub fn build_orca_whirlpool_swap_ix(
 
     // SwapV2 account layout (15 accounts):
     let accounts = vec![
-        AccountMeta::new_readonly(token_program, false),   // 0: token_program_a (SPL Token)
-        AccountMeta::new_readonly(token_program, false),   // 1: token_program_b (SPL Token — Whirlpool doesn't support Token-2022)
+        AccountMeta::new_readonly(token_program_a, false),   // 0: token_program_a
+        AccountMeta::new_readonly(token_program_b, false),   // 1: token_program_b
         AccountMeta::new_readonly(memo_program, false),    // 2: memo_program
         AccountMeta::new(*signer, true),                   // 3: token_authority (signer)
         AccountMeta::new(pool.address, false),             // 4: whirlpool
@@ -927,8 +936,18 @@ pub fn build_raydium_clmm_swap_ix(
     let (input_vault, output_vault) = if a_to_b { (vault_a, vault_b) } else { (vault_b, vault_a) };
     let output_mint = if a_to_b { pool.token_b_mint } else { pool.token_a_mint };
 
-    let user_input_ata = derive_ata(signer, &input_mint);
-    let user_output_ata = derive_ata(signer, &output_mint);
+    let input_token_program = if input_mint == pool.token_a_mint {
+        extra.token_program_a.unwrap_or(*SPL_TOKEN_PROGRAM)
+    } else {
+        extra.token_program_b.unwrap_or(*SPL_TOKEN_PROGRAM)
+    };
+    let output_token_program = if output_mint == pool.token_a_mint {
+        extra.token_program_a.unwrap_or(*SPL_TOKEN_PROGRAM)
+    } else {
+        extra.token_program_b.unwrap_or(*SPL_TOKEN_PROGRAM)
+    };
+    let user_input_ata = derive_ata_with_program(signer, &input_mint, &input_token_program);
+    let user_output_ata = derive_ata_with_program(signer, &output_mint, &output_token_program);
 
     // Bitmap extension PDA
     let (bitmap_extension, _) = Pubkey::find_program_address(

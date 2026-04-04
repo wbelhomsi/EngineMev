@@ -86,13 +86,25 @@ fn test_parse_meteora_dlmm() {
     let addr = Pubkey::new_unique();
     let mx = Pubkey::new_unique(); let my = Pubkey::new_unique();
     let vx = Pubkey::new_unique(); let vy = Pubkey::new_unique();
-    let data = make_dlmm_data(&mx, &my, &vx, &vy, 8388608, 10);
+    // Use a realistic active_id (max valid is ~443636)
+    let data = make_dlmm_data(&mx, &my, &vx, &vy, 5000, 10);
     let result = parse_meteora_dlmm(&addr, &data, 100);
     assert!(result.is_some());
     let pool = result.unwrap();
     assert_eq!(pool.dex_type, DexType::MeteoraDlmm);
     assert_eq!(pool.token_a_mint, mx);
     assert_eq!(pool.token_b_mint, my);
+}
+
+#[test]
+fn test_parse_meteora_dlmm_rejects_garbage_active_id() {
+    let addr = Pubkey::new_unique();
+    let mx = Pubkey::new_unique(); let my = Pubkey::new_unique();
+    let vx = Pubkey::new_unique(); let vy = Pubkey::new_unique();
+    // active_id 8388608 is garbage (exceeds max ~443636)
+    let data = make_dlmm_data(&mx, &my, &vx, &vy, 8388608, 10);
+    let result = parse_meteora_dlmm(&addr, &data, 100);
+    assert!(result.is_none(), "Should reject garbage active_id > 500_000");
 }
 
 fn make_damm_v2_data(mint_a: &Pubkey, mint_b: &Pubkey, vault_a: &Pubkey, vault_b: &Pubkey, reserve_a: u64, reserve_b: u64, collect_fee_mode: u8) -> Vec<u8> {

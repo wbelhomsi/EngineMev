@@ -20,7 +20,7 @@ impl DexType {
     pub fn base_fee_bps(&self) -> u64 {
         match self {
             DexType::RaydiumAmm => 25,      // 0.25%
-            DexType::RaydiumClmm => 1,      // varies, 0.01% - 1% depending on pool
+            DexType::RaydiumClmm => 25,     // varies 1-100 bps, default 25 (most common tier)
             DexType::RaydiumCp => 25,       // 0.25% constant product
             DexType::OrcaWhirlpool => 1,    // varies by fee tier
             DexType::MeteoraDlmm => 1,      // dynamic fees
