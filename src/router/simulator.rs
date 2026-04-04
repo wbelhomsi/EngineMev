@@ -89,12 +89,14 @@ impl ProfitSimulator {
                 }
             };
 
-            // Use bin-by-bin quoting for DLMM pools when bin arrays are available
+            // Use bin-by-bin / multi-tick quoting when cache data is available
             let bin_arrays = self.state_cache.get_bin_arrays(&hop.pool_address);
-            current_amount = match pool.get_output_amount_with_bins(
+            let tick_arrays = self.state_cache.get_tick_arrays(&hop.pool_address);
+            current_amount = match pool.get_output_amount_with_cache(
                 current_amount,
                 a_to_b,
                 bin_arrays.as_deref(),
+                tick_arrays.as_deref(),
             ) {
                 Some(out) if out > 0 => out,
                 _ => {

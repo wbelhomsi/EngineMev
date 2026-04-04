@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::router::pool::{DlmmBinArray, PoolState};
+use crate::router::pool::{ClmmTickArray, DlmmBinArray, PoolState};
 
 /// Cache key combining pool address for O(1) lookup
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -53,6 +53,9 @@ pub struct StateCache {
     /// DLMM bin arrays: pool_address -> Vec<DlmmBinArray>.
     /// Fetched lazily on first DLMM pool discovery, used for bin-by-bin quoting.
     bin_arrays: Arc<DashMap<Pubkey, Vec<DlmmBinArray>>>,
+    /// CLMM tick arrays: pool_address -> Vec<ClmmTickArray>.
+    /// Fetched lazily for Orca/Raydium CLMM pools, used for multi-tick quoting.
+    tick_arrays: Arc<DashMap<Pubkey, Vec<ClmmTickArray>>>,
     ttl: Duration,
 }
 
@@ -65,6 +68,7 @@ impl StateCache {
             mint_programs: Arc::new(DashMap::with_capacity(1_000)),
             lst_indices: Arc::new(DashMap::with_capacity(200)),
             bin_arrays: Arc::new(DashMap::with_capacity(1_000)),
+            tick_arrays: Arc::new(DashMap::with_capacity(2_000)),
             ttl,
         }
     }
@@ -187,6 +191,16 @@ impl StateCache {
     /// Get DLMM bin arrays for a pool, if available.
     pub fn get_bin_arrays(&self, pool: &Pubkey) -> Option<Vec<DlmmBinArray>> {
         self.bin_arrays.get(pool).map(|v| v.value().clone())
+    }
+
+    /// Store CLMM tick arrays for a pool.
+    pub fn set_tick_arrays(&self, pool: Pubkey, arrays: Vec<ClmmTickArray>) {
+        self.tick_arrays.insert(pool, arrays);
+    }
+
+    /// Get CLMM tick arrays for a pool, if available.
+    pub fn get_tick_arrays(&self, pool: &Pubkey) -> Option<Vec<ClmmTickArray>> {
+        self.tick_arrays.get(pool).map(|v| v.value().clone())
     }
 
     /// Evict pools that haven't been updated in 10 minutes.

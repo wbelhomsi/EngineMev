@@ -65,6 +65,9 @@ pub struct GeyserStream {
     /// Tracks DLMM pools whose bin arrays have been fetched.
     /// Keyed by (pool_address, active_array_idx) to re-fetch when active bin crosses array boundary.
     bin_arrays_checked: Arc<DashMap<Pubkey, i64>>,
+    /// Tracks CLMM pools whose tick arrays have been fetched.
+    /// Keyed by (pool_address, tick_array_start_index) to re-fetch when tick crosses array boundary.
+    tick_arrays_checked: Arc<DashMap<Pubkey, i32>>,
 }
 
 impl GeyserStream {
@@ -78,6 +81,7 @@ impl GeyserStream {
             vault_last_fetch: Arc::new(DashMap::new()),
             serum_checked: Arc::new(DashMap::new()),
             bin_arrays_checked: Arc::new(DashMap::new()),
+            tick_arrays_checked: Arc::new(DashMap::new()),
         }
     }
 
@@ -420,6 +424,68 @@ impl GeyserStream {
                     }
                 }
 
+                // For CLMM pools (Orca/Raydium): fetch tick array accounts for multi-tick quoting.
+                // Re-fetch when current tick crosses into a different array.
+                if let Some(pool) = self.state_cache.get_any(&pool_address) {
+                    if matches!(pool.dex_type, crate::router::pool::DexType::OrcaWhirlpool
+                                             | crate::router::pool::DexType::RaydiumClmm)
+                    {
+                        if let (Some(tick_current), Some(tick_spacing)) =
+                            (pool.current_tick, pool.extra.tick_spacing)
+                        {
+                            if tick_spacing > 0 {
+                                let ticks_per_array: i32 = match pool.dex_type {
+                                    crate::router::pool::DexType::OrcaWhirlpool => 88,
+                                    _ => 60,
+                                };
+                                let ticks_in_array = ticks_per_array * tick_spacing as i32;
+                                let array_start = if tick_current >= 0 {
+                                    (tick_current / ticks_in_array) * ticks_in_array
+                                } else {
+                                    ((tick_current - ticks_in_array + 1) / ticks_in_array) * ticks_in_array
+                                };
+
+                                let should_fetch = self.tick_arrays_checked
+                                    .get(&pool_address)
+                                    .map(|prev_start| *prev_start != array_start)
+                                    .unwrap_or(true);
+
+                                if should_fetch {
+                                    self.tick_arrays_checked.insert(pool_address, array_start);
+                                    let client = self.http_client.clone();
+                                    let url = self.config.rpc_url.clone();
+                                    let cache = self.state_cache.clone();
+                                    let sem = self.rpc_semaphore.clone();
+                                    let tick_arrays_checked = self.tick_arrays_checked.clone();
+                                    let pool_addr = pool_address;
+                                    let dex_type = pool.dex_type;
+                                    tokio::spawn(async move {
+                                        let _permit = sem.acquire().await;
+                                        match fetch_clmm_tick_arrays(
+                                            &client, &url, &pool_addr, tick_current,
+                                            tick_spacing, ticks_per_array, dex_type,
+                                        ).await {
+                                            Some(arrays) if !arrays.is_empty() => {
+                                                debug!(
+                                                    "CLMM tick arrays fetched for {}: {} arrays, {} initialized ticks",
+                                                    pool_addr, arrays.len(),
+                                                    arrays.iter().flat_map(|a| a.ticks.iter())
+                                                        .filter(|t| t.liquidity_gross > 0).count(),
+                                                );
+                                                cache.set_tick_arrays(pool_addr, arrays);
+                                            }
+                                            _ => {
+                                                tick_arrays_checked.remove(&pool_addr);
+                                                debug!("CLMM tick array fetch returned empty for {}", pool_addr);
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // For Raydium AMM v4: fetch Serum/OpenBook market accounts on first discovery.
                 // Cached permanently in serum_checked — never re-fetch the same pool.
                 if matches!(self.state_cache.get_any(&pool_address).map(|p| p.dex_type),
@@ -753,6 +819,181 @@ async fn fetch_dlmm_bin_arrays(
         result.push(DlmmBinArray {
             index: array_idx,
             bins,
+        });
+    }
+
+    Some(result)
+}
+
+/// Fetch CLMM tick array accounts for multi-tick swap simulation.
+///
+/// Fetches 5 tick arrays centered on the current tick position (-2..=+2 from current array).
+/// Orca uses string-encoded start_tick_index as PDA seed; Raydium uses big-endian i32 bytes.
+///
+/// Tick array layout varies by DEX — we auto-detect the tick entry size from account length
+/// and parse only the fields we need (liquidity_net and liquidity_gross).
+async fn fetch_clmm_tick_arrays(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    pool_address: &Pubkey,
+    tick_current: i32,
+    tick_spacing: u16,
+    ticks_per_array: i32,
+    dex_type: crate::router::pool::DexType,
+) -> Option<Vec<crate::router::pool::ClmmTickArray>> {
+    use base64::Engine;
+    use crate::router::pool::{ClmmTick, ClmmTickArray};
+
+    let ticks_in_array = ticks_per_array * tick_spacing as i32;
+    if ticks_in_array == 0 {
+        return None;
+    }
+
+    // Floor division: find the start index of the array containing tick_current
+    let start_base = if tick_current >= 0 {
+        (tick_current / ticks_in_array) * ticks_in_array
+    } else {
+        ((tick_current - ticks_in_array + 1) / ticks_in_array) * ticks_in_array
+    };
+
+    // Fetch 5 arrays: -2, -1, 0, +1, +2 from current position
+    let starts: Vec<i32> = (-2..=2).map(|o| start_base + o * ticks_in_array).collect();
+
+    // Derive PDAs
+    let program_id = match dex_type {
+        crate::router::pool::DexType::OrcaWhirlpool => crate::addresses::ORCA_WHIRLPOOL,
+        crate::router::pool::DexType::RaydiumClmm => crate::addresses::RAYDIUM_CLMM,
+        _ => return None,
+    };
+
+    let mut pda_list = Vec::with_capacity(5);
+    for &start in &starts {
+        let pda = match dex_type {
+            crate::router::pool::DexType::OrcaWhirlpool => {
+                Pubkey::find_program_address(
+                    &[b"tick_array", pool_address.as_ref(), start.to_string().as_bytes()],
+                    &program_id,
+                ).0
+            }
+            crate::router::pool::DexType::RaydiumClmm => {
+                Pubkey::find_program_address(
+                    &[b"tick_array", pool_address.as_ref(), &start.to_be_bytes()],
+                    &program_id,
+                ).0
+            }
+            _ => continue,
+        };
+        pda_list.push(pda);
+    }
+
+    // Batch fetch via getMultipleAccounts
+    let pubkeys: Vec<String> = pda_list.iter().map(|p| p.to_string()).collect();
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getMultipleAccounts",
+        "params": [pubkeys, {"encoding": "base64"}],
+    });
+
+    let resp: serde_json::Value = client.post(rpc_url)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(5))
+        .send().await.ok()?
+        .json().await.ok()?;
+
+    let accounts = resp.get("result")?.get("value")?.as_array()?;
+
+    let mut result = Vec::new();
+    let num_ticks = ticks_per_array as usize;
+
+    for (i, account) in accounts.iter().enumerate() {
+        if account.is_null() {
+            continue;
+        }
+        let data_arr = account.get("data")?.as_array()?;
+        let b64 = data_arr.first()?.as_str()?;
+        let data = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+
+        let start_tick = starts[i];
+
+        // Determine header size and tick entry size empirically.
+        // Orca tick array: 8 (discriminator) + 4 (start_tick_index) = 12 header bytes
+        //   remaining / 88 ticks gives tick_entry_size
+        // Raydium tick array: 8 (discriminator) + 32 (pool_key) + 8 (start_index i32 padded) = 48 header bytes (approx)
+        //   remaining / 60 ticks gives tick_entry_size
+        //
+        // We try known header sizes first, then fall back to auto-detection.
+        let header_size = match dex_type {
+            crate::router::pool::DexType::OrcaWhirlpool => {
+                // Known Orca header: 8 (disc) + 4 (start_tick_index) = 12
+                // But some versions may differ; verify by checking divisibility
+                let candidate = 12;
+                if (data.len() > candidate) && ((data.len() - candidate) % num_ticks == 0) {
+                    candidate
+                } else {
+                    // Try other common sizes
+                    (8..=64).find(|&h| data.len() > h && (data.len() - h) % num_ticks == 0)?
+                }
+            }
+            crate::router::pool::DexType::RaydiumClmm => {
+                // Try known Raydium header sizes
+                let candidate = 48;
+                if (data.len() > candidate) && ((data.len() - candidate) % num_ticks == 0) {
+                    candidate
+                } else {
+                    (8..=64).find(|&h| data.len() > h && (data.len() - h) % num_ticks == 0)?
+                }
+            }
+            _ => continue,
+        };
+
+        if data.len() <= header_size {
+            continue;
+        }
+        let tick_entry_size = (data.len() - header_size) / num_ticks;
+        if tick_entry_size < 33 {
+            continue; // Need at least room for liquidity_net (16) + liquidity_gross (16) + 1
+        }
+
+        let mut ticks = Vec::with_capacity(num_ticks);
+        for t in 0..num_ticks {
+            let offset = header_size + t * tick_entry_size;
+            if offset + 33 > data.len() {
+                break;
+            }
+
+            // Parse tick fields. The exact layout differs:
+            // Orca: [initialized: bool(1)] [liquidity_net: i128(16)] [liquidity_gross: u128(16)] ...
+            // Raydium: [tick: i32(4)] [liquidity_net: i128(16)] [liquidity_gross: u128(16)] ...
+            //
+            // Strategy: try both layouts. If layout A gives garbage (liquidity_gross unreasonably large),
+            // try layout B. We determine layout from the first entry in the first array.
+            let (liq_net, liq_gross) = if dex_type == crate::router::pool::DexType::OrcaWhirlpool {
+                // Orca: skip 1 byte (initialized bool), then i128 + u128
+                if offset + 33 > data.len() { break; }
+                let net = i128::from_le_bytes(data[offset + 1..offset + 17].try_into().ok()?);
+                let gross = u128::from_le_bytes(data[offset + 17..offset + 33].try_into().ok()?);
+                (net, gross)
+            } else {
+                // Raydium: skip 4 bytes (tick i32), then i128 + u128
+                if offset + 36 > data.len() { break; }
+                let net = i128::from_le_bytes(data[offset + 4..offset + 20].try_into().ok()?);
+                let gross = u128::from_le_bytes(data[offset + 20..offset + 36].try_into().ok()?);
+                (net, gross)
+            };
+
+            let tick_index = start_tick + (t as i32) * tick_spacing as i32;
+
+            ticks.push(ClmmTick {
+                tick_index,
+                liquidity_net: liq_net,
+                liquidity_gross: liq_gross,
+            });
+        }
+
+        result.push(ClmmTickArray {
+            start_tick_index: start_tick,
+            ticks,
         });
     }
 

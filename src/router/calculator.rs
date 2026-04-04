@@ -232,10 +232,12 @@ impl RouteCalculator {
         // Hop 1: base → other on pool_a
         let a_to_b_a = pool_a.is_a_to_b(base_mint)?;
         let bins_a = self.state_cache.get_bin_arrays(&pool_a.address);
-        let mid_amount = pool_a.get_output_amount_with_bins(
+        let ticks_a = self.state_cache.get_tick_arrays(&pool_a.address);
+        let mid_amount = pool_a.get_output_amount_with_cache(
             input_amount,
             a_to_b_a,
             bins_a.as_deref(),
+            ticks_a.as_deref(),
         )?;
 
         if mid_amount == 0 {
@@ -245,10 +247,12 @@ impl RouteCalculator {
         // Hop 2: other → base on pool_b
         let a_to_b_b = pool_b.is_a_to_b(other_mint)?;
         let bins_b = self.state_cache.get_bin_arrays(&pool_b.address);
-        let final_amount = pool_b.get_output_amount_with_bins(
+        let ticks_b = self.state_cache.get_tick_arrays(&pool_b.address);
+        let final_amount = pool_b.get_output_amount_with_cache(
             mid_amount,
             a_to_b_b,
             bins_b.as_deref(),
+            ticks_b.as_deref(),
         )?;
 
         let profit = (final_amount as i128) - (input_amount as i128);
@@ -291,24 +295,27 @@ impl RouteCalculator {
         // Hop 1: base → mid1
         let a_to_b_a = pool_a.is_a_to_b(base_mint)?;
         let bins_a = self.state_cache.get_bin_arrays(&pool_a.address);
-        let amount_1 = pool_a.get_output_amount_with_bins(
-            input_amount, a_to_b_a, bins_a.as_deref(),
+        let ticks_a = self.state_cache.get_tick_arrays(&pool_a.address);
+        let amount_1 = pool_a.get_output_amount_with_cache(
+            input_amount, a_to_b_a, bins_a.as_deref(), ticks_a.as_deref(),
         )?;
         if amount_1 == 0 { return None; }
 
         // Hop 2: mid1 → mid2
         let a_to_b_b = pool_b.is_a_to_b(mid1_mint)?;
         let bins_b = self.state_cache.get_bin_arrays(&pool_b.address);
-        let amount_2 = pool_b.get_output_amount_with_bins(
-            amount_1, a_to_b_b, bins_b.as_deref(),
+        let ticks_b = self.state_cache.get_tick_arrays(&pool_b.address);
+        let amount_2 = pool_b.get_output_amount_with_cache(
+            amount_1, a_to_b_b, bins_b.as_deref(), ticks_b.as_deref(),
         )?;
         if amount_2 == 0 { return None; }
 
         // Hop 3: mid2 → base
         let a_to_b_c = pool_c.is_a_to_b(mid2_mint)?;
         let bins_c = self.state_cache.get_bin_arrays(&pool_c.address);
-        let final_amount = pool_c.get_output_amount_with_bins(
-            amount_2, a_to_b_c, bins_c.as_deref(),
+        let ticks_c = self.state_cache.get_tick_arrays(&pool_c.address);
+        let final_amount = pool_c.get_output_amount_with_cache(
+            amount_2, a_to_b_c, bins_c.as_deref(), ticks_c.as_deref(),
         )?;
 
         let profit = (final_amount as i128) - (input_amount as i128);
