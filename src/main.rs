@@ -338,13 +338,41 @@ async fn main() -> Result<()> {
                 // When SKIP_SIMULATOR=true, bypass re-simulation for speed.
                 // The on-chain minimum_amount_out provides the safety net.
                 let sim_result = if skip_simulator && best_route.estimated_profit > 0 {
-                    let tip = (best_route.estimated_profit_lamports as f64 * config.tip_fraction) as u64;
-                    let net = best_route.estimated_profit_lamports.saturating_sub(tip);
-                    SimulationResult::Profitable {
-                        route: best_route.clone(),
-                        net_profit_lamports: best_route.estimated_profit_lamports,
-                        tip_lamports: tip,
-                        final_profit_lamports: net,
+                    // Sanity cap: reject routes with >10 SOL estimated profit (approximation artifact)
+                    let max_profit_lamports = 10_000_000_000u64; // 10 SOL
+                    if best_route.estimated_profit_lamports > max_profit_lamports {
+                        warn!("SKIP_SIMULATOR: sanity cap — estimated profit {} > 10 SOL, skipping",
+                              best_route.estimated_profit_lamports);
+                        SimulationResult::Unprofitable {
+                            reason: format!("sanity cap: estimated profit {} > 10 SOL",
+                                            best_route.estimated_profit_lamports),
+                        }
+                    } else {
+                        let tip = (best_route.estimated_profit_lamports as f64 * config.tip_fraction) as u64;
+                        // Safety: tip must be less than profit
+                        if tip >= best_route.estimated_profit_lamports {
+                            warn!("SKIP_SIMULATOR: tip {} >= profit {}, skipping",
+                                  tip, best_route.estimated_profit_lamports);
+                            SimulationResult::Unprofitable {
+                                reason: format!("tip {} >= profit {}",
+                                                tip, best_route.estimated_profit_lamports),
+                            }
+                        } else {
+                            let net = best_route.estimated_profit_lamports.saturating_sub(tip);
+                            if net < config.min_profit_lamports {
+                                SimulationResult::Unprofitable {
+                                    reason: format!("net profit {} < min {}",
+                                                    net, config.min_profit_lamports),
+                                }
+                            } else {
+                                SimulationResult::Profitable {
+                                    route: best_route.clone(),
+                                    net_profit_lamports: best_route.estimated_profit_lamports,
+                                    tip_lamports: tip,
+                                    final_profit_lamports: net,
+                                }
+                            }
+                        }
                     }
                 } else {
                     profit_simulator.simulate(best_route)

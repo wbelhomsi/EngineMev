@@ -607,7 +607,11 @@ pub fn parse_orca_whirlpool(pool_address: &Pubkey, data: &[u8], slot: u64) -> Op
         token_b_mint: mint_b,
         token_a_reserve: reserve_a,
         token_b_reserve: reserve_b,
-        fee_bps: DexType::OrcaWhirlpool.base_fee_bps(),
+        fee_bps: {
+            // fee_rate at offset 45, u16, units of 1/1,000,000 (3000 = 0.3% = 30 bps)
+            let fee_rate = u16::from_le_bytes(data[45..47].try_into().ok()?) as u64;
+            fee_rate / 100 // convert to bps
+        },
         current_tick: Some(tick),
         sqrt_price_x64: Some(sqrt_price_x64),
         liquidity: Some(liquidity),
@@ -666,7 +670,7 @@ pub fn parse_raydium_clmm(pool_address: &Pubkey, data: &[u8], slot: u64) -> Opti
         token_b_mint: mint_1,
         token_a_reserve: reserve_a,
         token_b_reserve: reserve_b,
-        fee_bps: DexType::RaydiumClmm.base_fee_bps(),
+        fee_bps: 25, // Default 25 bps (0.25%) — most common CLMM fee tier. Actual fee is in amm_config account.
         current_tick: Some(tick),
         sqrt_price_x64: Some(sqrt_price_x64),
         liquidity: Some(liquidity),
@@ -708,6 +712,10 @@ pub fn parse_meteora_dlmm(pool_address: &Pubkey, data: &[u8], slot: u64) -> Opti
     }
 
     let active_id = i32::from_le_bytes(data[76..80].try_into().ok()?);
+    // Pitfall #17: active_id max is ~443636, values like 8388608 are garbage
+    if active_id.unsigned_abs() > 500_000 {
+        return None;
+    }
     let bin_step = u16::from_le_bytes(data[80..82].try_into().ok()?);
     let mint_x = Pubkey::new_from_array(data[88..120].try_into().ok()?);
     let mint_y = Pubkey::new_from_array(data[120..152].try_into().ok()?);

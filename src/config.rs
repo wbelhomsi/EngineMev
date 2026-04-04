@@ -260,6 +260,12 @@ impl BotConfig {
             .unwrap_or_else(|_| "0.50".to_string())
             .parse()?;
 
+        anyhow::ensure!(
+            tip_fraction > 0.0 && tip_fraction < 1.0,
+            "TIP_FRACTION must be between 0 and 1 (exclusive), got {}",
+            tip_fraction
+        );
+
         let min_profit_lamports: u64 = std::env::var("MIN_PROFIT_LAMPORTS")
             .unwrap_or_else(|_| "100000".to_string()) // 0.0001 SOL
             .parse()?;
