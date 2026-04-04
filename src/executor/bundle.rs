@@ -46,6 +46,12 @@ pub struct BundleBuilder {
     arb_guard_program_id: Option<Pubkey>,
 }
 
+/// Client-side mirror of on-chain HopParams for serialization.
+struct HopParamsClient {
+    dex_type: u8,
+    a_to_b: bool,
+}
+
 impl BundleBuilder {
     pub fn new(
         searcher_keypair: Keypair,
@@ -68,6 +74,84 @@ impl BundleBuilder {
     ) -> Result<Vec<Instruction>> {
         let mut instructions = Vec::with_capacity(route.hop_count() * 3 + 6);
         let wsol = *WSOL_MINT;
+
+        // If arb-guard CPI executor is available and ALL hops are Orca, use execute_arb
+        if self.arb_guard_program_id.is_some()
+            && route.hops.iter().all(|h| h.dex_type == DexType::OrcaWhirlpool)
+        {
+            let mut instructions = Vec::with_capacity(8);
+            let compute_budget_program = *COMPUTE_BUDGET_PROGRAM;
+            let signer_pubkey = self.searcher_keypair.pubkey();
+
+            // Compute budget
+            let mut cu_limit_data = vec![2u8];
+            cu_limit_data.extend_from_slice(&400_000u32.to_le_bytes());
+            instructions.push(Instruction { program_id: compute_budget_program, accounts: vec![], data: cu_limit_data });
+            let mut cu_price_data = vec![3u8];
+            cu_price_data.extend_from_slice(&1_000u64.to_le_bytes());
+            instructions.push(Instruction { program_id: compute_budget_program, accounts: vec![], data: cu_price_data });
+
+            // ATA creates (reuse existing logic pattern)
+            let ata_program = *ATA_PROGRAM;
+            let token_program = *SPL_TOKEN_PROGRAM;
+            let mut ata_mints: Vec<(Pubkey, Pubkey)> = Vec::new();
+            for hop in &route.hops {
+                for mint in [hop.input_mint, hop.output_mint] {
+                    if !ata_mints.iter().any(|(m, _)| *m == mint) {
+                        let prog = if mint == wsol { token_program } else {
+                            self.state_cache.get_mint_program(&mint).unwrap_or(token_program)
+                        };
+                        ata_mints.push((mint, prog));
+                    }
+                }
+            }
+            for (mint, mint_token_program) in &ata_mints {
+                let ata = derive_ata_with_program(&signer_pubkey, mint, mint_token_program);
+                instructions.push(Instruction {
+                    program_id: ata_program,
+                    accounts: vec![
+                        AccountMeta::new(signer_pubkey, true),
+                        AccountMeta::new(ata, false),
+                        AccountMeta::new_readonly(signer_pubkey, false),
+                        AccountMeta::new_readonly(*mint, false),
+                        AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                        AccountMeta::new_readonly(*mint_token_program, false),
+                    ],
+                    data: vec![1],
+                });
+            }
+
+            // wSOL wrap (if first hop input is wSOL)
+            if !route.hops.is_empty() && route.hops[0].input_mint == wsol {
+                let wsol_ata = derive_ata(&signer_pubkey, &wsol);
+                instructions.push(system_instruction::transfer(&signer_pubkey, &wsol_ata, route.input_amount));
+                instructions.push(Instruction {
+                    program_id: *SPL_TOKEN_PROGRAM,
+                    accounts: vec![AccountMeta::new(wsol_ata, false)],
+                    data: vec![17],
+                });
+            }
+
+            // The single execute_arb IX
+            instructions.push(self.build_execute_arb_ix(route, min_final_output)?);
+
+            // wSOL unwrap (if last hop output is wSOL)
+            if !route.hops.is_empty() && route.hops.last().unwrap().output_mint == wsol {
+                let wsol_ata = derive_ata(&signer_pubkey, &wsol);
+                instructions.push(Instruction {
+                    program_id: *SPL_TOKEN_PROGRAM,
+                    accounts: vec![
+                        AccountMeta::new(wsol_ata, false),
+                        AccountMeta::new(signer_pubkey, false),
+                        AccountMeta::new_readonly(signer_pubkey, true),
+                    ],
+                    data: vec![9],
+                });
+            }
+
+            debug!("Built {} arb instructions (CPI executor) for {} hops", instructions.len(), route.hop_count());
+            return Ok(instructions);
+        }
 
         // Optional: arb-guard start_check (records pre-swap wSOL ATA balance)
         if let Some(ref guard_program) = self.arb_guard_program_id {
@@ -295,6 +379,120 @@ impl BundleBuilder {
                 ).ok_or_else(|| anyhow::anyhow!("Missing pool data for Manifest"))
             }
         }
+    }
+
+    /// Build a single `execute_arb` CPI instruction that atomically swaps through
+    /// all hops via the arb-guard on-chain program.  Currently supports Orca
+    /// Whirlpool hops only; returns an error for mixed-DEX or non-Orca routes.
+    pub fn build_execute_arb_ix(
+        &self,
+        route: &ArbRoute,
+        min_amount_out: u64,
+    ) -> Result<Instruction> {
+        let guard_program = self.arb_guard_program_id
+            .ok_or_else(|| anyhow::anyhow!("arb_guard_program_id not set"))?;
+
+        // Currently only Orca Whirlpool is wired up for CPI
+        if !route.hops.iter().all(|h| h.dex_type == DexType::OrcaWhirlpool) {
+            anyhow::bail!("execute_arb CPI only supports OrcaWhirlpool hops");
+        }
+
+        let signer_pubkey = self.searcher_keypair.pubkey();
+        let token_program = *SPL_TOKEN_PROGRAM;
+        let memo_program = *MEMO_PROGRAM;
+        let orca_program = crate::config::programs::orca_whirlpool();
+
+        let first_hop = route.hops.first()
+            .ok_or_else(|| anyhow::anyhow!("Route has no hops"))?;
+
+        let input_token_account = derive_ata(&signer_pubkey, &first_hop.input_mint);
+
+        // Fixed accounts [0..6]
+        let mut accounts = vec![
+            AccountMeta::new(signer_pubkey, true),                   // [0] signer
+            AccountMeta::new_readonly(token_program, false),         // [1] token_program
+            AccountMeta::new_readonly(memo_program, false),          // [2] memo_program
+            AccountMeta::new(input_token_account, false),            // [3] input_token_account
+            AccountMeta::new_readonly(first_hop.input_mint, false),  // [4] input_mint
+            AccountMeta::new_readonly(orca_program, false),          // [5] orca_program
+        ];
+
+        let mut hop_params: Vec<HopParamsClient> = Vec::with_capacity(route.hops.len());
+
+        for hop in &route.hops {
+            let pool = self.state_cache.get_any(&hop.pool_address)
+                .ok_or_else(|| anyhow::anyhow!("Pool not found: {}", hop.pool_address))?;
+            let extra = &pool.extra;
+            let vault_a = extra.vault_a
+                .ok_or_else(|| anyhow::anyhow!("Missing vault_a for pool {}", hop.pool_address))?;
+            let vault_b = extra.vault_b
+                .ok_or_else(|| anyhow::anyhow!("Missing vault_b for pool {}", hop.pool_address))?;
+            let tick_spacing = extra.tick_spacing
+                .ok_or_else(|| anyhow::anyhow!("Missing tick_spacing for pool {}", hop.pool_address))?;
+
+            let a_to_b = hop.input_mint == pool.token_a_mint;
+
+            // Oracle PDA
+            let (oracle, _) = Pubkey::find_program_address(
+                &[b"oracle", pool.address.as_ref()],
+                &orca_program,
+            );
+
+            // Tick array PDAs (same logic as build_orca_whirlpool_swap_ix)
+            let tick_current = pool.current_tick.unwrap_or(0);
+            let ticks_in_array: i32 = 88 * tick_spacing as i32;
+            let start_base = floor_div(tick_current, ticks_in_array) * ticks_in_array;
+
+            let offsets: [i32; 3] = if a_to_b {
+                [0, -1, -2]
+            } else if tick_current + tick_spacing as i32 >= start_base + ticks_in_array {
+                [1, 2, 3]
+            } else {
+                [0, 1, 2]
+            };
+
+            let tick_arrays: Vec<Pubkey> = offsets.iter().map(|&o| {
+                let start = start_base + o * ticks_in_array;
+                Pubkey::find_program_address(
+                    &[b"tick_array", pool.address.as_ref(), start.to_string().as_bytes()],
+                    &orca_program,
+                ).0
+            }).collect();
+
+            // Output ATA for this hop
+            let output_ata = derive_ata(&signer_pubkey, &hop.output_mint);
+
+            // Per-hop accounts (9 each)
+            accounts.push(AccountMeta::new(pool.address, false));       // whirlpool
+            accounts.push(AccountMeta::new(vault_a, false));            // vault_a
+            accounts.push(AccountMeta::new(vault_b, false));            // vault_b
+            accounts.push(AccountMeta::new(tick_arrays[0], false));     // tick_array_0
+            accounts.push(AccountMeta::new(tick_arrays[1], false));     // tick_array_1
+            accounts.push(AccountMeta::new(tick_arrays[2], false));     // tick_array_2
+            accounts.push(AccountMeta::new(oracle, false));             // oracle
+            accounts.push(AccountMeta::new(output_ata, false));         // output_ata
+            accounts.push(AccountMeta::new_readonly(hop.output_mint, false)); // output_mint
+
+            hop_params.push(HopParamsClient { dex_type: 0, a_to_b });
+        }
+
+        // Serialize instruction data
+        let disc = anchor_discriminator("execute_arb");
+        let mut data = Vec::with_capacity(8 + 8 + 8 + 4 + hop_params.len() * 2);
+        data.extend_from_slice(&disc);
+        data.extend_from_slice(&route.input_amount.to_le_bytes());
+        data.extend_from_slice(&min_amount_out.to_le_bytes());
+        data.extend_from_slice(&(hop_params.len() as u32).to_le_bytes()); // Borsh Vec prefix
+        for hp in &hop_params {
+            data.push(hp.dex_type);
+            data.push(if hp.a_to_b { 1u8 } else { 0u8 });
+        }
+
+        Ok(Instruction {
+            program_id: guard_program,
+            accounts,
+            data,
+        })
     }
 
 }
