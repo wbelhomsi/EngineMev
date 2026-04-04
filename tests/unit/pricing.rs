@@ -256,7 +256,7 @@ fn clmm_high_liquidity_low_slippage() {
     let output = pool.get_output_amount(1_000, true).unwrap();
     // Fee = 0.3%, so output ~ 1000 * 0.997 = 997
     assert!(
-        output >= 996 && output <= 998,
+        (996..=998).contains(&output),
         "high liquidity should give ~997 output for 1000 input at 0.3% fee, got {}",
         output
     );

@@ -216,7 +216,7 @@ pub async fn fetch_lst_rates(
             continue;
         }
         let rate = total_lamports as f64 / supply as f64;
-        if rate < 0.5 || rate > 5.0 {
+        if !(0.5..=5.0).contains(&rate) {
             warn!("Stake pool {} rate out of range: {:.6}", lst_names[i], rate);
             continue;
         }

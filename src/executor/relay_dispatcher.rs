@@ -5,7 +5,7 @@ use solana_sdk::{
 };
 use tracing::{info, warn};
 
-use super::relays::{Relay, RelayResult};
+use super::relays::Relay;
 
 /// Dispatches bundles to all configured relays concurrently.
 ///

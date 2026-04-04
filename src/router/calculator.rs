@@ -1,5 +1,5 @@
 use solana_sdk::pubkey::Pubkey;
-use tracing::{debug, trace};
+use tracing::debug;
 
 use crate::router::pool::{ArbRoute, DexType, DetectedSwap, RouteHop};
 use crate::state::StateCache;
@@ -34,7 +34,7 @@ impl RouteCalculator {
         let mut routes = Vec::new();
 
         // Get the pool state for the swapped pool
-        let pool_state = match self.state_cache.get_any(&swap.pool_address) {
+        let _pool_state = match self.state_cache.get_any(&swap.pool_address) {
             Some(s) => s,
             None => {
                 debug!("No cached state for pool {}", swap.pool_address);

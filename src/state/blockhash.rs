@@ -17,6 +17,12 @@ pub struct BlockhashCache {
     inner: Arc<RwLock<Option<BlockhashInfo>>>,
 }
 
+impl Default for BlockhashCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BlockhashCache {
     pub fn new() -> Self {
         Self {

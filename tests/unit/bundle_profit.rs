@@ -1,6 +1,6 @@
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Keypair;
-use solana_sdk::hash::Hash;
+
 use std::str::FromStr;
 use std::time::Duration;
 

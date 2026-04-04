@@ -1070,9 +1070,7 @@ pub fn build_meteora_dlmm_swap_ix(
     // pool discovery time and store in PoolExtra.
 
     // Bin array PDAs: compute the current bin array index and get a few in the swap direction
-    let bin_array_index = if active_id >= 0 {
-        active_id / 70
-    } else if active_id % 70 == 0 {
+    let bin_array_index = if active_id >= 0 || active_id % 70 == 0 {
         active_id / 70
     } else {
         active_id / 70 - 1
