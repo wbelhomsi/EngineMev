@@ -1,3 +1,4 @@
+use crate::addresses;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use std::sync::LazyLock;
@@ -20,56 +21,23 @@ pub fn redact_url(s: &str) -> String {
     result
 }
 
-/// Known DEX program IDs on Solana (parsed once via LazyLock, returned by copy).
+/// Re-export program IDs for backward compatibility.
+/// All addresses live in `crate::addresses`; these thin wrappers ease migration.
 pub mod programs {
-    use super::*;
+    use crate::addresses;
+    use solana_sdk::pubkey::Pubkey;
 
-    static RAYDIUM_AMM: LazyLock<Pubkey> = LazyLock::new(|| {
-        Pubkey::from_str("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8").unwrap()
-    });
-    static RAYDIUM_CLMM: LazyLock<Pubkey> = LazyLock::new(|| {
-        Pubkey::from_str("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK").unwrap()
-    });
-    static ORCA_WHIRLPOOL: LazyLock<Pubkey> = LazyLock::new(|| {
-        Pubkey::from_str("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc").unwrap()
-    });
-    static METEORA_DLMM: LazyLock<Pubkey> = LazyLock::new(|| {
-        Pubkey::from_str("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo").unwrap()
-    });
-    static RAYDIUM_CP: LazyLock<Pubkey> = LazyLock::new(|| {
-        Pubkey::from_str("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C").unwrap()
-    });
-    static METEORA_DAMM_V2: LazyLock<Pubkey> = LazyLock::new(|| {
-        Pubkey::from_str("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG").unwrap()
-    });
-    static JUPITER_V6: LazyLock<Pubkey> = LazyLock::new(|| {
-        Pubkey::from_str("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4").unwrap()
-    });
-    static SANCTUM_S_CONTROLLER: LazyLock<Pubkey> = LazyLock::new(|| {
-        Pubkey::from_str("5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx").unwrap()
-    });
-    // Fix: pricing program updated from old f1tU... to on-chain verified s1b6...
-    static SANCTUM_PRICING: LazyLock<Pubkey> = LazyLock::new(|| {
-        Pubkey::from_str("s1b6NRXj6ygNu1QMKXh2H9LUR2aPApAAm1UQ2DjdhNV").unwrap()
-    });
-    static PHOENIX_V1: LazyLock<Pubkey> = LazyLock::new(|| {
-        Pubkey::from_str("PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY").unwrap()
-    });
-    static MANIFEST: LazyLock<Pubkey> = LazyLock::new(|| {
-        Pubkey::from_str("MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms").unwrap()
-    });
-
-    pub fn raydium_amm() -> Pubkey { *RAYDIUM_AMM }
-    pub fn raydium_clmm() -> Pubkey { *RAYDIUM_CLMM }
-    pub fn orca_whirlpool() -> Pubkey { *ORCA_WHIRLPOOL }
-    pub fn meteora_dlmm() -> Pubkey { *METEORA_DLMM }
-    pub fn raydium_cp() -> Pubkey { *RAYDIUM_CP }
-    pub fn meteora_damm_v2() -> Pubkey { *METEORA_DAMM_V2 }
-    pub fn jupiter_v6() -> Pubkey { *JUPITER_V6 }
-    pub fn sanctum_s_controller() -> Pubkey { *SANCTUM_S_CONTROLLER }
-    pub fn sanctum_pricing() -> Pubkey { *SANCTUM_PRICING }
-    pub fn phoenix_v1() -> Pubkey { *PHOENIX_V1 }
-    pub fn manifest() -> Pubkey { *MANIFEST }
+    pub fn raydium_amm() -> Pubkey { addresses::RAYDIUM_AMM }
+    pub fn raydium_clmm() -> Pubkey { addresses::RAYDIUM_CLMM }
+    pub fn orca_whirlpool() -> Pubkey { addresses::ORCA_WHIRLPOOL }
+    pub fn meteora_dlmm() -> Pubkey { addresses::METEORA_DLMM }
+    pub fn raydium_cp() -> Pubkey { addresses::RAYDIUM_CP }
+    pub fn meteora_damm_v2() -> Pubkey { addresses::METEORA_DAMM_V2 }
+    pub fn jupiter_v6() -> Pubkey { addresses::JUPITER_V6 }
+    pub fn sanctum_s_controller() -> Pubkey { addresses::SANCTUM_S_CONTROLLER }
+    pub fn sanctum_pricing() -> Pubkey { addresses::SANCTUM_PRICING }
+    pub fn phoenix_v1() -> Pubkey { addresses::PHOENIX_V1 }
+    pub fn manifest() -> Pubkey { addresses::MANIFEST }
 }
 
 // ─── Static mints and calculators (parsed once) ────────────────────────────
@@ -317,17 +285,17 @@ impl BotConfig {
     /// DEX program IDs we monitor in the mempool
     pub fn monitored_programs(&self) -> Vec<Pubkey> {
         let mut programs = vec![
-            programs::raydium_amm(),
-            programs::raydium_clmm(),
-            programs::raydium_cp(),
-            programs::orca_whirlpool(),
-            programs::meteora_dlmm(),
-            programs::meteora_damm_v2(),
-            programs::phoenix_v1(),
-            programs::manifest(),
+            addresses::RAYDIUM_AMM,
+            addresses::RAYDIUM_CLMM,
+            addresses::RAYDIUM_CP,
+            addresses::ORCA_WHIRLPOOL,
+            addresses::METEORA_DLMM,
+            addresses::METEORA_DAMM_V2,
+            addresses::PHOENIX_V1,
+            addresses::MANIFEST,
         ];
         if self.lst_arb_enabled {
-            programs.push(programs::sanctum_s_controller());
+            programs.push(addresses::SANCTUM_S_CONTROLLER);
         }
         programs
     }

@@ -6,32 +6,10 @@ use solana_sdk::{
     signer::Signer,
     system_instruction,
 };
-use std::str::FromStr;
-use std::sync::LazyLock;
 use tracing::debug;
 
+use crate::addresses;
 use crate::router::pool::{ArbRoute, DexType};
-
-// ─── Static Pubkeys (parsed once, reused everywhere) ───────────────────────
-
-static SPL_TOKEN_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| {
-    Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap()
-});
-static TOKEN_2022_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| {
-    Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb").unwrap()
-});
-static ATA_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| {
-    Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap()
-});
-static COMPUTE_BUDGET_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| {
-    Pubkey::from_str("ComputeBudget111111111111111111111111111111").unwrap()
-});
-static MEMO_PROGRAM: LazyLock<Pubkey> = LazyLock::new(|| {
-    Pubkey::from_str("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr").unwrap()
-});
-static WSOL_MINT: LazyLock<Pubkey> = LazyLock::new(|| {
-    Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap()
-});
 
 /// Builds base arb instructions for relay submission.
 ///
@@ -73,14 +51,14 @@ impl BundleBuilder {
         min_final_output: u64,
     ) -> Result<Vec<Instruction>> {
         let mut instructions = Vec::with_capacity(route.hop_count() * 3 + 6);
-        let wsol = *WSOL_MINT;
+        let wsol = addresses::WSOL;
 
         // If arb-guard CPI executor is available and ALL hops are Orca, use execute_arb
         if self.arb_guard_program_id.is_some()
             && route.hops.iter().all(|h| h.dex_type == DexType::OrcaWhirlpool)
         {
             let mut instructions = Vec::with_capacity(8);
-            let compute_budget_program = *COMPUTE_BUDGET_PROGRAM;
+            let compute_budget_program = addresses::COMPUTE_BUDGET;
             let signer_pubkey = self.searcher_keypair.pubkey();
 
             // Compute budget
@@ -92,8 +70,8 @@ impl BundleBuilder {
             instructions.push(Instruction { program_id: compute_budget_program, accounts: vec![], data: cu_price_data });
 
             // ATA creates (reuse existing logic pattern)
-            let ata_program = *ATA_PROGRAM;
-            let token_program = *SPL_TOKEN_PROGRAM;
+            let ata_program = addresses::ATA_PROGRAM;
+            let token_program = addresses::SPL_TOKEN;
             let mut ata_mints: Vec<(Pubkey, Pubkey)> = Vec::new();
             for hop in &route.hops {
                 for mint in [hop.input_mint, hop.output_mint] {
@@ -126,7 +104,7 @@ impl BundleBuilder {
                 let wsol_ata = derive_ata(&signer_pubkey, &wsol);
                 instructions.push(system_instruction::transfer(&signer_pubkey, &wsol_ata, route.input_amount));
                 instructions.push(Instruction {
-                    program_id: *SPL_TOKEN_PROGRAM,
+                    program_id: addresses::SPL_TOKEN,
                     accounts: vec![AccountMeta::new(wsol_ata, false)],
                     data: vec![17],
                 });
@@ -139,7 +117,7 @@ impl BundleBuilder {
             if !route.hops.is_empty() && route.hops.last().unwrap().output_mint == wsol {
                 let wsol_ata = derive_ata(&signer_pubkey, &wsol);
                 instructions.push(Instruction {
-                    program_id: *SPL_TOKEN_PROGRAM,
+                    program_id: addresses::SPL_TOKEN,
                     accounts: vec![
                         AccountMeta::new(wsol_ata, false),
                         AccountMeta::new(signer_pubkey, false),
@@ -160,7 +138,7 @@ impl BundleBuilder {
         }
 
         // Compute budget: set unit limit and priority fee for Jito auction placement
-        let compute_budget_program = *COMPUTE_BUDGET_PROGRAM;
+        let compute_budget_program = addresses::COMPUTE_BUDGET;
         // SetComputeUnitLimit: instruction index 2, data = [2, limit_u32_le]
         let mut cu_limit_data = vec![2u8];
         cu_limit_data.extend_from_slice(&400_000u32.to_le_bytes());
@@ -179,8 +157,8 @@ impl BundleBuilder {
         });
 
         let signer_pubkey = self.searcher_keypair.pubkey();
-        let ata_program = *ATA_PROGRAM;
-        let token_program = *SPL_TOKEN_PROGRAM;
+        let ata_program = addresses::ATA_PROGRAM;
+        let token_program = addresses::SPL_TOKEN;
 
         // Collect unique mints and resolve their token program from RPC cache.
         // get_mint_program() is the authoritative source (fetched via getAccountInfo).
@@ -231,7 +209,7 @@ impl BundleBuilder {
             ));
             // SyncNative: tell the SPL Token program to update the wSOL balance
             instructions.push(Instruction {
-                program_id: *SPL_TOKEN_PROGRAM,
+                program_id: addresses::SPL_TOKEN,
                 accounts: vec![AccountMeta::new(wsol_ata, false)],
                 data: vec![17], // 17 = SyncNative instruction
             });
@@ -274,7 +252,7 @@ impl BundleBuilder {
             let wsol_ata = derive_ata(&signer_pubkey, &wsol);
             // CloseAccount: transfers remaining wSOL balance to signer as native SOL
             instructions.push(Instruction {
-                program_id: *SPL_TOKEN_PROGRAM,
+                program_id: addresses::SPL_TOKEN,
                 accounts: vec![
                     AccountMeta::new(wsol_ata, false),       // account to close
                     AccountMeta::new(signer_pubkey, false),   // destination for SOL
@@ -398,9 +376,9 @@ impl BundleBuilder {
         }
 
         let signer_pubkey = self.searcher_keypair.pubkey();
-        let token_program = *SPL_TOKEN_PROGRAM;
-        let memo_program = *MEMO_PROGRAM;
-        let orca_program = crate::config::programs::orca_whirlpool();
+        let token_program = addresses::SPL_TOKEN;
+        let memo_program = addresses::MEMO;
+        let orca_program = addresses::ORCA_WHIRLPOOL;
 
         let first_hop = route.hops.first()
             .ok_or_else(|| anyhow::anyhow!("Route has no hops"))?;
@@ -500,7 +478,7 @@ impl BundleBuilder {
 /// Derive an Associated Token Account address (SPL Token only).
 /// ATA = PDA([wallet, TOKEN_PROGRAM_ID, mint], ATA_PROGRAM_ID)
 fn derive_ata(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
-    derive_ata_with_program(wallet, mint, &SPL_TOKEN_PROGRAM)
+    derive_ata_with_program(wallet, mint, &addresses::SPL_TOKEN)
 }
 
 fn derive_ata_with_program(wallet: &Pubkey, mint: &Pubkey, token_program: &Pubkey) -> Pubkey {
@@ -509,7 +487,7 @@ fn derive_ata_with_program(wallet: &Pubkey, mint: &Pubkey, token_program: &Pubke
         token_program.as_ref(),
         mint.as_ref(),
     ];
-    let (ata, _) = Pubkey::find_program_address(seeds, &ATA_PROGRAM);
+    let (ata, _) = Pubkey::find_program_address(seeds, &addresses::ATA_PROGRAM);
     ata
 }
 
@@ -596,7 +574,7 @@ pub fn build_raydium_amm_swap_ix(
     let open_orders = extra.open_orders?;
     let nonce = extra.amm_nonce?;
 
-    let amm_program = crate::config::programs::raydium_amm();
+    let amm_program = addresses::RAYDIUM_AMM;
     let amm_authority = Pubkey::create_program_address(
         &[&[nonce]],
         &amm_program,
@@ -613,7 +591,7 @@ pub fn build_raydium_amm_swap_ix(
     data.extend_from_slice(&minimum_amount_out.to_le_bytes());
 
     let accounts = vec![
-        AccountMeta::new_readonly(*SPL_TOKEN_PROGRAM, false),
+        AccountMeta::new_readonly(addresses::SPL_TOKEN, false),
         AccountMeta::new(pool.address, false),
         AccountMeta::new_readonly(amm_authority, false),
         AccountMeta::new(open_orders, false),
@@ -665,7 +643,7 @@ pub fn build_sanctum_swap_ix(
     }
 
     // Group C: Pricing program + state
-    accounts.push(AccountMeta::new_readonly(crate::config::programs::sanctum_pricing(), false));
+    accounts.push(AccountMeta::new_readonly(addresses::SANCTUM_PRICING, false));
     accounts.push(AccountMeta::new_readonly(crate::config::sanctum_pricing_state(), false));
 
     // 27-byte Shank instruction data
@@ -679,7 +657,7 @@ pub fn build_sanctum_swap_ix(
     data.extend_from_slice(&amount_in.to_le_bytes());
 
     Some(Instruction {
-        program_id: crate::config::programs::sanctum_s_controller(),
+        program_id: addresses::SANCTUM_S_CONTROLLER,
         accounts,
         data,
     })
@@ -703,7 +681,7 @@ pub fn build_raydium_cp_swap_ix(
     let token_prog_a = extra.token_program_a?;
     let token_prog_b = extra.token_program_b?;
 
-    let cp_program = crate::config::programs::raydium_cp();
+    let cp_program = addresses::RAYDIUM_CP;
     let (authority, _) = Pubkey::find_program_address(
         &[b"vault_and_lp_mint_auth_seed"], &cp_program,
     );
@@ -759,7 +737,7 @@ pub fn build_damm_v2_swap_ix(
     let vault_a = extra.vault_a?;
     let vault_b = extra.vault_b?;
 
-    let damm_program = crate::config::programs::meteora_damm_v2();
+    let damm_program = addresses::METEORA_DAMM_V2;
     let (pool_authority, _) = Pubkey::find_program_address(&[], &damm_program);
     let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &damm_program);
 
@@ -767,8 +745,8 @@ pub fn build_damm_v2_swap_ix(
     let (input_vault, output_vault) = if a_to_b { (vault_a, vault_b) } else { (vault_b, vault_a) };
     let output_mint = if a_to_b { pool.token_b_mint } else { pool.token_a_mint };
 
-    let token_program_a = extra.token_program_a.unwrap_or(*SPL_TOKEN_PROGRAM);
-    let token_program_b = extra.token_program_b.unwrap_or(*SPL_TOKEN_PROGRAM);
+    let token_program_a = extra.token_program_a.unwrap_or(addresses::SPL_TOKEN);
+    let token_program_b = extra.token_program_b.unwrap_or(addresses::SPL_TOKEN);
 
     let input_token_program = if a_to_b { token_program_a } else { token_program_b };
     let output_token_program = if a_to_b { token_program_b } else { token_program_a };
@@ -832,10 +810,10 @@ pub fn build_orca_whirlpool_swap_ix(
     let vault_b = extra.vault_b?;
     let tick_spacing = extra.tick_spacing?;
 
-    let whirlpool_program = crate::config::programs::orca_whirlpool();
-    let token_program_a = extra.token_program_a.unwrap_or(*SPL_TOKEN_PROGRAM);
-    let token_program_b = extra.token_program_b.unwrap_or(*SPL_TOKEN_PROGRAM);
-    let memo_program = *MEMO_PROGRAM;
+    let whirlpool_program = addresses::ORCA_WHIRLPOOL;
+    let token_program_a = extra.token_program_a.unwrap_or(addresses::SPL_TOKEN);
+    let token_program_b = extra.token_program_b.unwrap_or(addresses::SPL_TOKEN);
+    let memo_program = addresses::MEMO;
 
     let a_to_b = input_mint == pool.token_a_mint;
     let tick_current = pool.current_tick.unwrap_or(0);
@@ -925,10 +903,10 @@ pub fn build_raydium_clmm_swap_ix(
     let amm_config = extra.config?;
     let observation_state = extra.observation?;
 
-    let clmm_program = crate::config::programs::raydium_clmm();
-    let token_program = *SPL_TOKEN_PROGRAM;
-    let token_2022_program = *TOKEN_2022_PROGRAM;
-    let memo_program = *MEMO_PROGRAM;
+    let clmm_program = addresses::RAYDIUM_CLMM;
+    let token_program = addresses::SPL_TOKEN;
+    let token_2022_program = addresses::TOKEN_2022;
+    let memo_program = addresses::MEMO;
 
     let a_to_b = input_mint == pool.token_a_mint;
     let tick_current = pool.current_tick.unwrap_or(0);
@@ -937,14 +915,14 @@ pub fn build_raydium_clmm_swap_ix(
     let output_mint = if a_to_b { pool.token_b_mint } else { pool.token_a_mint };
 
     let input_token_program = if input_mint == pool.token_a_mint {
-        extra.token_program_a.unwrap_or(*SPL_TOKEN_PROGRAM)
+        extra.token_program_a.unwrap_or(addresses::SPL_TOKEN)
     } else {
-        extra.token_program_b.unwrap_or(*SPL_TOKEN_PROGRAM)
+        extra.token_program_b.unwrap_or(addresses::SPL_TOKEN)
     };
     let output_token_program = if output_mint == pool.token_a_mint {
-        extra.token_program_a.unwrap_or(*SPL_TOKEN_PROGRAM)
+        extra.token_program_a.unwrap_or(addresses::SPL_TOKEN)
     } else {
-        extra.token_program_b.unwrap_or(*SPL_TOKEN_PROGRAM)
+        extra.token_program_b.unwrap_or(addresses::SPL_TOKEN)
     };
     let user_input_ata = derive_ata_with_program(signer, &input_mint, &input_token_program);
     let user_output_ata = derive_ata_with_program(signer, &output_mint, &output_token_program);
@@ -1029,9 +1007,9 @@ pub fn build_meteora_dlmm_swap_ix(
     let vault_a = extra.vault_a?;  // reserve_x
     let vault_b = extra.vault_b?;  // reserve_y
 
-    let dlmm_program = crate::config::programs::meteora_dlmm();
-    let token_program = *SPL_TOKEN_PROGRAM;
-    let memo_program = *MEMO_PROGRAM;
+    let dlmm_program = addresses::METEORA_DLMM;
+    let token_program = addresses::SPL_TOKEN;
+    let memo_program = addresses::MEMO;
 
     let a_to_b = input_mint == pool.token_a_mint; // X -> Y
     let active_id = pool.current_tick.unwrap_or(0);
@@ -1147,8 +1125,8 @@ pub fn build_phoenix_swap_ix(
     let vault_a = pool.extra.vault_a?; // base vault
     let vault_b = pool.extra.vault_b?; // quote vault
 
-    let phoenix_program = crate::config::programs::phoenix_v1();
-    let token_program = *SPL_TOKEN_PROGRAM;
+    let phoenix_program = addresses::PHOENIX_V1;
+    let token_program = addresses::SPL_TOKEN;
 
     let (log_authority, _) = Pubkey::find_program_address(&[b"log"], &phoenix_program);
 
@@ -1205,8 +1183,8 @@ pub fn build_manifest_swap_ix(
     let vault_a = pool.extra.vault_a?; // base vault
     let vault_b = pool.extra.vault_b?; // quote vault
 
-    let manifest_program = crate::config::programs::manifest();
-    let token_program = *SPL_TOKEN_PROGRAM;
+    let manifest_program = addresses::MANIFEST;
+    let token_program = addresses::SPL_TOKEN;
     let system_program = solana_sdk::system_program::id();
 
     // token_a_mint = base, token_b_mint = quote
@@ -1242,8 +1220,8 @@ fn sanctum_swap_accounts_v2(
     input_mint: &Pubkey,
     output_mint: &Pubkey,
 ) -> Vec<AccountMeta> {
-    let s_controller = crate::config::programs::sanctum_s_controller();
-    let token_program = *SPL_TOKEN_PROGRAM;
+    let s_controller = addresses::SANCTUM_S_CONTROLLER;
+    let token_program = addresses::SPL_TOKEN;
 
     // PDAs
     let (pool_state_pda, _) = Pubkey::find_program_address(&[b"state"], &s_controller);
