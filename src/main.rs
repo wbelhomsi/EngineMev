@@ -124,7 +124,11 @@ async fn main() -> Result<()> {
 
     // Load searcher keypair
     let searcher_keypair = load_keypair(&config.searcher_keypair_path)?;
-    let bundle_builder = Arc::new(BundleBuilder::new(searcher_keypair.insecure_clone(), state_cache.clone()));
+    let bundle_builder = Arc::new(BundleBuilder::new(
+        searcher_keypair.insecure_clone(),
+        state_cache.clone(),
+        config.arb_guard_program_id,
+    ));
 
     // Load Address Lookup Table if configured (enables V0 versioned transactions)
     let alt_account: Option<Arc<solana_sdk::address_lookup_table::AddressLookupTableAccount>> =

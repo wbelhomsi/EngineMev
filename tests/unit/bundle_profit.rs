@@ -45,7 +45,7 @@ fn test_bundle_sets_min_out_on_final_hop() {
     state_cache.set_lst_index(other_mint, 5);
     state_cache.set_lst_index(base_mint, 1);
 
-    let builder = BundleBuilder::new(keypair, state_cache);
+    let builder = BundleBuilder::new(keypair, state_cache, None);
 
     let route = ArbRoute {
         hops: vec![

@@ -41,11 +41,18 @@ static WSOL_MINT: LazyLock<Pubkey> = LazyLock::new(|| {
 pub struct BundleBuilder {
     searcher_keypair: Keypair,
     state_cache: crate::state::StateCache,
+    /// Optional arb-guard program ID for on-chain profit verification.
+    /// When set, start_check is prepended and profit_check is appended to arb TXs.
+    arb_guard_program_id: Option<Pubkey>,
 }
 
 impl BundleBuilder {
-    pub fn new(searcher_keypair: Keypair, state_cache: crate::state::StateCache) -> Self {
-        Self { searcher_keypair, state_cache }
+    pub fn new(
+        searcher_keypair: Keypair,
+        state_cache: crate::state::StateCache,
+        arb_guard_program_id: Option<Pubkey>,
+    ) -> Self {
+        Self { searcher_keypair, state_cache, arb_guard_program_id }
     }
 
     pub fn signer_pubkey(&self) -> Pubkey {
@@ -59,7 +66,14 @@ impl BundleBuilder {
         route: &ArbRoute,
         min_final_output: u64,
     ) -> Result<Vec<Instruction>> {
-        let mut instructions = Vec::with_capacity(route.hop_count() * 3 + 4);
+        let mut instructions = Vec::with_capacity(route.hop_count() * 3 + 6);
+        let wsol = *WSOL_MINT;
+
+        // Optional: arb-guard start_check (records pre-swap wSOL ATA balance)
+        if let Some(ref guard_program) = self.arb_guard_program_id {
+            let wsol_ata = derive_ata(&self.searcher_keypair.pubkey(), &wsol);
+            instructions.push(build_guard_start_check_ix(guard_program, &self.searcher_keypair.pubkey(), &wsol_ata));
+        }
 
         // Compute budget: set unit limit and priority fee for Jito auction placement
         let compute_budget_program = *COMPUTE_BUDGET_PROGRAM;
@@ -88,7 +102,6 @@ impl BundleBuilder {
         // get_mint_program() is the authoritative source (fetched via getAccountInfo).
         // Pool state flags (extra.token_program_a/b) can be stale or wrong for Token-2022.
         // IMPORTANT: swap IX builders must also use this same resolution.
-        let wsol = *WSOL_MINT;
         let mut ata_mints: Vec<(Pubkey, Pubkey)> = Vec::new();
         for hop in &route.hops {
             for mint in [hop.input_mint, hop.output_mint] {
@@ -124,7 +137,6 @@ impl BundleBuilder {
 
         // If the first hop's input is wSOL, wrap native SOL into the wSOL ATA.
         // We hold native SOL but DEX swaps need wSOL (SPL Token).
-        let wsol = *WSOL_MINT;
         if !route.hops.is_empty() && route.hops[0].input_mint == wsol {
             let wsol_ata = derive_ata(&signer_pubkey, &wsol);
             // Transfer native SOL to wSOL ATA
@@ -154,6 +166,22 @@ impl BundleBuilder {
             };
             let ix = self.build_swap_instruction_with_min_out(hop, amount_in, min_out)?;
             instructions.push(ix);
+        }
+
+        // Optional: arb-guard profit_check BEFORE CloseAccount so the wSOL ATA
+        // balance is still readable. Reverts the entire TX if no profit detected.
+        if let Some(ref guard_program) = self.arb_guard_program_id {
+            let wsol_ata = derive_ata(&signer_pubkey, &wsol);
+            let min_profit: u64 = std::env::var("MIN_ON_CHAIN_PROFIT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            instructions.push(build_guard_profit_check_ix(
+                guard_program,
+                &signer_pubkey,
+                &wsol_ata,
+                min_profit,
+            ));
         }
 
         // If the last hop outputs wSOL, close the ATA to unwrap back to native SOL.
@@ -286,6 +314,75 @@ fn derive_ata_with_program(wallet: &Pubkey, mint: &Pubkey, token_program: &Pubke
     let (ata, _) = Pubkey::find_program_address(seeds, &ATA_PROGRAM);
     ata
 }
+
+// ─── Arb-Guard IX builders ───────────────────────────────────────────────────
+
+/// Compute Anchor instruction discriminator: sha256("global:<name>")[..8]
+fn anchor_discriminator(name: &str) -> [u8; 8] {
+    let mut hasher = solana_sdk::hash::Hasher::default();
+    hasher.hash(format!("global:{}", name).as_bytes());
+    let hash = hasher.result();
+    let mut disc = [0u8; 8];
+    disc.copy_from_slice(&hash.as_ref()[..8]);
+    disc
+}
+
+/// Derive the guard state PDA: seeds=[b"guard", authority]
+fn derive_guard_pda(program_id: &Pubkey, authority: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"guard", authority.as_ref()],
+        program_id,
+    ).0
+}
+
+/// Build start_check IX for arb-guard program.
+/// Records the wSOL ATA balance before swaps begin.
+fn build_guard_start_check_ix(
+    program_id: &Pubkey,
+    authority: &Pubkey,
+    token_account: &Pubkey,
+) -> Instruction {
+    let disc = anchor_discriminator("start_check");
+    let guard_state = derive_guard_pda(program_id, authority);
+
+    Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new(*authority, true),                         // authority (signer, mut for init_if_needed)
+            AccountMeta::new(guard_state, false),                       // guard_state PDA (mut)
+            AccountMeta::new_readonly(*token_account, false),           // token_account
+            AccountMeta::new_readonly(solana_sdk::system_program::id(), false), // system_program
+        ],
+        data: disc.to_vec(),
+    }
+}
+
+/// Build profit_check IX for arb-guard program.
+/// Verifies balance increased by at least min_profit, then unlocks the guard.
+fn build_guard_profit_check_ix(
+    program_id: &Pubkey,
+    authority: &Pubkey,
+    token_account: &Pubkey,
+    min_profit: u64,
+) -> Instruction {
+    let disc = anchor_discriminator("profit_check");
+    let guard_state = derive_guard_pda(program_id, authority);
+
+    let mut data = disc.to_vec();
+    data.extend_from_slice(&min_profit.to_le_bytes()); // Borsh-serialized u64
+
+    Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(*authority, true),   // authority (signer)
+            AccountMeta::new(guard_state, false),          // guard_state PDA (mut — updates locked flag)
+            AccountMeta::new_readonly(*token_account, false), // token_account
+        ],
+        data,
+    }
+}
+
+// ─── DEX swap IX builders ────────────────────────────────────────────────────
 
 /// Build a Raydium AMM v4 swap instruction with 9 accounts.
 pub fn build_raydium_amm_swap_ix(
