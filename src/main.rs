@@ -1,4 +1,4 @@
-use solana_mev_bot::{config, executor, mempool, router, state};
+use solana_mev_bot::{addresses, config, executor, mempool, router, state};
 
 use anyhow::Result;
 use crossbeam_channel::bounded;
@@ -541,7 +541,7 @@ async fn bootstrap_lst_indices(
 ) -> Result<()> {
     use base64::{engine::general_purpose, Engine as _};
 
-    let s_controller = config::programs::sanctum_s_controller();
+    let s_controller = addresses::SANCTUM_S_CONTROLLER;
     let (lst_state_list_pda, _) = Pubkey::find_program_address(&[b"lst-state-list"], &s_controller);
 
     let payload = serde_json::json!({
