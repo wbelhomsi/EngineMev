@@ -62,6 +62,9 @@ pub struct GeyserStream {
     /// Tracks Raydium AMM v4 pools whose Serum market accounts have been fetched.
     /// Once fetched, never re-fetch — Serum accounts don't change.
     serum_checked: Arc<DashMap<Pubkey, bool>>,
+    /// Tracks DLMM pools whose bin arrays have been fetched.
+    /// Keyed by (pool_address, active_array_idx) to re-fetch when active bin crosses array boundary.
+    bin_arrays_checked: Arc<DashMap<Pubkey, i64>>,
 }
 
 impl GeyserStream {
@@ -74,6 +77,7 @@ impl GeyserStream {
             bitmap_checked: Arc::new(DashMap::new()),
             vault_last_fetch: Arc::new(DashMap::new()),
             serum_checked: Arc::new(DashMap::new()),
+            bin_arrays_checked: Arc::new(DashMap::new()),
         }
     }
 
@@ -368,6 +372,54 @@ impl GeyserStream {
                         });
                 }
 
+                // For Meteora DLMM: fetch bin array accounts for bin-by-bin quoting.
+                // Re-fetch when active bin crosses into a different array (array_idx changed).
+                if let Some(pool) = self.state_cache.get_any(&pool_address) {
+                    if pool.dex_type == crate::router::pool::DexType::MeteoraDlmm {
+                        if let Some(active_id) = pool.current_tick {
+                            let array_idx = if active_id >= 0 {
+                                active_id as i64 / 70
+                            } else {
+                                (active_id as i64 - 69) / 70
+                            };
+                            let should_fetch = self.bin_arrays_checked
+                                .get(&pool_address)
+                                .map(|prev_idx| *prev_idx != array_idx)
+                                .unwrap_or(true);
+                            if should_fetch {
+                                self.bin_arrays_checked.insert(pool_address, array_idx);
+                                let client = self.http_client.clone();
+                                let url = self.config.rpc_url.clone();
+                                let cache = self.state_cache.clone();
+                                let sem = self.rpc_semaphore.clone();
+                                let bin_arrays_checked = self.bin_arrays_checked.clone();
+                                let pool_addr = pool_address;
+                                let bin_step = pool.fee_bps; // not used in fetch, but keep pool info
+                                let _ = bin_step; // suppress unused warning
+                                tokio::spawn(async move {
+                                    let _permit = sem.acquire().await;
+                                    match fetch_dlmm_bin_arrays(
+                                        &client, &url, &pool_addr, active_id,
+                                    ).await {
+                                        Some(arrays) if !arrays.is_empty() => {
+                                            debug!(
+                                                "DLMM bin arrays fetched for {}: {} arrays",
+                                                pool_addr, arrays.len()
+                                            );
+                                            cache.set_bin_arrays(pool_addr, arrays);
+                                        }
+                                        _ => {
+                                            // Remove so we retry on next update
+                                            bin_arrays_checked.remove(&pool_addr);
+                                            debug!("DLMM bin array fetch returned empty for {}", pool_addr);
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+
                 // For Raydium AMM v4: fetch Serum/OpenBook market accounts on first discovery.
                 // Cached permanently in serum_checked — never re-fetch the same pool.
                 if matches!(self.state_cache.get_any(&pool_address).map(|p| p.dex_type),
@@ -597,6 +649,114 @@ async fn fetch_serum_market_accounts(
     let asks = Pubkey::new_from_array(data[309..341].try_into().ok()?);
 
     Some((bids, asks, event_queue, coin_vault, pc_vault, vault_signer_nonce))
+}
+
+/// Fetch DLMM bin array accounts around the active bin for a pool.
+///
+/// Bin array PDA: seeds = [pool_address, bin_array_index.to_le_bytes()]
+/// Each bin array holds 70 bins. We fetch 3 arrays: the one containing active_id
+/// plus one neighbor on each side, giving coverage of 210 bins total.
+///
+/// On-chain bin layout per bin: amountX (i64, 8B) + amountY (i64, 8B) + price (u128, 16B) = 32B
+/// Bin array header: discriminator (8B) + index (i64, 8B) + version (1B) + padding (1B) + lb_pair (32B) = 50B
+/// Total per array: 50 + 70 * 32 = 2290 bytes
+async fn fetch_dlmm_bin_arrays(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    pool_address: &Pubkey,
+    active_id: i32,
+) -> Option<Vec<crate::router::pool::DlmmBinArray>> {
+    use base64::Engine;
+    use crate::router::pool::{DlmmBin, DlmmBinArray, DLMM_MAX_BIN_PER_ARRAY};
+
+    let dlmm_program = crate::addresses::METEORA_DLMM;
+    let bins_per_array = DLMM_MAX_BIN_PER_ARRAY as i64;
+
+    // Determine which array index contains active_id (floor division for negatives)
+    let active_array_idx = if active_id >= 0 {
+        active_id as i64 / bins_per_array
+    } else {
+        (active_id as i64 - (bins_per_array - 1)) / bins_per_array
+    };
+
+    // Fetch 3 arrays: active one plus neighbors
+    let indices = [active_array_idx - 1, active_array_idx, active_array_idx + 1];
+
+    // Derive PDAs for all 3
+    let mut addresses = Vec::with_capacity(3);
+    for &idx in &indices {
+        let (pda, _) = Pubkey::find_program_address(
+            &[pool_address.as_ref(), &idx.to_le_bytes()],
+            &dlmm_program,
+        );
+        addresses.push(pda);
+    }
+
+    // Batch fetch via getMultipleAccounts
+    let pubkeys: Vec<String> = addresses.iter().map(|p| p.to_string()).collect();
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getMultipleAccounts",
+        "params": [pubkeys, {"encoding": "base64"}],
+    });
+
+    let resp: serde_json::Value = client.post(rpc_url)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(5))
+        .send().await.ok()?
+        .json().await.ok()?;
+
+    let accounts = resp.get("result")?.get("value")?.as_array()?;
+
+    let mut result = Vec::new();
+
+    // Bin array layout constants
+    const HEADER_SIZE: usize = 50; // 8 (disc) + 8 (index) + 1 (version) + 1 (padding) + 32 (lb_pair)
+    const BIN_SIZE: usize = 32;    // 8 (amountX i64) + 8 (amountY i64) + 16 (price u128)
+    const EXPECTED_DATA_SIZE: usize = HEADER_SIZE + DLMM_MAX_BIN_PER_ARRAY * BIN_SIZE; // 2290
+
+    for (i, account) in accounts.iter().enumerate() {
+        if account.is_null() {
+            continue;
+        }
+        let data_arr = account.get("data")?.as_array()?;
+        let b64 = data_arr.first()?.as_str()?;
+        let data = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+
+        if data.len() < EXPECTED_DATA_SIZE {
+            continue;
+        }
+
+        let array_idx = indices[i];
+        let mut bins = Vec::with_capacity(DLMM_MAX_BIN_PER_ARRAY);
+
+        for b in 0..DLMM_MAX_BIN_PER_ARRAY {
+            let offset = HEADER_SIZE + b * BIN_SIZE;
+            // amountX and amountY are stored as i64 on-chain; negative values mean zero liquidity
+            let amount_x_raw = i64::from_le_bytes(
+                data[offset..offset + 8].try_into().ok()?,
+            );
+            let amount_y_raw = i64::from_le_bytes(
+                data[offset + 8..offset + 16].try_into().ok()?,
+            );
+            let price_q64 = u128::from_le_bytes(
+                data[offset + 16..offset + 32].try_into().ok()?,
+            );
+            bins.push(DlmmBin {
+                amount_x: amount_x_raw.max(0) as u64,
+                amount_y: amount_y_raw.max(0) as u64,
+                price_q64,
+            });
+        }
+
+        result.push(DlmmBinArray {
+            index: array_idx,
+            bins,
+        });
+    }
+
+    Some(result)
 }
 
 /// Approximate token reserves from a CLMM sqrt_price_x64 + liquidity.

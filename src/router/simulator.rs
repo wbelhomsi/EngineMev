@@ -89,7 +89,13 @@ impl ProfitSimulator {
                 }
             };
 
-            current_amount = match pool.get_output_amount(current_amount, a_to_b) {
+            // Use bin-by-bin quoting for DLMM pools when bin arrays are available
+            let bin_arrays = self.state_cache.get_bin_arrays(&hop.pool_address);
+            current_amount = match pool.get_output_amount_with_bins(
+                current_amount,
+                a_to_b,
+                bin_arrays.as_deref(),
+            ) {
                 Some(out) if out > 0 => out,
                 _ => {
                     return SimulationResult::Unprofitable {
