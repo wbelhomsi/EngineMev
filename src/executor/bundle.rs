@@ -84,31 +84,18 @@ impl BundleBuilder {
         let ata_program = *ATA_PROGRAM;
         let token_program = *SPL_TOKEN_PROGRAM;
 
-        // Collect unique mints and resolve their token program from the POOL STATE.
-        // Must use the same token program the swap IX builders will use (pool.extra.token_program_a/b)
-        // to ensure ATA addresses match. Using a different source (e.g., mint_programs cache) can
-        // produce different ATA addresses, causing "AccountNotInitialized" on-chain.
+        // Collect unique mints and resolve their token program from RPC cache.
+        // get_mint_program() is the authoritative source (fetched via getAccountInfo).
+        // Pool state flags (extra.token_program_a/b) can be stale or wrong for Token-2022.
+        // IMPORTANT: swap IX builders must also use this same resolution.
         let wsol = *WSOL_MINT;
         let mut ata_mints: Vec<(Pubkey, Pubkey)> = Vec::new();
         for hop in &route.hops {
-            // Get pool state to read per-side token programs
-            let pool = self.state_cache.get_any(&hop.pool_address);
             for mint in [hop.input_mint, hop.output_mint] {
                 if !ata_mints.iter().any(|(m, _)| *m == mint) {
                     let prog = if mint == wsol {
-                        token_program // wSOL is always SPL Token
-                    } else if let Some(ref p) = pool {
-                        // Use the pool's token program for this mint (same as swap IX builder)
-                        if mint == p.token_a_mint {
-                            p.extra.token_program_a.unwrap_or(token_program)
-                        } else if mint == p.token_b_mint {
-                            p.extra.token_program_b.unwrap_or(token_program)
-                        } else {
-                            // Mint not in this pool — try cache
-                            self.state_cache.get_mint_program(&mint).unwrap_or(token_program)
-                        }
+                        token_program
                     } else {
-                        // Pool not in cache — try mint program cache
                         self.state_cache.get_mint_program(&mint).unwrap_or(token_program)
                     };
                     ata_mints.push((mint, prog));
@@ -232,9 +219,12 @@ impl BundleBuilder {
             DexType::MeteoraDlmm => {
                 let pool = self.state_cache.get_any(&hop.pool_address)
                     .ok_or_else(|| anyhow::anyhow!("Pool not found for DLMM: {}", hop.pool_address))?;
+                // Use RPC-cached mint programs (authoritative) instead of pool.extra flags
+                let prog_a = self.state_cache.get_mint_program(&pool.token_a_mint);
+                let prog_b = self.state_cache.get_mint_program(&pool.token_b_mint);
                 build_meteora_dlmm_swap_ix(
                     &self.searcher_keypair.pubkey(), &pool, hop.input_mint,
-                    amount_in, minimum_amount_out,
+                    amount_in, minimum_amount_out, prog_a, prog_b,
                 ).ok_or_else(|| anyhow::anyhow!("Missing pool data for Meteora DLMM"))
             }
             DexType::MeteoraDammV2 => {
@@ -713,6 +703,9 @@ pub fn build_meteora_dlmm_swap_ix(
     input_mint: Pubkey,
     amount_in: u64,
     minimum_amount_out: u64,
+    // Token programs from authoritative RPC source (not pool.extra flags)
+    mint_a_program: Option<Pubkey>,
+    mint_b_program: Option<Pubkey>,
 ) -> Option<Instruction> {
     let extra = &pool.extra;
     let vault_a = extra.vault_a?;  // reserve_x
@@ -725,9 +718,13 @@ pub fn build_meteora_dlmm_swap_ix(
     let a_to_b = input_mint == pool.token_a_mint; // X -> Y
     let active_id = pool.current_tick.unwrap_or(0);
 
-    // Determine token programs for correct ATA derivation
-    let prog_a = extra.token_program_a.unwrap_or(token_program);
-    let prog_b = extra.token_program_b.unwrap_or(token_program);
+    // Use authoritative token programs (from RPC cache), falling back to pool.extra
+    let prog_a = mint_a_program
+        .or(extra.token_program_a)
+        .unwrap_or(token_program);
+    let prog_b = mint_b_program
+        .or(extra.token_program_b)
+        .unwrap_or(token_program);
     let (input_prog, output_prog) = if a_to_b { (prog_a, prog_b) } else { (prog_b, prog_a) };
     let output_mint = if a_to_b { pool.token_b_mint } else { pool.token_a_mint };
 

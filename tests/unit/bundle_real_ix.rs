@@ -309,7 +309,7 @@ fn test_meteora_dlmm_swap_ix_account_count() {
         best_ask_price: None,
     };
     let signer = Pubkey::new_unique();
-    let ix = build_meteora_dlmm_swap_ix(&signer, &pool, pool.token_a_mint, 2000, 1800);
+    let ix = build_meteora_dlmm_swap_ix(&signer, &pool, pool.token_a_mint, 2000, 1800, None, None);
     assert!(ix.is_some(), "Should produce an instruction with bitmap_extension");
     let ix = ix.unwrap();
     // 16 fixed + 3 bin arrays = 19 (includes memo program)
@@ -340,7 +340,7 @@ fn test_meteora_dlmm_swap_ix_discriminator() {
         best_ask_price: None,
     };
     let signer = Pubkey::new_unique();
-    let ix = build_meteora_dlmm_swap_ix(&signer, &pool, pool.token_a_mint, 2000, 1800).unwrap();
+    let ix = build_meteora_dlmm_swap_ix(&signer, &pool, pool.token_a_mint, 2000, 1800, None, None).unwrap();
     assert_eq!(&ix.data[0..8], &[0x41, 0x4b, 0x3f, 0x4c, 0xeb, 0x5b, 0x5b, 0x88]);
 }
 
@@ -363,7 +363,7 @@ fn test_meteora_dlmm_swap_ix_returns_none_without_vaults() {
         best_ask_price: None,
     };
     let signer = Pubkey::new_unique();
-    let ix = build_meteora_dlmm_swap_ix(&signer, &pool, pool.token_a_mint, 2000, 1800);
+    let ix = build_meteora_dlmm_swap_ix(&signer, &pool, pool.token_a_mint, 2000, 1800, None, None);
     assert!(ix.is_none(), "Should return None when vaults are missing");
 }
 
