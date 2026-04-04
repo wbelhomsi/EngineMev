@@ -1,49 +1,47 @@
 # Next Session TODO
 
-## Status: Orca + Raydium CP + DLMM swaps VERIFIED on Surfpool. 4/6 E2E tests passing.
+## Status: 3 DEX swaps verified on Surfpool. Engine runs live with bundle submissions. No profit landed yet.
 
-## Surfpool E2E Test Results
+## Surfpool E2E Tests: 4 PASSED, 2 IGNORED
 
 | Test | Status | Notes |
 |------|--------|-------|
-| `test_surfpool_starts` | ✅ PASS | Harness smoke test |
-| `test_orca_whirlpool_swap` | ✅ PASS | SOL→USDC on Orca, verified on-chain |
-| `test_raydium_cp_swap` | ✅ PASS | Fixed authority PDA seeds |
-| `test_meteora_dlmm_swap` | ✅ PASS | Token-2022 ATA resolved via RPC |
-| `test_raydium_clmm_swap` | ⏸ IGNORED | SqrtPriceLimitOverflow — needs Raydium-specific bounds |
-| `test_meteora_damm_v2_swap` | ⏸ IGNORED | AccountNotEnoughKeys — program may have been upgraded |
+| Harness smoke | ✅ PASS | |
+| Orca Whirlpool | ✅ PASS | SOL→USDC verified on-chain |
+| Raydium CP | ✅ PASS | Fixed authority PDA seeds |
+| Meteora DLMM | ✅ PASS | Token-2022 ATA via RPC resolution |
+| Raydium CLMM | ⏸ IGNORED | SqrtPriceLimitOverflow — wrong bounds or direction issue |
+| DAMM v2 | ⏸ IGNORED | AccountNotEnoughKeys — program upgraded |
 
 Run: `RPC_URL=$RPC_URL cargo test --features e2e_surfpool --test e2e_surfpool -- --test-threads=1`
 
-## Fixes Applied This Session
+## Why No Profit Yet
 
-### Critical
-- **Raydium CLMM data size**: 1544 bytes on mainnet (was matching only 1560 → missed ALL CLMM pools)
-- **Raydium CP authority PDA**: seeds=`["vault_and_lp_mint_auth_seed"]` (was empty `[]`)
-- **Token-2022 ATA resolution**: use RPC `getAccountInfo` owner as authoritative source
-- **SOL-only route filter**: only routes starting/ending with SOL (we only hold SOL)
-- **wSOL wrap/unwrap**: system_instruction::transfer + SyncNative before, CloseAccount after
-- **Per-relay bundles**: each relay owns tip+sign+send independently
-- **Sanctum Shank IX**: 1-byte discriminant, 27-byte data, 12+variable accounts
+Bundles are accepted by Jito/Astralane but don't land on-chain:
+1. **Speed** — ~300ms from detection to submission, faster searchers outbid us
+2. **Small profits** — 15K lamport opportunities are below competitive tip thresholds
+3. **Stale rates** — Sanctum virtual pool rates are hardcoded, not real-time
+4. **Limited DEXes** — CLMM and DAMM v2 disabled, reducing pool coverage
 
-### Infrastructure
-- Surfpool E2E test harness with subprocess lifecycle management
-- 5 per-DEX swap tests (3 passing, 2 ignored with known issues)
-- 85 unit tests + 4 legacy e2e tests + 4 Surfpool E2E tests
+## To Get First Profit
 
-## Remaining Work
+1. **Fix CLMM** — investigate SqrtPriceLimitOverflow, verify bounds against Raydium source
+2. **Real-time Sanctum rates** — fetch sol_value from LstStateList periodically
+3. **Reduce latency** — skip simulator, submit immediately after route found
+4. **Increase input** — use more SOL per swap for larger profits
+5. **Try off-hours** — less competition at night/weekends
 
-### To fix ignored tests
-1. **CLMM**: Investigate Raydium's actual MIN/MAX_SQRT_PRICE_X64 constants
-2. **DAMM v2**: Check if program was upgraded with new required accounts
+## Critical Bugs Fixed This Session
+- CLMM data size: 1544 bytes (was 1560 — missed ALL CLMM pools)
+- CP authority PDA: seeds=["vault_and_lp_mint_auth_seed"]
+- Token-2022 ATA: RPC-based mint owner resolution
+- SOL-only routes + wSOL wrap/unwrap
+- Per-relay bundles (each relay owns tip+sign+send)
+- min_final_output doesn't subtract tip (tip is separate IX)
+- Sanctum Shank IX (1-byte discriminant, verified 29 SIM SUCCESS)
 
-### To get first profitable trade
-1. Run with Orca + Raydium CP + DLMM routes only (proven DEXes)
-2. Focus on SOL-base routes with real Geyser-updated pool state
-3. Check if Jito-submitted bundles land (we know IX format is correct now)
-
-### Nice to have
-- Pipeline e2e tests (2-hop arb roundtrip, Token-2022 ATA, wSOL cycle)
-- Phoenix + Manifest e2e tests
-- Sanctum e2e tests
-- Address Lookup Tables for multi-hop routes
+## Test Coverage
+- 85 unit tests (all passing)
+- 4 legacy e2e tests (all passing)
+- 6 Surfpool e2e tests (4 passing, 2 ignored)
+- Surfpool 1.1.2 installed for local testing
