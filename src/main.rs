@@ -196,8 +196,12 @@ async fn main() -> Result<()> {
             let mut opportunities_found: u64 = 0;
             let mut bundles_submitted: u64 = 0;
             let simulate_bundles = std::env::var("SIMULATE_BUNDLES").map(|v| v == "true").unwrap_or(false);
+            let skip_simulator = std::env::var("SKIP_SIMULATOR").map(|v| v == "true").unwrap_or(false);
             let send_public = std::env::var("SEND_PUBLIC").map(|v| v == "true").unwrap_or(false);
             let mut public_sent = false;
+            if skip_simulator {
+                warn!("SKIP_SIMULATOR=true — bypassing profit simulation, relying on minimum_amount_out");
+            }
             if send_public {
                 warn!("SEND_PUBLIC=true — will send FIRST opportunity via public RPC (costs tx fee)");
             }
@@ -299,11 +303,25 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
-                // Simulate the best route
+                // Simulate (or skip) the best route
                 let best_route = &routes[0];
                 tracing::debug!("Best route: {} hops, est_profit={}, base_mint={}",
                     best_route.hop_count(), best_route.estimated_profit, best_route.base_mint);
-                let sim_result = profit_simulator.simulate(best_route);
+
+                // When SKIP_SIMULATOR=true, bypass re-simulation for speed.
+                // The on-chain minimum_amount_out provides the safety net.
+                let sim_result = if skip_simulator && best_route.estimated_profit > 0 {
+                    let tip = (best_route.estimated_profit_lamports as f64 * config.tip_fraction) as u64;
+                    let net = best_route.estimated_profit_lamports.saturating_sub(tip);
+                    SimulationResult::Profitable {
+                        route: best_route.clone(),
+                        net_profit_lamports: best_route.estimated_profit_lamports,
+                        tip_lamports: tip,
+                        final_profit_lamports: net,
+                    }
+                } else {
+                    profit_simulator.simulate(best_route)
+                };
 
                 match sim_result {
                     SimulationResult::Profitable {
