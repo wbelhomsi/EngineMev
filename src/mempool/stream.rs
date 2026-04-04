@@ -200,7 +200,7 @@ impl GeyserStream {
                 // Route to per-DEX parser based on account data size
                 let parsed = match data.len() {
                     653 => parse_orca_whirlpool(&pool_address, data, slot).map(|p| (p, None)),
-                    1560 => parse_raydium_clmm(&pool_address, data, slot).map(|p| (p, None)),
+                    1544 | 1560 => parse_raydium_clmm(&pool_address, data, slot).map(|p| (p, None)),
                     904 => parse_meteora_dlmm(&pool_address, data, slot).map(|p| (p, None)),
                     1112 => parse_meteora_damm_v2(&pool_address, data, slot).map(|p| (p, None)),
                     752 => parse_raydium_amm_v4(&pool_address, data, slot)
