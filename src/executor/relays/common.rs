@@ -88,7 +88,7 @@ pub fn build_signed_bundle_tx(
         match v0::Message::try_compile(
             &signer.pubkey(),
             &instructions,
-            &[alt_account.clone()],
+            std::slice::from_ref(alt_account),
             recent_blockhash,
         ) {
             Ok(v0_msg) => {

@@ -30,6 +30,10 @@ deploy_key_engineme.pub
 .DS_Store
 Thumbs.db
 
+# Coverage
+coverage/
+tarpaulin-report.html
+
 # Logs
 *.log
 programs/arb-guard/target/

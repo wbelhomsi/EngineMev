@@ -15,7 +15,7 @@ pub fn load_keypair(path: &str) -> Result<Keypair> {
         let bytes = bs58::decode(pk_b58.trim())
             .into_vec()
             .map_err(|e| anyhow::anyhow!("Invalid base58 SEARCHER_PRIVATE_KEY: {}", e))?;
-        let keypair = Keypair::from_bytes(&bytes)
+        let keypair = Keypair::try_from(bytes.as_slice())
             .map_err(|e| anyhow::anyhow!("Invalid keypair bytes: {}", e))?;
         info!("Loaded searcher keypair from SEARCHER_PRIVATE_KEY: {}", keypair.pubkey());
         return Ok(keypair);
@@ -26,7 +26,7 @@ pub fn load_keypair(path: &str) -> Result<Keypair> {
         .map_err(|e| anyhow::anyhow!("Failed to read keypair file {}: {}", path, e))?;
     let bytes: Vec<u8> = serde_json::from_str(&data)
         .map_err(|e| anyhow::anyhow!("Invalid keypair JSON in {}: {}", path, e))?;
-    let keypair = Keypair::from_bytes(&bytes)
+    let keypair = Keypair::try_from(bytes.as_slice())
         .map_err(|e| anyhow::anyhow!("Invalid keypair bytes in {}: {}", path, e))?;
     info!("Loaded searcher keypair from {}: {}", path, keypair.pubkey());
     Ok(keypair)

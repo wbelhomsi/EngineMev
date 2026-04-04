@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::router::pool::{DexType, PoolState};
+use crate::router::pool::PoolState;
 
 /// Cache key combining pool address for O(1) lookup
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -148,6 +148,11 @@ impl StateCache {
     /// Total number of cached pools.
     pub fn len(&self) -> usize {
         self.pools.len()
+    }
+
+    /// Returns true if the cache contains no pools.
+    pub fn is_empty(&self) -> bool {
+        self.pools.is_empty()
     }
 
     /// Get the token program for a mint (SPL Token or Token-2022).

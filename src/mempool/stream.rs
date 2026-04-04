@@ -42,6 +42,7 @@ pub struct PoolStateChange {
 /// 2. When vault balances change (someone swapped), emit PoolStateChange
 /// 3. Downstream router detects price dislocation across DEXes
 /// 4. Bundle submitted for next slot via multi-relay fan-out
+///
 /// Max concurrent RPC calls to prevent flooding Helius.
 const MAX_CONCURRENT_RPC: usize = 10;
 /// Minimum interval between vault fetches for the same pool.
@@ -194,8 +195,7 @@ impl GeyserStream {
             return;
         };
 
-        match update_oneof {
-            UpdateOneof::Account(account_update) => {
+        if let UpdateOneof::Account(account_update) = update_oneof {
                 let Some(account_info) = account_update.account else {
                     return;
                 };
@@ -332,8 +332,8 @@ impl GeyserStream {
                 // Cached permanently in bitmap_checked — never re-check the same pool.
                 if matches!(self.state_cache.get_any(&pool_address).map(|p| p.dex_type),
                             Some(crate::router::pool::DexType::MeteoraDlmm))
+                    && !self.bitmap_checked.contains_key(&pool_address)
                 {
-                    if !self.bitmap_checked.contains_key(&pool_address) {
                         self.bitmap_checked.insert(pool_address, false); // mark as in-flight
                         let client = self.http_client.clone();
                         let url = self.config.rpc_url.clone();
@@ -366,15 +366,14 @@ impl GeyserStream {
                                 }
                             }
                         });
-                    }
                 }
 
                 // For Raydium AMM v4: fetch Serum/OpenBook market accounts on first discovery.
                 // Cached permanently in serum_checked — never re-fetch the same pool.
                 if matches!(self.state_cache.get_any(&pool_address).map(|p| p.dex_type),
                             Some(crate::router::pool::DexType::RaydiumAmm))
+                    && !self.serum_checked.contains_key(&pool_address)
                 {
-                    if !self.serum_checked.contains_key(&pool_address) {
                         // Only attempt if we have a market_id from the parser
                         if let Some(market_id) = self.state_cache.get_any(&pool_address)
                             .and_then(|p| p.extra.market)
@@ -409,9 +408,7 @@ impl GeyserStream {
                                 }
                             });
                         }
-                    }
                 }
-
                 // Notify router — only if mint programs are cached
                 if mints_ready {
                     let event = PoolStateChange { pool_address, slot };
@@ -420,12 +417,9 @@ impl GeyserStream {
                     }
                 }
             }
-            _ => {}
-        }
     }
 }
 
-/// Stats for monitoring Geyser stream health.
 // ─── Per-DEX pool state parsers ───────────────────────────────────────────────
 
 use crate::router::pool::{DexType, PoolExtra, PoolState};
@@ -903,13 +897,13 @@ pub fn parse_raydium_amm_v4(
         return None;
     }
 
-    let nonce = data[8] as u8; // offset 8, u64 but only lowest byte used
+    let nonce = data[8]; // offset 8, u64 but only lowest byte used
 
     // Extract trade fee from pool state (more accurate than hardcoded 25 bps)
     let trade_fee_num = u64::from_le_bytes(data[144..152].try_into().ok()?);
     let trade_fee_den = u64::from_le_bytes(data[152..160].try_into().ok()?);
     let fee_bps = if trade_fee_den > 0 {
-        (trade_fee_num * 10000 / trade_fee_den) as u64
+        trade_fee_num * 10000 / trade_fee_den
     } else {
         25 // fallback
     };

@@ -72,6 +72,16 @@ name = "e2e_surfpool"
 path = "tests/e2e_surfpool/mod.rs"
 required-features = ["e2e_surfpool"]
 
+[lints.clippy]
+# Allow these in a fast-moving MEV bot codebase
+too_many_arguments = "allow"
+module_inception = "allow"
+
+[lints.rust]
+# Solana SDK deprecation warnings (system_instruction, Keypair::from_bytes)
+# are upstream issues — suppress until we upgrade SDK
+deprecated = "allow"
+
 [profile.release]
 opt-level = 3
 lto = "fat"

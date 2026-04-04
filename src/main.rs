@@ -437,7 +437,7 @@ async fn main() -> Result<()> {
                                     let rpc_url = config.rpc_url.clone();
                                     let ixs = instructions.clone();
                                     let signer_pub = bundle_builder.signer_pubkey();
-                                    let bh = blockhash;
+                                    let _bh = blockhash;
                                     rt.spawn(async move {
                                         // Build temp tx for simulation (no tip needed)
                                         let tx = solana_sdk::transaction::Transaction::new_with_payer(

@@ -39,7 +39,7 @@ fn test_parse_orca_whirlpool() {
 
 #[test]
 fn test_parse_orca_rejects_short_data() {
-    assert!(parse_orca_whirlpool(&Pubkey::new_unique(), &vec![0u8; 100], 100).is_none());
+    assert!(parse_orca_whirlpool(&Pubkey::new_unique(), &[0u8; 100], 100).is_none());
 }
 
 fn make_raydium_clmm_data(mint_0: &Pubkey, mint_1: &Pubkey, vault_0: &Pubkey, vault_1: &Pubkey, sqrt_price: u128, tick: i32, liquidity: u128) -> Vec<u8> {
