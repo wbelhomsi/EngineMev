@@ -228,7 +228,7 @@ impl GeyserStream {
                                     .find(|(_, n)| *n == lst_name)
                                     .map(|(m, _)| m);
                                 if let Some(mint) = lst_mint {
-                                    update_sanctum_virtual_pool(&self.state_cache, &mint, rate);
+                                    crate::sanctum::update_virtual_pool(&self.state_cache, &mint, rate);
                                     debug!("Geyser LST rate update: {} = {:.6} SOL", lst_name, rate);
                                 }
                             }
@@ -248,7 +248,7 @@ impl GeyserStream {
                                 .find(|(_, n)| *n == "mSOL")
                                 .map(|(m, _)| m);
                             if let Some(mint) = mint {
-                                update_sanctum_virtual_pool(&self.state_cache, &mint, rate);
+                                crate::sanctum::update_virtual_pool(&self.state_cache, &mint, rate);
                                 debug!("Geyser LST rate update: mSOL = {:.6} SOL", rate);
                             }
                         }
@@ -542,22 +542,6 @@ fn approx_reserves_from_sqrt_price(sqrt_price_x64: u128, liquidity: u128) -> (u6
     let ra = if reserve_a > u64::MAX as u128 { u64::MAX } else { reserve_a as u64 };
     let rb = if reserve_b > u64::MAX as u128 { u64::MAX } else { reserve_b as u64 };
     (ra, rb)
-}
-
-/// Update a Sanctum virtual pool's reserves to reflect a new LST/SOL rate.
-/// Derives the virtual pool PDA, reads from cache, updates reserves, and upserts.
-fn update_sanctum_virtual_pool(state_cache: &crate::state::StateCache, lst_mint: &Pubkey, rate: f64) {
-    let (virtual_pool_addr, _) = Pubkey::find_program_address(
-        &[b"sanctum-virtual", lst_mint.as_ref()],
-        &solana_sdk::system_program::id(),
-    );
-    if let Some(mut pool) = state_cache.get_any(&virtual_pool_addr) {
-        let reserve_a: u64 = 1_000_000_000_000_000; // 1M SOL in lamports
-        pool.token_a_reserve = reserve_a;
-        pool.token_b_reserve = (reserve_a as f64 / rate) as u64;
-        state_cache.upsert(virtual_pool_addr, pool);
-        debug!("Updated Sanctum virtual pool {} rate={:.6}", virtual_pool_addr, rate);
-    }
 }
 
 // ─── Category A: reserves embedded in pool account ────────────────────────────
