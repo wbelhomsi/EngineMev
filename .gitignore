@@ -32,3 +32,6 @@ Thumbs.db
 
 # Logs
 *.log
+programs/arb-guard/target/
+node_modules/
+package-lock.json
