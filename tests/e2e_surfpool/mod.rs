@@ -1,7 +1,7 @@
 mod harness;
 mod common;
 mod dex_swaps;
-// mod pipeline;  // uncomment when pipeline.rs exists
+mod pipeline;
 
 #[test]
 fn test_surfpool_starts() {

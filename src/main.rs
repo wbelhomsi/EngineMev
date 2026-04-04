@@ -126,6 +126,24 @@ async fn main() -> Result<()> {
     let searcher_keypair = load_keypair(&config.searcher_keypair_path)?;
     let bundle_builder = Arc::new(BundleBuilder::new(searcher_keypair.insecure_clone(), state_cache.clone()));
 
+    // Load Address Lookup Table if configured (enables V0 versioned transactions)
+    let alt_account: Option<Arc<solana_sdk::address_lookup_table::AddressLookupTableAccount>> =
+        if let Ok(alt_addr_str) = std::env::var("ALT_ADDRESS") {
+            match load_alt(&http_client, &config.rpc_url, &alt_addr_str).await {
+                Ok(alt) => {
+                    info!("Loaded ALT {} with {} addresses", alt_addr_str, alt.addresses.len());
+                    Some(Arc::new(alt))
+                }
+                Err(e) => {
+                    warn!("Failed to load ALT: {} — using legacy transactions", e);
+                    None
+                }
+            }
+        } else {
+            info!("No ALT_ADDRESS configured — using legacy transactions");
+            None
+        };
+
     // Initialize per-relay modules — each owns its own tip accounts, rate limiting, and submission
     let relays: Vec<Arc<dyn Relay>> = vec![
         Arc::new(JitoRelay::new(&config)),
@@ -134,7 +152,7 @@ async fn main() -> Result<()> {
         Arc::new(BloxrouteRelay::new(&config)),
         Arc::new(ZeroSlotRelay::new(&config)),
     ];
-    let relay_dispatcher = Arc::new(RelayDispatcher::new(relays, Arc::new(searcher_keypair)));
+    let relay_dispatcher = Arc::new(RelayDispatcher::new(relays, Arc::new(searcher_keypair), alt_account));
     relay_dispatcher.warmup().await;
 
     info!("All components initialized, starting pipeline...");
@@ -828,6 +846,46 @@ async fn simulate_bundle_tx(
         }
         Err(e) => warn!("Simulation request failed: {}", crate::config::redact_url(&e.to_string())),
     }
+}
+
+/// Load an Address Lookup Table from on-chain via getAccountInfo.
+/// Returns an AddressLookupTableAccount suitable for v0::Message::try_compile.
+async fn load_alt(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    alt_address: &str,
+) -> Result<solana_sdk::address_lookup_table::AddressLookupTableAccount> {
+    use base64::{engine::general_purpose, Engine as _};
+    use solana_sdk::address_lookup_table::state::AddressLookupTable;
+
+    let alt_pubkey: Pubkey = alt_address.parse()
+        .map_err(|e| anyhow::anyhow!("Invalid ALT_ADDRESS '{}': {}", alt_address, e))?;
+
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "getAccountInfo",
+        "params": [alt_address, {"encoding": "base64"}]
+    });
+
+    let resp = client.post(rpc_url)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(10))
+        .send().await?
+        .json::<serde_json::Value>().await?;
+
+    let b64 = resp["result"]["value"]["data"][0]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("ALT account {} not found on-chain", alt_address))?;
+
+    let data = general_purpose::STANDARD.decode(b64)?;
+
+    let lookup_table = AddressLookupTable::deserialize(&data)
+        .map_err(|e| anyhow::anyhow!("Failed to deserialize ALT: {}", e))?;
+
+    Ok(solana_sdk::address_lookup_table::AddressLookupTableAccount {
+        key: alt_pubkey,
+        addresses: lookup_table.addresses.to_vec(),
+    })
 }
 
 /// Send ONE transaction via public RPC (sendTransaction) for on-chain verification.
