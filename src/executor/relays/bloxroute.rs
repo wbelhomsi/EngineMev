@@ -133,9 +133,9 @@ impl super::Relay for BloxrouteRelay {
                         error,
                     }
                 }
-                Err(e) => common::fail_with_latency("bloxroute", format!("Parse error: {}", e), latency),
+                Err(e) => common::fail_with_latency("bloxroute", crate::config::redact_url(&format!("Parse error: {}", e)), latency),
             },
-            Err(e) => common::fail_with_latency("bloxroute", format!("Request failed: {}", e), latency),
+            Err(e) => common::fail_with_latency("bloxroute", crate::config::redact_url(&format!("Request failed: {}", e)), latency),
         }
     }
 }

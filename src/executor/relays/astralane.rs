@@ -199,7 +199,7 @@ impl super::Relay for AstralaneRelay {
                 match resp.text().await {
                     Ok(text) => {
                         if !status.is_success() {
-                            warn!("Astralane HTTP {}: {}", status, &text[..text.len().min(200)]);
+                            warn!("Astralane HTTP {}: {}", status, crate::config::redact_url(&text[..text.len().min(200)]));
                         }
                         match serde_json::from_str::<serde_json::Value>(&text) {
                             Ok(body) => {
@@ -237,15 +237,15 @@ impl super::Relay for AstralaneRelay {
                             }
                             Err(e) => common::fail_with_latency(
                                 "astralane",
-                                format!("JSON parse error: {} (raw: {})", e, &text[..text.len().min(200)]),
+                                crate::config::redact_url(&format!("JSON parse error: {} (raw: {})", e, &text[..text.len().min(200)])),
                                 latency,
                             ),
                         }
                     }
-                    Err(e) => common::fail_with_latency("astralane", format!("Body read error: {}", e), latency),
+                    Err(e) => common::fail_with_latency("astralane", crate::config::redact_url(&format!("Body read error: {}", e)), latency),
                 }
             }
-            Err(e) => common::fail_with_latency("astralane", format!("Request failed: {}", e), latency),
+            Err(e) => common::fail_with_latency("astralane", crate::config::redact_url(&format!("Request failed: {}", e)), latency),
         }
     }
 }

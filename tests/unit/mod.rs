@@ -12,3 +12,4 @@ mod bundle_orderbook;
 mod submission_filter;
 mod cache_pair_index;
 mod arb_guard_cpi;
+mod pricing;
