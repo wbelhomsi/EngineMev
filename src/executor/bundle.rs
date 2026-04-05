@@ -4,8 +4,8 @@ use solana_sdk::{
     pubkey::Pubkey,
     signature::Keypair,
     signer::Signer,
-    system_instruction,
 };
+use solana_system_interface::instruction as system_instruction;
 use tracing::debug;
 
 use crate::addresses;
@@ -92,7 +92,7 @@ impl BundleBuilder {
                         AccountMeta::new(ata, false),
                         AccountMeta::new_readonly(signer_pubkey, false),
                         AccountMeta::new_readonly(*mint, false),
-                        AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                        AccountMeta::new_readonly(solana_system_interface::program::id(), false),
                         AccountMeta::new_readonly(*mint_token_program, false),
                     ],
                     data: vec![1],
@@ -189,7 +189,7 @@ impl BundleBuilder {
                     AccountMeta::new(ata, false),
                     AccountMeta::new_readonly(signer_pubkey, false),
                     AccountMeta::new_readonly(*mint, false),
-                    AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                    AccountMeta::new_readonly(solana_system_interface::program::id(), false),
                     AccountMeta::new_readonly(*mint_token_program, false),
                 ],
                 data: vec![1], // 1 = CreateIdempotent
@@ -527,7 +527,7 @@ fn build_guard_start_check_ix(
             AccountMeta::new(*authority, true),                         // authority (signer, mut for init_if_needed)
             AccountMeta::new(guard_state, false),                       // guard_state PDA (mut)
             AccountMeta::new_readonly(*token_account, false),           // token_account
-            AccountMeta::new_readonly(solana_sdk::system_program::id(), false), // system_program
+            AccountMeta::new_readonly(solana_system_interface::program::id(), false), // system_program
         ],
         data: disc.to_vec(),
     }
@@ -1209,7 +1209,7 @@ pub fn build_manifest_swap_ix(
 
     let manifest_program = addresses::MANIFEST;
     let token_program = addresses::SPL_TOKEN;
-    let system_program = solana_sdk::system_program::id();
+    let system_program = solana_system_interface::program::id();
 
     // token_a_mint = base, token_b_mint = quote
     let is_base_in: u8 = if input_mint == pool.token_a_mint { 1 } else { 0 };

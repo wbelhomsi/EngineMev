@@ -128,7 +128,7 @@ async fn main() -> Result<()> {
     ));
 
     // Load Address Lookup Table if configured (enables V0 versioned transactions)
-    let alt_account: Option<Arc<solana_sdk::address_lookup_table::AddressLookupTableAccount>> =
+    let alt_account: Option<Arc<solana_message::AddressLookupTableAccount>> =
         if let Ok(alt_addr_str) = std::env::var("ALT_ADDRESS") {
             match rpc_helpers::load_alt(&http_client, &config.rpc_url, &alt_addr_str).await {
                 Ok(alt) => {

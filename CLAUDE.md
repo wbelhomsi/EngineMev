@@ -48,6 +48,7 @@ Subscribe by **DEX program owner** — NOT by individual vault accounts or Token
 - **No jito-sdk-rust dependency**: Raw JSON-RPC via reqwest is leaner.
 - **No Jito gRPC SearcherServiceClient**: Deprecated since March 2024.
 - **Helius LaserStream SDK** (`helius-laserstream 0.1.9`): Streams pool state changes from validator memory at sub-50ms. Built-in auto-reconnection with slot-based replay, Zstd compression (70-80% bandwidth reduction), TLS. Replaces manual `yellowstone-grpc-client` connection + reconnection logic.
+- **solana-sdk 4.0.1 + modular crates**: `solana-system-interface` (with `bincode` feature) for system instructions, `solana-message` for `AddressLookupTableAccount`, `solana-address-lookup-table-interface` for ALT deserialization. `five8_core` with `std` feature as workaround for upstream keypair bug.
 - **crossbeam-channel** between async Geyser stream and sync router thread.
 - **DashMap** for lock-free concurrent cache reads across threads.
 - **Per-DEX parsers in stream.rs**: Route by data size (653=Orca, 1560=CLMM, 904=DLMM, 1112=DAMM v2, 752=Raydium AMM, 637=Raydium CP). Phoenix and Manifest use variable-size accounts routed by `try_parse_orderbook()` fallback instead of data size.
@@ -199,7 +200,7 @@ Base DEX↔DEX backrun arb working live on mainnet.
 
 **Remaining:**
 - Deploy arb-guard to mainnet (~7 SOL for buffer)
-- Upgrade solana-sdk 2.2 → modular crates 4.x (unblocks future LaserStream features + performance improvements)
+- ~~Upgrade solana-sdk 2.2 → modular crates 4.x~~ DONE (solana-sdk 4.0.1 + modular crates)
 - Grafana + OpenTelemetry metrics
 - Deduplication of repeated opportunities on same pool pair
 - Phoenix lot size conversion (Phoenix excluded from submission for now)
@@ -228,7 +229,7 @@ Flashbots MEV-Share on Ethereum. See `docs/STRATEGY-MEVSHARE-ETH.md`.
 
 1. **Jito mempool is DEAD.** `subscribe_mempool` was killed March 2024. Don't revive it.
 2. **`jito-sdk-rust` is unnecessary.** We do raw JSON-RPC via reqwest.
-3. **`solana-sdk` 2.x has breaking changes from 1.x.** Verify imports if upgrading.
+3. **`solana-sdk` 4.x dropped re-exports.** `system_instruction`, `system_program`, `address_lookup_table` are now in separate crates (`solana-system-interface`, `solana-message`, `solana-address-lookup-table-interface`). `solana-system-interface` needs `features = ["bincode"]` for instruction builders.
 4. **LaserStream proto types** (`helius_laserstream::grpc::*`) are from `laserstream-core-proto`, a fork of yellowstone-grpc-proto. Same structure, different crate.
 5. **Base64 v0.22 API:** Uses `Engine` trait — `general_purpose::STANDARD.encode()`.
 6. **DashMap `get_mut` returns `RefMut`** — must call `.value_mut()`.

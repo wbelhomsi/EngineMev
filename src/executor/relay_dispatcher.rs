@@ -1,8 +1,6 @@
 use std::sync::Arc;
-use solana_sdk::{
-    address_lookup_table::AddressLookupTableAccount,
-    hash::Hash, instruction::Instruction, signature::Keypair,
-};
+use solana_message::AddressLookupTableAccount;
+use solana_sdk::{hash::Hash, instruction::Instruction, signature::Keypair};
 use tracing::{info, warn};
 
 use super::relays::Relay;
