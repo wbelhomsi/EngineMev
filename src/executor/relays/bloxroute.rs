@@ -77,10 +77,15 @@ impl super::Relay for BloxrouteRelay {
     ) -> RelayResult {
         let url = match &self.endpoint {
             Some(url) => url.clone(),
-            None => return common::fail("bloxroute", "Not configured".to_string()),
+            None => {
+                let r = common::fail("bloxroute", "Not configured".to_string());
+                common::record_relay_metrics(&r);
+                return r;
+            }
         };
 
         if let Err(r) = self.rate_limiter.check("bloxroute") {
+            common::record_relay_metrics(&r);
             return r;
         }
 
@@ -93,6 +98,7 @@ impl super::Relay for BloxrouteRelay {
             Ok(enc) => enc,
             Err(mut r) => {
                 r.latency_us = start.elapsed().as_micros() as u64;
+                common::record_relay_metrics(&r);
                 return r;
             }
         };
@@ -105,7 +111,7 @@ impl super::Relay for BloxrouteRelay {
 
         let submit_url = format!("{}/api/v2/submit-bundle", url.trim_end_matches('/'));
 
-        let result = self.http_client
+        let http_result = self.http_client
             .post(&submit_url)
             .header("Authorization", &self.auth_header)
             .json(&payload)
@@ -114,7 +120,7 @@ impl super::Relay for BloxrouteRelay {
 
         let latency = start.elapsed().as_micros() as u64;
 
-        match result {
+        let result = match http_result {
             Ok(resp) => match resp.json::<serde_json::Value>().await {
                 Ok(body) => {
                     // bloXroute returns bundleId, not result
@@ -136,6 +142,8 @@ impl super::Relay for BloxrouteRelay {
                 Err(e) => common::fail_with_latency("bloxroute", crate::config::redact_url(&format!("Parse error: {}", e)), latency),
             },
             Err(e) => common::fail_with_latency("bloxroute", crate::config::redact_url(&format!("Request failed: {}", e)), latency),
-        }
+        };
+        common::record_relay_metrics(&result);
+        result
     }
 }

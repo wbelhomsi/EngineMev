@@ -74,10 +74,15 @@ impl super::Relay for ZeroSlotRelay {
     ) -> RelayResult {
         let url = match &self.endpoint {
             Some(url) => url.clone(),
-            None => return common::fail("zeroslot", "Not configured".to_string()),
+            None => {
+                let r = common::fail("zeroslot", "Not configured".to_string());
+                common::record_relay_metrics(&r);
+                return r;
+            }
         };
 
         if let Err(r) = self.rate_limiter.check("zeroslot") {
+            common::record_relay_metrics(&r);
             return r;
         }
 
@@ -90,6 +95,7 @@ impl super::Relay for ZeroSlotRelay {
             Ok(enc) => enc,
             Err(mut r) => {
                 r.latency_us = start.elapsed().as_micros() as u64;
+                common::record_relay_metrics(&r);
                 return r;
             }
         };
@@ -102,15 +108,17 @@ impl super::Relay for ZeroSlotRelay {
             "params": [[encoded]]
         });
 
-        let result = self.http_client.post(&url).json(&payload).send().await;
+        let http_result = self.http_client.post(&url).json(&payload).send().await;
         let latency = start.elapsed().as_micros() as u64;
 
-        match result {
+        let result = match http_result {
             Ok(resp) => match resp.json::<serde_json::Value>().await {
                 Ok(body) => common::parse_jsonrpc_response("zeroslot", &body, latency),
                 Err(e) => common::fail_with_latency("zeroslot", crate::config::redact_url(&format!("Parse error: {}", e)), latency),
             },
             Err(e) => common::fail_with_latency("zeroslot", crate::config::redact_url(&format!("Request failed: {}", e)), latency),
-        }
+        };
+        common::record_relay_metrics(&result);
+        result
     }
 }

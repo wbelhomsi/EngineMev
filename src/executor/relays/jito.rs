@@ -84,10 +84,15 @@ impl super::Relay for JitoRelay {
     ) -> RelayResult {
         let url = match &self.endpoint {
             Some(url) => url.clone(),
-            None => return common::fail("jito", "Not configured".to_string()),
+            None => {
+                let r = common::fail("jito", "Not configured".to_string());
+                common::record_relay_metrics(&r);
+                return r;
+            }
         };
 
         if let Err(r) = self.rate_limiter.check("jito") {
+            common::record_relay_metrics(&r);
             return r;
         }
 
@@ -100,6 +105,7 @@ impl super::Relay for JitoRelay {
             Ok(enc) => enc,
             Err(mut r) => {
                 r.latency_us = start.elapsed().as_micros() as u64;
+                common::record_relay_metrics(&r);
                 return r;
             }
         };
@@ -123,7 +129,7 @@ impl super::Relay for JitoRelay {
         let result = req.send().await;
         let latency = start.elapsed().as_micros() as u64;
 
-        match result {
+        let result = match result {
             Ok(resp) => match resp.json::<serde_json::Value>().await {
                 Ok(body) => {
                     debug!("Jito response: {}", body);
@@ -132,6 +138,8 @@ impl super::Relay for JitoRelay {
                 Err(e) => common::fail_with_latency("jito", crate::config::redact_url(&format!("Response parse error: {}", e)), latency),
             },
             Err(e) => common::fail_with_latency("jito", crate::config::redact_url(&format!("Request failed: {}", e)), latency),
-        }
+        };
+        common::record_relay_metrics(&result);
+        result
     }
 }
