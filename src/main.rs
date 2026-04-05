@@ -265,6 +265,8 @@ async fn main() -> Result<()> {
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 };
 
+                let pipeline_start = std::time::Instant::now();
+
                 // Dedup: skip if we already processed this pool in this slot
                 if recent_pools.get(&change.pool_address) == Some(&change.slot) {
                     continue;
@@ -276,6 +278,9 @@ async fn main() -> Result<()> {
                     let current_slot = change.slot;
                     recent_pools.retain(|_, slot| current_slot.saturating_sub(*slot) < 10);
                 }
+
+                // Sample channel backpressure
+                solana_mev_bot::metrics::counters::set_channel_backpressure(change_rx.len());
 
                 // Pool state was already updated by the Geyser stream.
                 let pool_state = match state_cache.get_any(&change.pool_address) {
@@ -447,8 +452,11 @@ async fn main() -> Result<()> {
                         // so the swap must return at least input + gross_profit.
                         let min_final_output = route.input_amount
                             + route.estimated_profit_lamports;
+                        let build_start = std::time::Instant::now();
                         match bundle_builder.build_arb_instructions(&route, min_final_output) {
                             Ok(instructions) => {
+                                solana_mev_bot::metrics::counters::record_bundle_build_duration_us(
+                                    build_start.elapsed().as_micros() as u64);
                                 // Optional: simulate before submission
                                 if simulate_bundles {
                                     let http = http_client.clone();
@@ -486,6 +494,8 @@ async fn main() -> Result<()> {
                                 bundles_submitted += 1;
                                 solana_mev_bot::metrics::counters::inc_bundles_submitted();
                                 solana_mev_bot::metrics::counters::add_tips_paid_lamports(tip_lamports);
+                                solana_mev_bot::metrics::counters::record_pipeline_duration_us(
+                                    pipeline_start.elapsed().as_micros() as u64);
                             }
                             Err(e) => {
                                 error!("Bundle build failed: {}", e);
@@ -494,6 +504,19 @@ async fn main() -> Result<()> {
                         }
                     }
                     SimulationResult::Unprofitable { reason } => {
+                        // Categorize rejection for metrics
+                        let reason_label = if reason.contains("sanity cap") {
+                            "sanity_cap"
+                        } else if reason.contains("tip") && reason.contains("profit") {
+                            "tip_exceeds_profit"
+                        } else if reason.contains("net profit") && reason.contains("< min") {
+                            "below_min_profit"
+                        } else if reason.contains("stale") {
+                            "stale_state"
+                        } else {
+                            "unprofitable"
+                        };
+                        solana_mev_bot::metrics::counters::inc_simulation_rejected(reason_label);
                         tracing::trace!("Route rejected: {}", reason);
                     }
                 }

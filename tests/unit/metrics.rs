@@ -21,6 +21,13 @@ fn test_counter_helpers_callable_without_init() {
     solana_mev_bot::metrics::counters::record_simulation_duration_us(120);
     solana_mev_bot::metrics::counters::record_relay_latency_us("jito", 5400);
     solana_mev_bot::metrics::counters::record_geyser_parse_duration_us("orca", 80);
+    // New error + profiling counters
+    solana_mev_bot::metrics::counters::inc_simulation_rejected("unprofitable");
+    solana_mev_bot::metrics::counters::inc_simulation_errors();
+    solana_mev_bot::metrics::counters::inc_vault_fetch_errors("raydium_amm");
+    solana_mev_bot::metrics::counters::inc_relay_errors("jito", "network_error");
+    solana_mev_bot::metrics::counters::record_bundle_build_duration_us(450);
+    solana_mev_bot::metrics::counters::record_pipeline_duration_us(2500);
 }
 
 #[test]
