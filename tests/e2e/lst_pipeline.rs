@@ -74,7 +74,7 @@ fn test_e2e_profitable_arb_pipeline() {
     let (cache, orca_addr, _sanctum_addr) = setup_cache_with_spread(1.070, 1.082);
 
     let calculator = RouteCalculator::new(cache.clone(), 3);
-    let simulator = ProfitSimulator::new(cache.clone(), 0.50, 1000);
+    let simulator = ProfitSimulator::new(cache.clone(), 0.50, 1000, 1000);
 
     // Simulate Geyser event: vault balance changed on Orca pool.
     // Search both directions like main.rs does.
@@ -125,7 +125,7 @@ fn test_e2e_revert_unprofitable() {
     let (cache, orca_addr, _sanctum_addr) = setup_cache_with_spread(1.082, 1.082);
 
     let calculator = RouteCalculator::new(cache.clone(), 3);
-    let simulator = ProfitSimulator::new(cache.clone(), 0.50, 1000);
+    let simulator = ProfitSimulator::new(cache.clone(), 0.50, 1000, 1000);
 
     let trigger = DetectedSwap {
         dex_type: DexType::OrcaWhirlpool,

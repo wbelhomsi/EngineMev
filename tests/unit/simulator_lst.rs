@@ -63,7 +63,7 @@ fn test_simulator_approves_profitable_lst_route() {
     let sanctum_addr = Pubkey::new_unique();
     let cache = make_cache_with_pools(orca_addr, sanctum_addr);
 
-    let simulator = ProfitSimulator::new(cache, 0.50, 1000); // 50% tip, 1000 lamport min
+    let simulator = ProfitSimulator::new(cache, 0.50, 1000, 1000); // 50% tip, 1000 lamport min
 
     let route = ArbRoute {
         hops: vec![
@@ -106,7 +106,7 @@ fn test_simulator_rejects_below_min_profit() {
     let cache = make_cache_with_pools(orca_addr, sanctum_addr);
 
     // Set min profit very high — route should be rejected
-    let simulator = ProfitSimulator::new(cache, 0.50, 999_999_999_999);
+    let simulator = ProfitSimulator::new(cache, 0.50, 999_999_999_999, 1000);
 
     let route = ArbRoute {
         hops: vec![
@@ -148,7 +148,7 @@ fn test_simulator_rejects_when_tip_exceeds_profit() {
 
     // Route produces ~64,730 lamports gross profit
     // 200% tip fraction => tip > gross profit => rejected
-    let simulator = ProfitSimulator::new(cache, 2.00, 1000);
+    let simulator = ProfitSimulator::new(cache, 2.00, 1000, 1000);
 
     let route = ArbRoute {
         hops: vec![
@@ -176,7 +176,7 @@ fn test_simulator_rejects_when_tip_exceeds_profit() {
     let result = simulator.simulate(&route);
     match result {
         solana_mev_bot::router::simulator::SimulationResult::Unprofitable { reason } => {
-            assert!(reason.contains("would lose money"), "Should reject due to tips exceeding profit: {}", reason);
+            assert!(reason.contains("Tip") && reason.contains("profit"), "Should reject due to tips exceeding profit: {}", reason);
         }
         _ => panic!("Expected Unprofitable when tip exceeds profit"),
     }
@@ -188,7 +188,7 @@ fn test_simulator_writes_fresh_hop_outputs() {
     let sanctum_addr = Pubkey::new_unique();
     let cache = make_cache_with_pools(orca_addr, sanctum_addr);
 
-    let simulator = ProfitSimulator::new(cache, 0.50, 1000);
+    let simulator = ProfitSimulator::new(cache, 0.50, 1000, 1000);
 
     // Use intentionally stale estimated_output values
     let route = ArbRoute {

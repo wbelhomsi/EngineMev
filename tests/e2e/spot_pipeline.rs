@@ -124,7 +124,7 @@ fn test_e2e_two_hop_cross_dex_orca_raydium_cp() {
     );
 
     let calculator = RouteCalculator::new(cache.clone(), 3);
-    let simulator = ProfitSimulator::new(cache.clone(), 0.50, 1000);
+    let simulator = ProfitSimulator::new(cache.clone(), 0.50, 1000, 1000);
 
     let routes = find_all_routes(&calculator, orca_addr, DexType::OrcaWhirlpool, sol, usdc, 100);
     assert!(!routes.is_empty(), "Should find cross-DEX arb routes");
@@ -194,7 +194,7 @@ fn test_e2e_two_hop_same_dex_orca() {
     );
 
     let calculator = RouteCalculator::new(cache.clone(), 3);
-    let simulator = ProfitSimulator::new(cache.clone(), 0.50, 1000);
+    let simulator = ProfitSimulator::new(cache.clone(), 0.50, 1000, 1000);
 
     let routes = find_all_routes(&calculator, orca_a, DexType::OrcaWhirlpool, sol, token_x, 100);
     assert!(!routes.is_empty(), "Should find same-DEX arb routes");
@@ -258,7 +258,7 @@ fn test_e2e_unprofitable_tiny_spread() {
     );
 
     let calculator = RouteCalculator::new(cache.clone(), 3);
-    let simulator = ProfitSimulator::new(cache.clone(), 0.50, 1000);
+    let simulator = ProfitSimulator::new(cache.clone(), 0.50, 1000, 1000);
 
     let routes = find_all_routes(&calculator, orca_addr, DexType::OrcaWhirlpool, sol, usdc, 100);
 
@@ -385,7 +385,7 @@ fn test_e2e_pipeline_dedup() {
     );
 
     let calculator = RouteCalculator::new(cache.clone(), 3);
-    let simulator = ProfitSimulator::new(cache.clone(), 0.50, 1000);
+    let simulator = ProfitSimulator::new(cache.clone(), 0.50, 1000, 1000);
 
     // Replicate the dedup logic from main.rs
     let mut recent_pools: HashMap<Pubkey, u64> = HashMap::new();
@@ -529,7 +529,7 @@ fn test_e2e_three_hop_triangle_arb() {
     assert_ne!(pool_addrs[0], pool_addrs[2], "Hops 0 and 2 should use different pools");
 
     // Simulate the best 3-hop route
-    let simulator = ProfitSimulator::new(cache.clone(), 0.50, 1000);
+    let simulator = ProfitSimulator::new(cache.clone(), 0.50, 1000, 1000);
     let result = simulator.simulate(route);
     match result {
         SimulationResult::Profitable {

@@ -18,6 +18,7 @@ pub struct ProfitSimulator {
     state_cache: StateCache,
     tip_fraction: f64,
     min_profit_lamports: u64,
+    min_tip_lamports: u64,
 }
 
 /// Result of profit simulation — either a confirmed opportunity or a rejection.
@@ -39,8 +40,8 @@ pub enum SimulationResult {
 }
 
 impl ProfitSimulator {
-    pub fn new(state_cache: StateCache, tip_fraction: f64, min_profit_lamports: u64) -> Self {
-        Self { state_cache, tip_fraction, min_profit_lamports }
+    pub fn new(state_cache: StateCache, tip_fraction: f64, min_profit_lamports: u64, min_tip_lamports: u64) -> Self {
+        Self { state_cache, tip_fraction, min_profit_lamports, min_tip_lamports }
     }
 
     /// Run full simulation on a candidate route.
@@ -140,14 +141,18 @@ impl ProfitSimulator {
             };
         }
 
-        // Step 4: Calculate tip (same amount sent to each relay independently)
-        let tip_lamports = (gross_profit_u64 as f64 * self.tip_fraction) as u64;
+        // Step 4: Smart tip calculation
+        // - If profit <= min_tip: skip (can't even cover the tip)
+        // - If profit * fraction < min_tip: use min_tip (floor for auction competitiveness)
+        // - If profit * fraction >= min_tip: use profit * fraction (normal %)
+        let fraction_tip = (gross_profit_u64 as f64 * self.tip_fraction) as u64;
+        let tip_lamports = fraction_tip.max(self.min_tip_lamports);
 
-        // Step 5: Reject if tip would exceed or equal profit
+        // Step 5: Reject if tip would exceed or equal profit (can't tip more than we earn)
         if tip_lamports >= gross_profit_u64 {
             return SimulationResult::Unprofitable {
                 reason: format!(
-                    "Tip ({}) >= gross profit ({}), would lose money",
+                    "Tip ({}) >= gross profit ({}), skip",
                     tip_lamports, gross_profit_u64
                 ),
             };

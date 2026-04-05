@@ -196,6 +196,8 @@ pub struct BotConfig {
     pub tip_fraction: f64,
     /// Minimum profit in lamports to submit a bundle
     pub min_profit_lamports: u64,
+    /// Minimum tip in lamports (floor for Jito auction competitiveness)
+    pub min_tip_lamports: u64,
     /// Maximum number of hops in arb route
     pub max_hops: usize,
     /// How long to cache pool state before refreshing
@@ -243,6 +245,10 @@ impl BotConfig {
             .unwrap_or_else(|_| "100000".to_string()) // 0.0001 SOL
             .parse()?;
 
+        let min_tip_lamports: u64 = std::env::var("MIN_TIP_LAMPORTS")
+            .unwrap_or_else(|_| "50000".to_string()) // 0.00005 SOL
+            .parse()?;
+
         let max_hops: usize = std::env::var("MAX_HOPS")
             .unwrap_or_else(|_| "3".to_string())
             .parse()?;
@@ -270,6 +276,7 @@ impl BotConfig {
             },
             tip_fraction,
             min_profit_lamports,
+            min_tip_lamports,
             max_hops,
             pool_state_ttl: Duration::from_secs(5), // 5s — allows mint cache to populate + second Geyser event to arrive
             dry_run: std::env::var("DRY_RUN")

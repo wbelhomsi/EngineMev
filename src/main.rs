@@ -145,6 +145,7 @@ async fn main() -> Result<()> {
         state_cache.clone(),
         config.tip_fraction,
         config.min_profit_lamports,
+        config.min_tip_lamports,
     );
 
     // Load searcher keypair
@@ -372,7 +373,8 @@ async fn main() -> Result<()> {
                                             best_route.estimated_profit_lamports),
                         }
                     } else {
-                        let tip = (best_route.estimated_profit_lamports as f64 * config.tip_fraction) as u64;
+                        let fraction_tip = (best_route.estimated_profit_lamports as f64 * config.tip_fraction) as u64;
+                        let tip = fraction_tip.max(config.min_tip_lamports);
                         // Safety: tip must be less than profit
                         if tip >= best_route.estimated_profit_lamports {
                             warn!("SKIP_SIMULATOR: tip {} >= profit {}, skipping",

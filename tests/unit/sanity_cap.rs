@@ -61,7 +61,7 @@ fn test_simulator_rejects_unrealistic_profit() {
         },
     );
 
-    let simulator = ProfitSimulator::new(cache, 0.50, 1000);
+    let simulator = ProfitSimulator::new(cache, 0.50, 1000, 1000);
 
     let route = ArbRoute {
         base_mint: sol,
@@ -159,7 +159,7 @@ fn test_simulator_allows_small_realistic_profit() {
         },
     );
 
-    let simulator = ProfitSimulator::new(cache, 0.50, 1000);
+    let simulator = ProfitSimulator::new(cache, 0.50, 1000, 1000);
 
     let route = ArbRoute {
         base_mint: sol,
