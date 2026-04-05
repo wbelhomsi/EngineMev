@@ -163,16 +163,17 @@ impl super::Relay for AstralaneRelay {
         let start = Instant::now();
         let tip_account = self.next_tip_account();
 
-        let encoded = match common::build_signed_bundle_tx(
+        let serialized = match common::build_signed_bundle_tx(
             "astralane", base_instructions, tip_lamports, &tip_account, signer, recent_blockhash, alt,
         ) {
-            Ok(enc) => enc,
+            Ok(bytes) => bytes,
             Err(mut r) => {
                 r.latency_us = start.elapsed().as_micros() as u64;
                 common::record_relay_metrics(&r);
                 return r;
             }
         };
+        let encoded = common::encode_base64(&serialized);
 
         // JSON-RPC payload with revertProtection
         let payload = json!({

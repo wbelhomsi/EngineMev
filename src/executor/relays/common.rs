@@ -63,10 +63,13 @@ pub fn tps_from_env(var_name: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-/// Build a signed, serialized, base64-encoded transaction.
+/// Build a signed, serialized transaction as raw bytes.
 ///
 /// Appends a tip transfer instruction, tries V0 with ALT, falls back to legacy.
-/// Returns Ok(base64_string) or Err(RelayResult).
+/// Returns Ok(serialized_bytes) or Err(RelayResult).
+///
+/// Callers choose their own encoding (base58 or base64) via
+/// [`encode_base58`] or [`encode_base64`].
 pub fn build_signed_bundle_tx(
     relay_name: &str,
     base_instructions: &[Instruction],
@@ -75,7 +78,7 @@ pub fn build_signed_bundle_tx(
     signer: &Keypair,
     recent_blockhash: Hash,
     alt: Option<&AddressLookupTableAccount>,
-) -> Result<String, RelayResult> {
+) -> Result<Vec<u8>, RelayResult> {
     let mut instructions = base_instructions.to_vec();
     instructions.push(system_instruction::transfer(
         &signer.pubkey(),
@@ -128,7 +131,17 @@ pub fn build_signed_bundle_tx(
         tracing::warn!("[{}] tx near size limit ({} bytes)", relay_name, serialized.len());
     }
 
-    Ok(general_purpose::STANDARD.encode(&serialized))
+    Ok(serialized)
+}
+
+/// Encode serialized transaction bytes as base58 (Jito/Nozomi/ZeroSlot default).
+pub fn encode_base58(serialized: &[u8]) -> String {
+    bs58::encode(serialized).into_string()
+}
+
+/// Encode serialized transaction bytes as base64.
+pub fn encode_base64(serialized: &[u8]) -> String {
+    general_purpose::STANDARD.encode(serialized)
 }
 
 fn build_legacy_tx(

@@ -92,18 +92,19 @@ impl super::Relay for BloxrouteRelay {
         let start = Instant::now();
         let tip_account = self.next_tip_account();
 
-        let encoded = match common::build_signed_bundle_tx(
+        let serialized = match common::build_signed_bundle_tx(
             "bloxroute", base_instructions, tip_lamports, &tip_account, signer, recent_blockhash, alt,
         ) {
-            Ok(enc) => enc,
+            Ok(bytes) => bytes,
             Err(mut r) => {
                 r.latency_us = start.elapsed().as_micros() as u64;
                 common::record_relay_metrics(&r);
                 return r;
             }
         };
+        let encoded = common::encode_base64(&serialized);
 
-        // bloXroute uses a different REST format (not JSON-RPC)
+        // bloXroute uses a different REST format (not JSON-RPC), base64 encoded
         let payload = json!({
             "transaction": [encoded],
             "useBundle": true,

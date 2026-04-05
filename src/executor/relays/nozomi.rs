@@ -89,18 +89,19 @@ impl super::Relay for NozomiRelay {
         let start = Instant::now();
         let tip_account = self.next_tip_account();
 
-        let encoded = match common::build_signed_bundle_tx(
+        let serialized = match common::build_signed_bundle_tx(
             "nozomi", base_instructions, tip_lamports, &tip_account, signer, recent_blockhash, alt,
         ) {
-            Ok(enc) => enc,
+            Ok(bytes) => bytes,
             Err(mut r) => {
                 r.latency_us = start.elapsed().as_micros() as u64;
                 common::record_relay_metrics(&r);
                 return r;
             }
         };
+        let encoded = common::encode_base58(&serialized);
 
-        // Nozomi uses Jito-compatible sendBundle without encoding option
+        // Nozomi uses Jito-compatible sendBundle — base58 encoded
         let payload = json!({
             "jsonrpc": "2.0",
             "id": 1,

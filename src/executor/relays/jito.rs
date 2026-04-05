@@ -99,26 +99,24 @@ impl super::Relay for JitoRelay {
         let start = Instant::now();
         let tip_account = self.next_tip_account();
 
-        let encoded = match common::build_signed_bundle_tx(
+        let serialized = match common::build_signed_bundle_tx(
             "jito", base_instructions, tip_lamports, &tip_account, signer, recent_blockhash, alt,
         ) {
-            Ok(enc) => enc,
+            Ok(bytes) => bytes,
             Err(mut r) => {
                 r.latency_us = start.elapsed().as_micros() as u64;
                 common::record_relay_metrics(&r);
                 return r;
             }
         };
+        let encoded = common::encode_base58(&serialized);
 
-        // JSON-RPC payload
+        // JSON-RPC payload — Jito sendBundle expects base58-encoded transactions
         let payload = json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendBundle",
-            "params": [
-                [encoded],
-                { "encoding": "base64" }
-            ]
+            "params": [[encoded]]
         });
 
         let mut req = self.http_client.post(&url).json(&payload);
