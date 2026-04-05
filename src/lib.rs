@@ -5,4 +5,5 @@ pub mod mempool;
 pub mod router;
 pub mod rpc_helpers;
 pub mod sanctum;
+pub mod metrics;
 pub mod state;

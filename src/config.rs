@@ -208,6 +208,12 @@ pub struct BotConfig {
     pub lst_min_spread_bps: u64,
     /// Optional arb-guard program ID for on-chain profit verification
     pub arb_guard_program_id: Option<Pubkey>,
+    /// Port for Prometheus /metrics HTTP endpoint (disabled if None)
+    pub metrics_port: Option<u16>,
+    /// OTLP gRPC endpoint for tracing spans (disabled if None)
+    pub otlp_endpoint: Option<String>,
+    /// Service name reported in OTLP traces
+    pub otlp_service_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -278,6 +284,12 @@ impl BotConfig {
             arb_guard_program_id: std::env::var("ARB_GUARD_PROGRAM_ID")
                 .ok()
                 .and_then(|s| Pubkey::from_str(&s).ok()),
+            metrics_port: std::env::var("METRICS_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+            otlp_endpoint: std::env::var("OTLP_ENDPOINT").ok().filter(|s| !s.is_empty()),
+            otlp_service_name: std::env::var("OTLP_SERVICE_NAME")
+                .unwrap_or_else(|_| "mev-engine".to_string()),
         })
     }
 
