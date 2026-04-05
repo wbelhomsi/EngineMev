@@ -20,3 +20,4 @@ mod metrics;
 mod relay_common;
 mod rpc_helpers;
 mod sanctum_bootstrap;
+mod router_perf;

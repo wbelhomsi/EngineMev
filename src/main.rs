@@ -288,6 +288,16 @@ async fn main() -> Result<()> {
                     None => continue,
                 };
 
+                // Skip pools with negligible reserves — not worth route calculation.
+                // Both reserves must be below the threshold to skip (if one side
+                // is large the pool may still offer meaningful liquidity).
+                const MIN_RESERVE_LAMPORTS: u64 = 1_000_000_000; // 1 SOL
+                if pool_state.token_a_reserve < MIN_RESERVE_LAMPORTS
+                    && pool_state.token_b_reserve < MIN_RESERVE_LAMPORTS
+                {
+                    continue;
+                }
+
                 let pool_address = change.pool_address;
 
                 // Construct a DetectedSwap trigger from the state change.
@@ -331,6 +341,11 @@ async fn main() -> Result<()> {
 
                 // Deduplicate by sorting and taking best
                 routes.sort_by(|a, b| b.estimated_profit.cmp(&a.estimated_profit));
+
+                // Cap routes to avoid spending time on low-value candidates.
+                // The sort ensures we keep the best ones.
+                const MAX_ROUTES_PER_EVENT: usize = 10;
+                routes.truncate(MAX_ROUTES_PER_EVENT);
 
                 if routes.is_empty() {
                     continue;
