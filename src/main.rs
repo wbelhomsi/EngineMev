@@ -23,23 +23,51 @@ const STATE_CHANGE_CHANNEL_CAPACITY: usize = 256;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("solana_mev_bot=debug".parse()?)
-                .add_directive("info".parse()?),
-        )
-        .with_target(true)
-        .with_thread_ids(true)
+    // Load config first (needed for metrics setup)
+    let config = Arc::new(BotConfig::from_env()?);
+
+    // Initialize Prometheus metrics recorder
+    solana_mev_bot::metrics::init(
+        config.metrics_port,
+        config.otlp_endpoint.as_deref(),
+        &config.otlp_service_name,
+    );
+
+    // Build tracing layers
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive("solana_mev_bot=debug".parse()?)
+        .add_directive("info".parse()?);
+
+    let json_layer = tracing_subscriber::fmt::layer()
         .json()
-        .init();
+        .with_target(true)
+        .with_thread_ids(true);
+
+    // Build optional OTLP tracing layer
+    let otel_guard = config.otlp_endpoint.as_deref().and_then(|endpoint| {
+        solana_mev_bot::metrics::tracing_layer::build_layer(endpoint, &config.otlp_service_name)
+    });
+
+    let _otel_provider = if let Some((otel_layer, provider)) = otel_guard {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(json_layer)
+            .with(otel_layer)
+            .init();
+        Some(provider)
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(json_layer)
+            .init();
+        None
+    };
 
     info!("=== Solana MEV Backrun Arbitrage Engine ===");
     info!("Halal-compliant: spot arb + JIT liquidity only");
-
-    // Load config
-    let config = Arc::new(BotConfig::from_env()?);
 
     if config.dry_run {
         warn!("DRY RUN MODE — opportunities will be logged but not submitted");
@@ -280,8 +308,11 @@ async fn main() -> Result<()> {
                 };
 
                 // Find profitable routes in both directions
+                let route_start = std::time::Instant::now();
                 let mut routes = route_calculator.find_routes(&trigger);
                 routes.extend(route_calculator.find_routes(&trigger_reverse));
+                solana_mev_bot::metrics::counters::record_route_calc_duration_us(
+                    route_start.elapsed().as_micros() as u64);
 
                 // Filter: only keep routes that start/end with SOL (the token we hold)
                 let sol = config::sol_mint();
@@ -300,6 +331,8 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
+                solana_mev_bot::metrics::counters::inc_routes_found(routes[0].hop_count());
+
                 // Simulate (or skip) the best route
                 let best_route = &routes[0];
                 tracing::debug!("Best route: {} hops, est_profit={}, base_mint={}",
@@ -307,6 +340,7 @@ async fn main() -> Result<()> {
 
                 // When SKIP_SIMULATOR=true, bypass re-simulation for speed.
                 // The on-chain minimum_amount_out provides the safety net.
+                let sim_start = std::time::Instant::now();
                 let sim_result = if skip_simulator && best_route.estimated_profit > 0 {
                     // Sanity cap: reject routes with >10 SOL estimated profit (approximation artifact)
                     let max_profit_lamports = 10_000_000_000u64; // 10 SOL
@@ -347,6 +381,8 @@ async fn main() -> Result<()> {
                 } else {
                     profit_simulator.simulate(best_route)
                 };
+                solana_mev_bot::metrics::counters::record_simulation_duration_us(
+                    sim_start.elapsed().as_micros() as u64);
 
                 match sim_result {
                     SimulationResult::Profitable {
@@ -356,6 +392,9 @@ async fn main() -> Result<()> {
                         final_profit_lamports,
                     } => {
                         opportunities_found += 1;
+                        solana_mev_bot::metrics::counters::inc_opportunities(
+                            &format!("{:?}", route.hops[0].dex_type));
+                        solana_mev_bot::metrics::counters::add_profit_lamports(final_profit_lamports);
                         info!(
                             "OPPORTUNITY #{}: {} hops, gross={}, tip={}, net={} lamports, pool={}",
                             opportunities_found,
@@ -368,11 +407,13 @@ async fn main() -> Result<()> {
 
                         if config.dry_run {
                             info!("DRY RUN — skipping bundle submission");
+                            solana_mev_bot::metrics::counters::inc_bundles_skipped("dry_run");
                             continue;
                         }
 
                         if !router::can_submit_route(&route) {
                             tracing::debug!("Route has unsupported DEX, skipping submission");
+                            solana_mev_bot::metrics::counters::inc_bundles_skipped("unsupported_dex");
                             continue;
                         }
 
@@ -386,6 +427,7 @@ async fn main() -> Result<()> {
                         let entry = recent_arbs.entry(arb_key).or_insert((0, now_dedup));
                         if entry.0 >= MAX_SUBS_PER_ARB {
                             tracing::trace!("Arb dedup: already submitted {} times, skipping", entry.0);
+                            solana_mev_bot::metrics::counters::inc_bundles_skipped("dedup");
                             continue;
                         }
                         entry.0 += 1;
@@ -394,6 +436,7 @@ async fn main() -> Result<()> {
                             Some(h) => h,
                             None => {
                                 warn!("Stale or missing blockhash, skipping opportunity");
+                                solana_mev_bot::metrics::counters::inc_bundles_skipped("stale_blockhash");
                                 continue;
                             }
                         };
@@ -441,9 +484,12 @@ async fn main() -> Result<()> {
                                     &instructions, tip_lamports, blockhash, &rt,
                                 );
                                 bundles_submitted += 1;
+                                solana_mev_bot::metrics::counters::inc_bundles_submitted();
+                                solana_mev_bot::metrics::counters::add_tips_paid_lamports(tip_lamports);
                             }
                             Err(e) => {
                                 error!("Bundle build failed: {}", e);
+                                solana_mev_bot::metrics::counters::inc_bundle_build_errors();
                             }
                         }
                     }
@@ -472,6 +518,7 @@ async fn main() -> Result<()> {
                     }
                     _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
                         state_cache.evict_stale();
+                        solana_mev_bot::metrics::counters::set_cache_pools_tracked(state_cache.len());
                         info!("Cache: {} pools tracked", state_cache.len());
                     }
                 }
@@ -482,6 +529,9 @@ async fn main() -> Result<()> {
     // Wait for all tasks
     let _ = tokio::try_join!(stream_handle, cache_handle, blockhash_handle);
     let _ = router_handle.await;
+
+    // Flush any pending OTLP spans
+    drop(_otel_provider);
 
     info!("Engine shutdown complete");
     Ok(())
