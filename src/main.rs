@@ -83,6 +83,23 @@ async fn main() -> Result<()> {
     // Initialize shared state cache
     let state_cache = StateCache::new(config.pool_state_ttl);
 
+    // Pre-populate mint program cache for known mints (all SPL Token).
+    // Without this, Sanctum virtual pools and early routes fail with
+    // "Token program unknown" because the async mint fetch hasn't completed.
+    {
+        use std::str::FromStr;
+        let spl_token = solana_mev_bot::addresses::SPL_TOKEN;
+        state_cache.set_mint_program(solana_mev_bot::addresses::WSOL, spl_token);
+        for (mint, _name) in config::lst_mints() {
+            state_cache.set_mint_program(mint, spl_token);
+        }
+        state_cache.set_mint_program(
+            solana_sdk::pubkey::Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").unwrap(), spl_token);
+        state_cache.set_mint_program(
+            solana_sdk::pubkey::Pubkey::from_str("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB").unwrap(), spl_token);
+        info!("Pre-populated mint program cache for {} known mints", 2 + config::lst_mints().len() + 1);
+    }
+
     // Initialize HTTP client (shared for RPC calls)
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
