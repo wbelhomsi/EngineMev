@@ -11,8 +11,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
+use solana_address_lookup_table_interface::instruction as alt_ix;
 use solana_sdk::{
-    address_lookup_table::instruction as alt_ix,
     hash::Hash,
     pubkey::Pubkey,
     signature::Keypair,

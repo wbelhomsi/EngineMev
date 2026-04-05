@@ -44,7 +44,7 @@ pub fn bootstrap_pools(state_cache: &StateCache) {
         // Deterministic virtual pool address: PDA([b"sanctum-virtual", lst_mint], system_program)
         let (virtual_pool_addr, _) = Pubkey::find_program_address(
             &[b"sanctum-virtual", lst_mint.as_ref()],
-            &solana_sdk::system_program::id(),
+            &solana_system_interface::program::id(),
         );
 
         let reserve_a = SYNTHETIC_RESERVE_BASE;
@@ -258,7 +258,7 @@ pub async fn fetch_lst_rates(
 pub fn update_virtual_pool(state_cache: &StateCache, lst_mint: &Pubkey, rate: f64) {
     let (virtual_pool_addr, _) = Pubkey::find_program_address(
         &[b"sanctum-virtual", lst_mint.as_ref()],
-        &solana_sdk::system_program::id(),
+        &solana_system_interface::program::id(),
     );
     if let Some(mut pool) = state_cache.get_any(&virtual_pool_addr) {
         let reserve_a: u64 = 1_000_000_000_000_000; // 1M SOL in lamports

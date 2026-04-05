@@ -38,9 +38,9 @@ pub async fn load_alt(
     client: &reqwest::Client,
     rpc_url: &str,
     alt_address: &str,
-) -> Result<solana_sdk::address_lookup_table::AddressLookupTableAccount> {
+) -> Result<solana_message::AddressLookupTableAccount> {
     use base64::{engine::general_purpose, Engine as _};
-    use solana_sdk::address_lookup_table::state::AddressLookupTable;
+    use solana_address_lookup_table_interface::state::AddressLookupTable;
 
     let alt_pubkey: Pubkey = alt_address.parse()
         .map_err(|e| anyhow::anyhow!("Invalid ALT_ADDRESS '{}': {}", alt_address, e))?;
@@ -66,7 +66,7 @@ pub async fn load_alt(
     let lookup_table = AddressLookupTable::deserialize(&data)
         .map_err(|e| anyhow::anyhow!("Failed to deserialize ALT: {}", e))?;
 
-    Ok(solana_sdk::address_lookup_table::AddressLookupTableAccount {
+    Ok(solana_message::AddressLookupTableAccount {
         key: alt_pubkey,
         addresses: lookup_table.addresses.to_vec(),
     })

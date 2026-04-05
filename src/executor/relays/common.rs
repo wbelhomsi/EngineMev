@@ -1,15 +1,15 @@
 use base64::{engine::general_purpose, Engine as _};
+use solana_message::AddressLookupTableAccount;
 use solana_sdk::{
-    address_lookup_table::AddressLookupTableAccount,
     hash::Hash,
     instruction::Instruction,
     message::{v0, VersionedMessage},
     pubkey::Pubkey,
     signature::Keypair,
     signer::Signer,
-    system_instruction,
     transaction::{Transaction, VersionedTransaction},
 };
+use solana_system_interface::instruction as system_instruction;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 

@@ -6,7 +6,12 @@ description = "Halal-compliant Solana MEV backrun arbitrage engine"
 
 [dependencies]
 # Solana SDK
-solana-sdk = "2.2"
+solana-sdk = "4.0"
+solana-system-interface = { version = "3.1", features = ["bincode"] }
+solana-message = "4.0"
+solana-address-lookup-table-interface = "3.0"
+# Workaround: solana-keypair 3.1.2 → five8 → five8_core needs "std" for Error impl
+five8_core = { version = "0.1.2", features = ["std"] }
 
 # Jito bundle submission is raw JSON-RPC via reqwest — no SDK dependency needed.
 # The jito-sdk-rust crate just wraps the same HTTP calls with extra overhead.
@@ -80,9 +85,6 @@ too_many_arguments = "allow"
 module_inception = "allow"
 
 [lints.rust]
-# Solana SDK deprecation warnings (system_instruction, Keypair::from_bytes)
-# are upstream issues — suppress until we upgrade SDK
-deprecated = "allow"
 
 [profile.release]
 opt-level = 3

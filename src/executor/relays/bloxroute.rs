@@ -1,6 +1,6 @@
 use serde_json::json;
+use solana_message::AddressLookupTableAccount;
 use solana_sdk::{
-    address_lookup_table::AddressLookupTableAccount,
     hash::Hash,
     instruction::Instruction,
     pubkey::Pubkey,
