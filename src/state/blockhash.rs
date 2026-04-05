@@ -122,6 +122,7 @@ pub async fn run_blockhash_loop(
                             info!("Blockhash fetch recovered after {} failures", consecutive_failures);
                         }
                         consecutive_failures = 0;
+                        crate::metrics::counters::set_blockhash_age_ms(0);
                     }
                     Err(e) => {
                         consecutive_failures += 1;
