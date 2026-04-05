@@ -151,22 +151,50 @@ pub async fn send_public_tx(
     base_instructions: &[solana_sdk::instruction::Instruction],
     signer: &solana_sdk::signature::Keypair,
     recent_blockhash: solana_sdk::hash::Hash,
+    alt: Option<&solana_message::AddressLookupTableAccount>,
 ) {
     use base64::{engine::general_purpose, Engine as _};
-    use solana_sdk::transaction::Transaction;
+    use solana_sdk::message::{v0, VersionedMessage};
+    use solana_sdk::transaction::{Transaction, VersionedTransaction};
 
-    // Build and sign (no tip needed for public send)
-    let tx = Transaction::new_signed_with_payer(
-        base_instructions,
-        Some(&signer.pubkey()),
-        &[signer],
-        recent_blockhash,
-    );
-
-    let tx_bytes = match bincode::serialize(&tx) {
-        Ok(b) => b,
-        Err(e) => { warn!("SEND_PUBLIC: serialize error: {}", e); return; }
+    // Try V0 with ALT first, fall back to legacy
+    let tx_bytes = if let Some(alt_account) = alt {
+        match v0::Message::try_compile(
+            &signer.pubkey(),
+            base_instructions,
+            std::slice::from_ref(alt_account),
+            recent_blockhash,
+        ) {
+            Ok(v0_msg) => {
+                match VersionedTransaction::try_new(VersionedMessage::V0(v0_msg), &[signer]) {
+                    Ok(tx) => bincode::serialize(&tx).ok(),
+                    Err(e) => { warn!("SEND_PUBLIC: V0 sign error: {}", e); None }
+                }
+            }
+            Err(e) => {
+                warn!("SEND_PUBLIC: V0 compile failed, trying legacy: {}", e);
+                None
+            }
+        }
+    } else {
+        None
     };
+
+    // Fall back to legacy if V0 failed
+    let tx_bytes = tx_bytes.unwrap_or_else(|| {
+        let tx = Transaction::new_signed_with_payer(
+            base_instructions,
+            Some(&signer.pubkey()),
+            &[signer],
+            recent_blockhash,
+        );
+        bincode::serialize(&tx).unwrap_or_default()
+    });
+
+    if tx_bytes.is_empty() {
+        warn!("SEND_PUBLIC: serialize error");
+        return;
+    }
 
     if tx_bytes.len() > 1232 {
         warn!("SEND_PUBLIC: tx too large ({} bytes), skipping", tx_bytes.len());

@@ -182,6 +182,7 @@ async fn main() -> Result<()> {
         Arc::new(BloxrouteRelay::new(&config)),
         Arc::new(ZeroSlotRelay::new(&config)),
     ];
+    let alt_for_public = alt_account.clone(); // Keep a ref for SEND_PUBLIC
     let relay_dispatcher = Arc::new(RelayDispatcher::new(relays, Arc::new(searcher_keypair), alt_account));
     relay_dispatcher.warmup().await;
 
@@ -498,9 +499,10 @@ async fn main() -> Result<()> {
                                     let ixs = instructions.clone();
                                     let bh = blockhash;
                                     let signer_arc = relay_dispatcher.signer();
+                                    let alt_ref = alt_for_public.clone();
                                     warn!("SEND_PUBLIC: sending 1 tx via public RPC...");
                                     rt.spawn(async move {
-                                        rpc_helpers::send_public_tx(&http, &rpc, &ixs, &signer_arc, bh).await;
+                                        rpc_helpers::send_public_tx(&http, &rpc, &ixs, &signer_arc, bh, alt_ref.as_deref()).await;
                                     });
                                 }
 
