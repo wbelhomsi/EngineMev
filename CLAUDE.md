@@ -87,6 +87,10 @@ src/
 │       ├── bloxroute.rs # bloXroute relay
 │       ├── astralane.rs # Astralane relay (HTTP/2 keepalive)
 │       └── zeroslot.rs  # ZeroSlot relay
+├── metrics/
+│   ├── mod.rs           # init(), shutdown(), Prometheus HTTP server
+│   ├── counters.rs      # All metric helper functions (atomic, zero-cost)
+│   └── tracing_layer.rs # Optional OTLP tracing layer builder
 └── state/
     ├── mod.rs           # Exports StateCache, BlockhashCache
     ├── cache.rs         # DashMap pool cache with TTL, token→pool index, bin/tick array caches
@@ -201,7 +205,7 @@ Base DEX↔DEX backrun arb working live on mainnet.
 **Remaining:**
 - Deploy arb-guard to mainnet (~7 SOL for buffer)
 - ~~Upgrade solana-sdk 2.2 → modular crates 4.x~~ DONE (solana-sdk 4.0.1 + modular crates)
-- Grafana + OpenTelemetry metrics
+- ~~Grafana + OpenTelemetry metrics~~ DONE (Prometheus /metrics + OTLP tracing spans)
 - ~~Deduplication of repeated opportunities on same pool pair~~ DONE (per-pool slot dedup + arb route signature dedup with 2s window)
 - Phoenix lot size conversion (Phoenix excluded from submission for now)
 
@@ -262,3 +266,6 @@ See `.env.example`. Key ones:
 - `TIP_FRACTION` — Fraction of profit given as Jito tip (default 0.50)
 - `LST_ARB_ENABLED` — Enable LST rate arb (default true)
 - `LST_MIN_SPREAD_BPS` — Minimum spread for LST arb (default 5)
+- `METRICS_PORT` — Prometheus `/metrics` HTTP endpoint port (disabled if unset)
+- `OTLP_ENDPOINT` — OTLP HTTP endpoint for tracing span export (disabled if unset)
+- `OTLP_SERVICE_NAME` — Service name in OTLP traces (default `mev-engine`)
