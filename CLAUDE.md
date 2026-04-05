@@ -203,7 +203,7 @@ Base DEX↔DEX backrun arb working live on mainnet.
 - Tested on mainnet: ~300 realistic opportunities in 5 min, ~0.000189 SOL avg profit per opp
 
 **Remaining:**
-- Deploy arb-guard to mainnet (~7 SOL for buffer)
+- ~~Deploy arb-guard to mainnet~~ DONE (CbjPG5TEEhZGXsA8prmJPfvgH51rudYgcubRUtCCGyUw, 500KB buffer, 3.56 SOL)
 - ~~Upgrade solana-sdk 2.2 → modular crates 4.x~~ DONE (solana-sdk 4.0.1 + modular crates)
 - ~~Grafana + OpenTelemetry metrics~~ DONE (Prometheus /metrics + OTLP tracing spans)
 - ~~Deduplication of repeated opportunities on same pool pair~~ DONE (per-pool slot dedup + arb route signature dedup with 2s window)
