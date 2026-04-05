@@ -17,6 +17,21 @@ const ORCA_WHIRLPOOL_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
 const ORCA_SWAP_V2_DISCRIMINATOR: [u8; 8] = [0x2b, 0x04, 0xed, 0x0b, 0x1a, 0xc9, 0x1e, 0x62];
 
 #[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct ArbV2Params {
+    pub min_amount_out: u64,
+    pub hops: Vec<HopV2Params>,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct HopV2Params {
+    pub program_id_index: u8,    // Index in remaining_accounts for the DEX program
+    pub accounts_start: u8,      // Start index in remaining_accounts for this hop
+    pub accounts_len: u8,        // Number of accounts for this hop
+    pub output_token_index: u8,  // Index in remaining_accounts of output token account
+    pub ix_data: Vec<u8>,        // Raw instruction data (client-built, DEX-specific)
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize)]
 pub struct ArbParams {
     pub amount_in: u64,
     pub min_amount_out: u64,
@@ -212,6 +227,97 @@ pub mod arb_guard {
 
         Ok(())
     }
+
+    /// DEX-agnostic multi-hop arb executor via passthrough CPI.
+    ///
+    /// The client builds raw swap instructions for each hop (any DEX).
+    /// This program invokes them via CPI and verifies:
+    /// 1. Each hop produces non-zero output
+    /// 2. Final balance >= start balance + min_amount_out
+    ///
+    /// All accounts are passed via remaining_accounts. The first must be
+    /// the signer. Each hop references slices of remaining_accounts via
+    /// index parameters in HopV2Params.
+    pub fn execute_arb_v2<'info>(
+        ctx: Context<'info, ExecuteArbV2>,
+        params: ArbV2Params,
+    ) -> Result<()> {
+        let remaining = &ctx.remaining_accounts;
+
+        // First remaining account must be the signer
+        require!(!remaining.is_empty(), ArbGuardError::SignerRequired);
+        let signer = &remaining[0];
+        require!(signer.is_signer, ArbGuardError::SignerRequired);
+
+        // Must have at least one hop
+        require!(!params.hops.is_empty(), ArbGuardError::InvalidHopParams);
+
+        // Identify the profit token: last hop's output (circular arb ends where it starts)
+        let profit_token_idx = params.hops.last()
+            .unwrap() // safe: checked non-empty above
+            .output_token_index as usize;
+        require!(profit_token_idx < remaining.len(), ArbGuardError::InvalidHopParams);
+        let start_balance = get_token_balance(&remaining[profit_token_idx])?;
+
+        // Execute each hop
+        for (hop_idx, hop) in params.hops.iter().enumerate() {
+            let prog_idx = hop.program_id_index as usize;
+            let acct_start = hop.accounts_start as usize;
+            let acct_end = acct_start.checked_add(hop.accounts_len as usize)
+                .ok_or(ArbGuardError::OverflowError)?;
+            let out_idx = hop.output_token_index as usize;
+
+            // Bounds checks
+            require!(prog_idx < remaining.len(), ArbGuardError::InvalidHopParams);
+            require!(acct_end <= remaining.len(), ArbGuardError::InvalidHopParams);
+            require!(out_idx < remaining.len(), ArbGuardError::InvalidHopParams);
+
+            // Pre-swap balance of output token
+            let pre_balance = get_token_balance(&remaining[out_idx])?;
+
+            // Build CPI instruction from hop params
+            let program_id = remaining[prog_idx].key();
+            let account_infos: Vec<AccountInfo<'info>> = remaining[acct_start..acct_end]
+                .iter()
+                .cloned()
+                .collect();
+            let account_metas: Vec<solana_program::instruction::AccountMeta> = account_infos
+                .iter()
+                .map(|a| {
+                    if a.is_writable {
+                        solana_program::instruction::AccountMeta::new(*a.key, a.is_signer)
+                    } else {
+                        solana_program::instruction::AccountMeta::new_readonly(*a.key, a.is_signer)
+                    }
+                })
+                .collect();
+
+            let ix = solana_program::instruction::Instruction {
+                program_id,
+                accounts: account_metas,
+                data: hop.ix_data.clone(),
+            };
+
+            solana_program::program::invoke(&ix, &account_infos)?;
+
+            // Post-swap balance — verify non-zero output
+            let post_balance = get_token_balance(&remaining[out_idx])?;
+            require!(post_balance > pre_balance, ArbGuardError::SwapOutputZero);
+            let actual_received = post_balance - pre_balance;
+
+            msg!("Hop {}: received {} tokens", hop_idx, actual_received);
+        }
+
+        // Final profit check: end balance must exceed start + min_amount_out
+        let end_balance = get_token_balance(&remaining[profit_token_idx])?;
+        require!(
+            end_balance >= start_balance.checked_add(params.min_amount_out)
+                .ok_or(ArbGuardError::OverflowError)?,
+            ArbGuardError::NoProfitDetected
+        );
+
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
@@ -258,6 +364,9 @@ pub struct ProfitCheck<'info> {
 #[derive(Accounts)]
 pub struct ExecuteArb {}
 
+#[derive(Accounts)]
+pub struct ExecuteArbV2 {}
+
 #[account]
 pub struct GuardState {
     pub start_balance: u64,     // 8 bytes
@@ -294,4 +403,6 @@ pub enum ArbGuardError {
     InsufficientOutput,
     #[msg("Invalid token account data")]
     InvalidTokenAccount,
+    #[msg("Invalid hop parameters")]
+    InvalidHopParams,
 }
