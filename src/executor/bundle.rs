@@ -88,12 +88,7 @@ impl BundleBuilder {
                         let prog = if mint == wsol {
                             token_program
                         } else {
-                            match self.state_cache.get_mint_program(&mint) {
-                                Some(p) => p,
-                                None => return Err(anyhow::anyhow!(
-                                    "Token program unknown for mint {} — cache not populated yet", mint
-                                )),
-                            }
+                            self.state_cache.get_mint_program(&mint).unwrap_or(token_program)
                         };
                         ata_mints.push((mint, prog));
                     }
@@ -178,12 +173,7 @@ impl BundleBuilder {
                     let prog = if mint == wsol {
                         token_program
                     } else {
-                        match self.state_cache.get_mint_program(&mint) {
-                            Some(p) => p,
-                            None => return Err(anyhow::anyhow!(
-                                "Token program unknown for mint {} — cache not populated yet", mint
-                            )),
-                        }
+                        self.state_cache.get_mint_program(&mint).unwrap_or(token_program)
                     };
                     ata_mints.push((mint, prog));
                 }
