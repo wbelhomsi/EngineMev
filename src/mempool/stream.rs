@@ -1597,7 +1597,7 @@ pub fn parse_phoenix_market(pool_address: &Pubkey, data: &[u8], slot: u64) -> Op
     let (best_bid_ticks, bid_depth) = phoenix_tree_best(data, BIDS_TREE_START, base_lot_size);
 
     // Asks tree starts after bids: 928 + 32 (header) + bids_size * 64 (nodes)
-    let asks_tree_start = BIDS_TREE_START + 32 + bids_size * 64;
+    let asks_tree_start = BIDS_TREE_START + 32 + bids_size.checked_mul(64)?;
     let (best_ask_ticks, ask_depth) = phoenix_tree_best(data, asks_tree_start, base_lot_size);
     let _ = asks_size; // used implicitly via tree root/nodes
 

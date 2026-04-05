@@ -59,7 +59,7 @@ dotenv = "0.15"
 
 # Prometheus metrics (atomic counters, zero hot-path cost)
 metrics = "0.24"
-metrics-exporter-prometheus = "0.18"
+metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 
 # OpenTelemetry tracing (optional, enabled by OTLP_ENDPOINT env var)
 opentelemetry = "0.31"
