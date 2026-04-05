@@ -1,13 +1,13 @@
+use solana_message::AddressLookupTableAccount;
 use solana_sdk::{
-    address_lookup_table::AddressLookupTableAccount,
     instruction::Instruction,
     message::{v0, VersionedMessage},
     pubkey::Pubkey,
     signature::Keypair,
     signer::Signer,
-    system_instruction,
     transaction::VersionedTransaction,
 };
+use solana_system_interface::instruction as system_instruction;
 use std::str::FromStr;
 
 use super::harness::SurfpoolHarness;
