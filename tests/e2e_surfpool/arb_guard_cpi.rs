@@ -1,7 +1,7 @@
 use solana_sdk::instruction::{AccountMeta, Instruction};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signer::Signer;
-use solana_sdk::system_instruction;
+use solana_system_interface::instruction as system_instruction;
 use std::str::FromStr;
 
 use solana_mev_bot::mempool::stream::parse_orca_whirlpool;

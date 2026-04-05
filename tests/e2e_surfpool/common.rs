@@ -3,8 +3,8 @@ use solana_sdk::{
     pubkey::Pubkey,
     signature::Keypair,
     signer::Signer,
-    system_instruction,
 };
+use solana_system_interface::instruction as system_instruction;
 use std::str::FromStr;
 
 use solana_mev_bot::mempool::stream::{
@@ -371,7 +371,7 @@ pub fn create_ata_idempotent_ix(
             AccountMeta::new(*ata, false),
             AccountMeta::new_readonly(*payer, false),
             AccountMeta::new_readonly(*mint, false),
-            AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+            AccountMeta::new_readonly(solana_system_interface::program::id(), false),
             AccountMeta::new_readonly(*token_program, false),
         ],
         data: vec![1], // 1 = CreateIdempotent
