@@ -362,13 +362,13 @@ async fn main() -> Result<()> {
                 // The on-chain minimum_amount_out provides the safety net.
                 let sim_start = std::time::Instant::now();
                 let sim_result = if skip_simulator && best_route.estimated_profit > 0 {
-                    // Sanity cap: reject routes with >10 SOL estimated profit (approximation artifact)
-                    let max_profit_lamports = 10_000_000_000u64; // 10 SOL
+                    // Sanity cap: reject routes with >1 SOL estimated profit (likely stale state)
+                    let max_profit_lamports = 1_000_000_000u64; // 1 SOL
                     if best_route.estimated_profit_lamports > max_profit_lamports {
-                        warn!("SKIP_SIMULATOR: sanity cap — estimated profit {} > 10 SOL, skipping",
+                        warn!("SKIP_SIMULATOR: sanity cap — estimated profit {} > 1 SOL, skipping",
                               best_route.estimated_profit_lamports);
                         SimulationResult::Unprofitable {
-                            reason: format!("sanity cap: estimated profit {} > 10 SOL",
+                            reason: format!("sanity cap: estimated profit {} > 1 SOL",
                                             best_route.estimated_profit_lamports),
                         }
                     } else {

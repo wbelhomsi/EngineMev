@@ -138,7 +138,7 @@ DRY_RUN=true
 ### Tests
 
 ```bash
-make test                                     # 146 unit tests
+make test                                     # 198 unit tests
 make lint                                     # clippy (warnings = errors)
 make coverage                                 # line coverage report (49.3%)
 make ci                                       # lint + test + coverage
@@ -173,7 +173,7 @@ Base DEX↔DEX backrun arb working live on mainnet.
 - Lazy vault fetch for Raydium AMM/CP
 - CLMM single-tick math using u128 integer arithmetic (Orca, Raydium CLMM, DAMM v2 concentrated)
 - CLMM fee rate uses 1,000,000 denominator (validated against production system)
-- Profit sanity cap (10 SOL max) catches approximation artifacts
+- Profit sanity cap (1 SOL max) catches approximation artifacts from stale reserves
 - Route calculator (2-hop and 3-hop)
 - Profit simulator with fresh-state validation and fresh hop output writeback
 - Bundle builder with minimum_amount_out enforcement and correct per-hop amount_in chaining
@@ -198,7 +198,7 @@ Base DEX↔DEX backrun arb working live on mainnet.
 - Shared relay common.rs: RateLimiter, build_signed_bundle_tx, parse_jsonrpc_response
 - Decomposed main.rs (994→515 lines): sanctum.rs, rpc_helpers.rs, can_submit_route in router
 - Safety: TIP_FRACTION validated, SKIP_SIMULATOR has sanity cap, i128 profit math, relay key redaction
-- 146 unit tests + 3 Surfpool E2E tests, 0 clippy warnings
+- 198 unit tests + 3 Surfpool E2E tests, 0 clippy warnings
 - Makefile: make lint, make test, make coverage, make ci
 - Tested on mainnet: ~300 realistic opportunities in 5 min, ~0.000189 SOL avg profit per opp
 
@@ -248,7 +248,7 @@ Flashbots MEV-Share on Ethereum. See `docs/STRATEGY-MEVSHARE-ETH.md`.
 15. **Never use f64 for CLMM math.** The `P * P_new` product overflows f64 precision. Use u128 with careful division ordering to avoid overflow.
 16. **DLMM bin prices are precomputed on-chain.** Don't compute `(1+binStep/10000)^binId` — it overflows for real bin IDs. Parse `bin.price` (u128) from bin array accounts instead.
 17. **DLMM active_id max is ~443636** (not 2^23). Values like 8388608 are garbage — skip those pools.
-18. **Profit sanity cap: 10 SOL.** Any route showing >10 SOL profit is an approximation artifact. The simulator rejects these automatically.
+18. **Profit sanity cap: 1 SOL.** Any route showing >1 SOL profit is almost certainly a stale-state artifact. The simulator rejects these automatically.
 19. **Phoenix/Manifest SDK crates (phoenix-v1, manifest-dex) conflict with solana-sdk 2.2.** We use raw byte-offset parsing with bytemuck instead. Do not add these crates to Cargo.toml.
 20. **Phoenix market accounts are variable-size.** Can't route by data.len() like AMMs. The `try_parse_orderbook()` fallback handles this.
 21. **Phoenix orderbook top-of-book requires Red-Black tree traversal.** Currently deferred — pools are discovered with zero reserves/pricing. Full book parsing needs the sokoban crate or manual tree walk.

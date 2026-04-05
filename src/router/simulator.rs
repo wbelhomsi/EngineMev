@@ -126,14 +126,15 @@ impl ProfitSimulator {
 
         let gross_profit_u64 = gross_profit as u64;
 
-        // Sanity cap: no legitimate single arb produces > 10 SOL profit.
-        // If the simulator calculates more, it's a math artifact from
-        // approximate reserve calculations (CLMM single-tick, DLMM synthetic).
-        const MAX_SANE_PROFIT: u64 = 10_000_000_000; // 10 SOL
+        // Sanity cap: any single arb showing > 1 SOL net profit is almost
+        // certainly an approximation artifact from stale reserves. The old
+        // 10 SOL cap let 1-6 SOL "phantom profits" through, wasting relay
+        // submissions on doomed bundles that arb-guard would reject on-chain.
+        const MAX_SANE_PROFIT: u64 = 1_000_000_000; // 1 SOL
         if gross_profit_u64 > MAX_SANE_PROFIT {
             return SimulationResult::Unprofitable {
                 reason: format!(
-                    "Profit {} exceeds sanity cap (likely approximation artifact)",
+                    "sanity cap: net profit {} lamports > 1 SOL, likely stale state",
                     gross_profit_u64
                 ),
             };
