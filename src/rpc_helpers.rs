@@ -126,12 +126,19 @@ pub async fn simulate_bundle_tx(
                         info!("SIM SUCCESS | logs:\n  {}", logs);
                     } else {
                         warn!("SIM FAILED | err={} | logs:\n  {}", err, logs);
+                        crate::metrics::counters::inc_simulation_errors();
                     }
                 }
-                Err(e) => warn!("Simulation response parse error: {}", e),
+                Err(e) => {
+                    warn!("Simulation response parse error: {}", e);
+                    crate::metrics::counters::inc_simulation_errors();
+                }
             }
         }
-        Err(e) => warn!("Simulation request failed: {}", crate::config::redact_url(&e.to_string())),
+        Err(e) => {
+            warn!("Simulation request failed: {}", crate::config::redact_url(&e.to_string()));
+            crate::metrics::counters::inc_simulation_errors();
+        }
     }
 }
 

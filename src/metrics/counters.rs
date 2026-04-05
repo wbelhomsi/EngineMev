@@ -56,6 +56,22 @@ pub fn inc_vault_fetches(dex_type: &str) {
     counter!("vault_fetches_total", "dex_type" => dex_type.to_string()).increment(1);
 }
 
+pub fn inc_simulation_rejected(reason: &str) {
+    counter!("simulation_rejected_total", "reason" => reason.to_string()).increment(1);
+}
+
+pub fn inc_simulation_errors() {
+    counter!("simulation_rpc_errors_total").increment(1);
+}
+
+pub fn inc_vault_fetch_errors(dex_type: &str) {
+    counter!("vault_fetch_errors_total", "dex_type" => dex_type.to_string()).increment(1);
+}
+
+pub fn inc_relay_errors(relay: &str, error_type: &str) {
+    counter!("relay_errors_total", "relay" => relay.to_string(), "error_type" => error_type.to_string()).increment(1);
+}
+
 // ── Gauges ────────────────────────────────────────────────────────────────
 
 pub fn set_cache_pools_tracked(count: usize) {
@@ -90,4 +106,12 @@ pub fn record_relay_latency_us(relay: &str, us: u64) {
 
 pub fn record_geyser_parse_duration_us(dex_type: &str, us: u64) {
     histogram!("geyser_parse_duration_us", "dex_type" => dex_type.to_string()).record(us as f64);
+}
+
+pub fn record_bundle_build_duration_us(us: u64) {
+    histogram!("bundle_build_duration_us").record(us as f64);
+}
+
+pub fn record_pipeline_duration_us(us: u64) {
+    histogram!("pipeline_duration_us").record(us as f64);
 }

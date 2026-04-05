@@ -201,6 +201,25 @@ pub fn record_relay_metrics(result: &super::RelayResult) {
     if result.latency_us > 0 {
         crate::metrics::counters::record_relay_latency_us(&result.relay_name, result.latency_us);
     }
+    // Categorize errors for deeper debugging
+    if !result.success {
+        if let Some(ref err) = result.error {
+            let error_type = if err.contains("Rate limited") {
+                "rate_limited"
+            } else if err.contains("Tx too large") {
+                "tx_too_large"
+            } else if err.contains("sign error") || err.contains("compile failed") {
+                "build_error"
+            } else if err.contains("Request failed") || err.contains("timeout") {
+                "network_error"
+            } else if err.contains("already processed") || err.contains("blockhash") {
+                "stale_blockhash"
+            } else {
+                "on_chain_error"
+            };
+            crate::metrics::counters::inc_relay_errors(&result.relay_name, error_type);
+        }
+    }
 }
 
 /// Build a standard reqwest HTTP client for relay submission.
