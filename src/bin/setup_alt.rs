@@ -23,7 +23,7 @@ use std::str::FromStr;
 
 /// The 17 addresses to store in the ALT.
 fn alt_addresses() -> Vec<Pubkey> {
-    [
+    let mut addrs: Vec<Pubkey> = [
         // System programs
         "11111111111111111111111111111111",              // System Program
         "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  // SPL Token
@@ -44,10 +44,32 @@ fn alt_addresses() -> Vec<Pubkey> {
         // Token mints
         "So11111111111111111111111111111111111111112",    // wSOL
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+        // Arb-guard program
+        "CbjPG5TEEhZGXsA8prmJPfvgH51rudYgcubRUtCCGyUw",  // arb-guard program ID
     ]
     .iter()
     .map(|s| Pubkey::from_str(s).expect("hardcoded pubkey must parse"))
-    .collect()
+    .collect::<Vec<_>>();
+
+    // Add arb-guard PDA (derived at runtime)
+    let guard_program = Pubkey::from_str("CbjPG5TEEhZGXsA8prmJPfvgH51rudYgcubRUtCCGyUw").unwrap();
+    let searcher = Pubkey::from_str("149xtHKerf2MgJVQ2CZB34bUALs8GaZjZWmQnC9si9yh").unwrap();
+    let (guard_pda, _) = Pubkey::find_program_address(
+        &[b"guard", searcher.as_ref()],
+        &guard_program,
+    );
+    addrs.push(guard_pda);
+
+    // Add signer's wSOL ATA
+    let wsol = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
+    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+    let (wsol_ata, _) = Pubkey::find_program_address(
+        &[searcher.as_ref(), token_program.as_ref(), wsol.as_ref()],
+        &Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap(),
+    );
+    addrs.push(wsol_ata);
+
+    addrs
 }
 
 /// Load keypair from SEARCHER_PRIVATE_KEY (base58) or SEARCHER_KEYPAIR file (JSON).
