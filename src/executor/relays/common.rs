@@ -188,6 +188,21 @@ pub fn parse_jsonrpc_response(
     }
 }
 
+/// Record metrics for a relay submission result.
+pub fn record_relay_metrics(result: &super::RelayResult) {
+    let status = if result.success {
+        "accepted"
+    } else if result.error.as_deref() == Some("Rate limited") {
+        "rate_limited"
+    } else {
+        "rejected"
+    };
+    crate::metrics::counters::inc_relay_submission(&result.relay_name, status);
+    if result.latency_us > 0 {
+        crate::metrics::counters::record_relay_latency_us(&result.relay_name, result.latency_us);
+    }
+}
+
 /// Build a standard reqwest HTTP client for relay submission.
 pub fn build_http_client(relay_name: &str) -> reqwest::Client {
     reqwest::Client::builder()

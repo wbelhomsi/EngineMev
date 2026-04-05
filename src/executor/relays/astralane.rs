@@ -148,10 +148,15 @@ impl super::Relay for AstralaneRelay {
     ) -> RelayResult {
         let url = match &self.endpoint {
             Some(url) => url.clone(),
-            None => return common::fail("astralane", "Not configured".to_string()),
+            None => {
+                let r = common::fail("astralane", "Not configured".to_string());
+                common::record_relay_metrics(&r);
+                return r;
+            }
         };
 
         if let Err(r) = self.rate_limiter.check("astralane") {
+            common::record_relay_metrics(&r);
             return r;
         }
 
@@ -164,6 +169,7 @@ impl super::Relay for AstralaneRelay {
             Ok(enc) => enc,
             Err(mut r) => {
                 r.latency_us = start.elapsed().as_micros() as u64;
+                common::record_relay_metrics(&r);
                 return r;
             }
         };
@@ -184,7 +190,7 @@ impl super::Relay for AstralaneRelay {
 
         let url_with_auth = self.url_with_auth(&url);
 
-        let result = self.http_client
+        let http_result = self.http_client
             .post(&url_with_auth)
             .header("api_key", &self.api_key)
             .json(&payload)
@@ -193,7 +199,7 @@ impl super::Relay for AstralaneRelay {
 
         let latency = start.elapsed().as_micros() as u64;
 
-        match result {
+        let result = match http_result {
             Ok(resp) => {
                 let status = resp.status();
                 match resp.text().await {
@@ -246,6 +252,8 @@ impl super::Relay for AstralaneRelay {
                 }
             }
             Err(e) => common::fail_with_latency("astralane", crate::config::redact_url(&format!("Request failed: {}", e)), latency),
-        }
+        };
+        common::record_relay_metrics(&result);
+        result
     }
 }
