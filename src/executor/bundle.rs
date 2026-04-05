@@ -129,11 +129,8 @@ impl BundleBuilder {
             return Ok(instructions);
         }
 
-        // Optional: arb-guard start_check (records pre-swap wSOL ATA balance)
-        if let Some(ref guard_program) = self.arb_guard_program_id {
-            let wsol_ata = derive_ata(&self.searcher_keypair.pubkey(), &wsol);
-            instructions.push(build_guard_start_check_ix(guard_program, &self.searcher_keypair.pubkey(), &wsol_ata));
-        }
+        // arb-guard start_check is deferred — we add it below only if the tx
+        // would still fit within the 1232-byte limit. See size guard at the end.
 
         // Compute budget: set unit limit and priority fee for Jito auction placement
         let compute_budget_program = addresses::COMPUTE_BUDGET;
@@ -223,10 +220,48 @@ impl BundleBuilder {
             instructions.push(ix);
         }
 
-        // Optional: arb-guard profit_check BEFORE CloseAccount so the wSOL ATA
-        // balance is still readable. Reverts the entire TX if no profit detected.
-        if let Some(ref guard_program) = self.arb_guard_program_id {
+        // Size guard: estimate unique accounts. If arb-guard would push the tx
+        // over the 1232-byte limit, skip it. The minimum_amount_out on each swap
+        // IX still provides slippage protection.
+        let use_guard = if let Some(ref guard_program) = self.arb_guard_program_id {
             let wsol_ata = derive_ata(&signer_pubkey, &wsol);
+            let guard_pda = derive_guard_pda(guard_program, &signer_pubkey);
+
+            // Count what the guard would add: guard_pda + wsol_ata are likely
+            // not in the ALT (signer-specific). Check if existing instructions
+            // already reference them.
+            let current_accounts = estimate_unique_accounts(&instructions);
+            let mut extra = 0usize;
+            let existing: std::collections::HashSet<Pubkey> = instructions.iter()
+                .flat_map(|ix| ix.accounts.iter().map(|a| a.pubkey).chain(std::iter::once(ix.program_id)))
+                .collect();
+            if !existing.contains(&guard_pda) { extra += 1; }
+            if !existing.contains(&wsol_ata) { extra += 1; }
+            if !existing.contains(guard_program) { extra += 1; }
+
+            if current_accounts + extra > MAX_ACCOUNTS_FOR_GUARD {
+                debug!(
+                    "Skipping arb-guard: {} + {} = {} unique accounts exceeds {} threshold",
+                    current_accounts, extra, current_accounts + extra, MAX_ACCOUNTS_FOR_GUARD
+                );
+                crate::metrics::counters::inc_bundles_skipped("guard_too_large");
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        };
+
+        if use_guard {
+            let guard_program = self.arb_guard_program_id.as_ref().unwrap();
+            let wsol_ata = derive_ata(&signer_pubkey, &wsol);
+
+            // Insert start_check at position 1 (after compute budget)
+            let start_ix = build_guard_start_check_ix(guard_program, &signer_pubkey, &wsol_ata);
+            instructions.insert(1, start_ix);
+
+            // Append profit_check BEFORE CloseAccount
             let min_profit: u64 = std::env::var("MIN_ON_CHAIN_PROFIT")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -255,7 +290,10 @@ impl BundleBuilder {
             });
         }
 
-        debug!("Built {} arb instructions for {} hops", instructions.len(), route.hop_count());
+        debug!(
+            "Built {} arb instructions for {} hops (guard={})",
+            instructions.len(), route.hop_count(), use_guard
+        );
         Ok(instructions)
     }
 
@@ -483,6 +521,29 @@ fn derive_ata_with_program(wallet: &Pubkey, mint: &Pubkey, token_program: &Pubke
     let (ata, _) = Pubkey::find_program_address(seeds, &addresses::ATA_PROGRAM);
     ata
 }
+
+// ─── Tx size estimation ──────────────────────────────────────────────────────
+
+/// Count unique accounts (program IDs + account metas) across instructions.
+/// Used to estimate V0 transaction size — each account not in the ALT costs
+/// 32 bytes as a static key.
+pub fn estimate_unique_accounts(instructions: &[Instruction]) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    for ix in instructions {
+        seen.insert(ix.program_id);
+        for meta in &ix.accounts {
+            seen.insert(meta.pubkey);
+        }
+    }
+    seen.len()
+}
+
+/// Maximum unique accounts before arb-guard IXs are stripped to stay under
+/// the 1232-byte Solana transaction limit. Empirically tuned: the guard adds
+/// ~2 accounts not in ALT (guard PDA + wSOL ATA) = 64 bytes + IX overhead.
+/// At 26 unique accounts the base tx is ~1140 bytes; adding guard pushes it
+/// to ~1240 bytes which exceeds the limit.
+const MAX_ACCOUNTS_FOR_GUARD: usize = 26;
 
 // ─── Arb-Guard IX builders ───────────────────────────────────────────────────
 
