@@ -11,11 +11,10 @@ solana-sdk = "2.2"
 # Jito bundle submission is raw JSON-RPC via reqwest — no SDK dependency needed.
 # The jito-sdk-rust crate just wraps the same HTTP calls with extra overhead.
 
-# Yellowstone Geyser (replaces dead Jito mempool stream)
-yellowstone-grpc-client = "12.1"
-yellowstone-grpc-proto = "12.1"
+# LaserStream (replaces yellowstone-grpc-client + yellowstone-grpc-proto)
+helius-laserstream = "0.1.9"
 
-# gRPC / networking
+# gRPC / networking (tonic 0.12 required by helius-laserstream)
 tonic = { version = "0.12", features = ["tls", "tls-webpki-roots"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
@@ -33,6 +32,9 @@ base64 = "0.22"
 # which conflicts with our solana-sdk 2.2 + yellowstone-grpc-client 12.1 stack.
 # We use bytemuck for raw byte parsing of Phoenix/Manifest market accounts instead.
 bytemuck = { version = "1", features = ["derive"] }
+
+# Async stream processing
+futures = "0.3"
 
 # Data structures
 dashmap = "6"

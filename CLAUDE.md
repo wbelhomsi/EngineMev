@@ -47,8 +47,7 @@ Subscribe by **DEX program owner** — NOT by individual vault accounts or Token
 
 - **No jito-sdk-rust dependency**: Raw JSON-RPC via reqwest is leaner.
 - **No Jito gRPC SearcherServiceClient**: Deprecated since March 2024.
-- **Yellowstone gRPC Geyser** (v12.x): Streams pool state changes from validator memory at sub-50ms via Helius LaserStream.
-- **TLS required for LaserStream**: `ClientTlsConfig::new().with_native_roots()` on the gRPC builder.
+- **Helius LaserStream SDK** (`helius-laserstream 0.1.9`): Streams pool state changes from validator memory at sub-50ms. Built-in auto-reconnection with slot-based replay, Zstd compression (70-80% bandwidth reduction), TLS. Replaces manual `yellowstone-grpc-client` connection + reconnection logic.
 - **crossbeam-channel** between async Geyser stream and sync router thread.
 - **DashMap** for lock-free concurrent cache reads across threads.
 - **Per-DEX parsers in stream.rs**: Route by data size (653=Orca, 1560=CLMM, 904=DLMM, 1112=DAMM v2, 752=Raydium AMM, 637=Raydium CP). Phoenix and Manifest use variable-size accounts routed by `try_parse_orderbook()` fallback instead of data size.
@@ -59,8 +58,7 @@ Subscribe by **DEX program owner** — NOT by individual vault accounts or Token
 
 ```
 src/
-├── main.rs              # Pipeline orchestration: Geyser → Router → Bundle → Relay (~515 lines)
-│                        # Geyser reconnect with exponential backoff (1s → 30s max)
+├── main.rs              # Pipeline orchestration: Geyser → Router → Bundle → Relay
 ├── lib.rs               # Re-exports modules for integration tests
 ├── addresses.rs         # Centralized const Pubkey for all program IDs, mints (compile-time, zero runtime cost)
 ├── config.rs            # Env config, relay endpoints, redact_url()
@@ -68,7 +66,7 @@ src/
 ├── rpc_helpers.rs       # load_keypair, load_alt, simulate_bundle_tx, send_public_tx
 ├── mempool/
 │   ├── mod.rs           # Exports GeyserStream, PoolStateChange
-│   └── stream.rs        # Yellowstone gRPC subscription, per-DEX pool state parsers,
+│   └── stream.rs        # LaserStream gRPC subscription, per-DEX pool state parsers,
 │                        # lazy vault/Serum/bin-array/tick-array fetches
 ├── router/
 │   ├── mod.rs           # Exports RouteCalculator, ProfitSimulator, can_submit_route
@@ -179,8 +177,7 @@ Base DEX↔DEX backrun arb working live on mainnet.
 - All 8 DEXes + Sanctum enabled in can_submit_route()
 - Multi-relay fan-out (Jito/Nozomi/bloXroute/Astralane/ZeroSlot) with per-relay rate limiting
 - Blockhash cache (2s refresh, 5s staleness)
-- Geyser reconnect with exponential backoff
-- Helius LaserStream TLS connection
+- Helius LaserStream SDK with auto-reconnection, Zstd compression, slot-based replay
 - API key redaction in all logs
 - LST rate arb (Sanctum virtual pools, enabled for submission)
 - Phoenix V1 + Manifest CLOB market parsing + swap IX builders (enabled for submission)
@@ -202,7 +199,7 @@ Base DEX↔DEX backrun arb working live on mainnet.
 
 **Remaining:**
 - Deploy arb-guard to mainnet (~7 SOL for buffer)
-- Upgrade solana-sdk 2.2 → latest (unblocks LaserStream SDK + performance improvements)
+- Upgrade solana-sdk 2.2 → modular crates 4.x (unblocks future LaserStream features + performance improvements)
 - Grafana + OpenTelemetry metrics
 - Deduplication of repeated opportunities on same pool pair
 - Phoenix lot size conversion (Phoenix excluded from submission for now)
@@ -232,11 +229,11 @@ Flashbots MEV-Share on Ethereum. See `docs/STRATEGY-MEVSHARE-ETH.md`.
 1. **Jito mempool is DEAD.** `subscribe_mempool` was killed March 2024. Don't revive it.
 2. **`jito-sdk-rust` is unnecessary.** We do raw JSON-RPC via reqwest.
 3. **`solana-sdk` 2.x has breaking changes from 1.x.** Verify imports if upgrading.
-4. **yellowstone-grpc-proto generated types** are sensitive to proto version.
+4. **LaserStream proto types** (`helius_laserstream::grpc::*`) are from `laserstream-core-proto`, a fork of yellowstone-grpc-proto. Same structure, different crate.
 5. **Base64 v0.22 API:** Uses `Engine` trait — `general_purpose::STANDARD.encode()`.
 6. **DashMap `get_mut` returns `RefMut`** — must call `.value_mut()`.
 7. **`crossbeam_channel::Sender::try_send`** is non-blocking — correct for stale events.
-8. **Geyser TLS required for LaserStream** — `ClientTlsConfig::new().with_native_roots()`.
+8. **LaserStream handles TLS internally** — no manual `ClientTlsConfig` needed. Connection, reconnection, and Zstd compression are handled by the SDK.
 9. **Raydium CLMM tick_current is at offset 269** (not 261). sqrt_price_x64 (u128, 16B) at 253 ends at 269, tick follows.
 10. **Meteora DLMM account size is 904 bytes** (not 902 or 920). Verified on mainnet.
 11. **Raydium CP discriminator:** `[247, 237, 227, 245, 215, 195, 222, 70]`.

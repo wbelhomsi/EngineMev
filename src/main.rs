@@ -169,39 +169,14 @@ async fn main() -> Result<()> {
     // The router runs on a dedicated thread to avoid async overhead on
     // the hot path. Route calculation is pure CPU work — no I/O, no awaits.
 
-    // Task 1: Geyser streaming with reconnect (async, I/O bound)
+    // Task 1: Geyser streaming (LaserStream handles reconnection internally)
     let stream_handle = {
         let shutdown_rx = shutdown_rx.clone();
         tokio::spawn(async move {
-            let mut backoff = std::time::Duration::from_secs(1);
-            const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
-
-            loop {
-                match geyser_stream.start(change_tx.clone(), shutdown_rx.clone()).await {
-                    Ok(()) => {
-                        info!("Geyser stream ended cleanly");
-                        backoff = std::time::Duration::from_secs(1); // reset on clean exit
-                    }
-                    Err(e) => {
-                        error!("Geyser stream error: {}", config::redact_url(&e.to_string()));
-                    }
-                }
-
-                if *shutdown_rx.borrow() {
-                    info!("Geyser: shutdown requested, not reconnecting");
-                    break;
-                }
-
-                warn!("Geyser disconnected, reconnecting in {:?}...", backoff);
-                tokio::time::sleep(backoff).await;
-
-                if *shutdown_rx.borrow() {
-                    break;
-                }
-
-                info!("Geyser: attempting reconnect (backoff {:?})...", backoff);
-                backoff = std::cmp::min(backoff * 2, MAX_BACKOFF);
+            if let Err(e) = geyser_stream.start(change_tx.clone(), shutdown_rx.clone()).await {
+                error!("Geyser stream fatal error: {}", config::redact_url(&e.to_string()));
             }
+            info!("Geyser stream task exited");
         })
     };
 

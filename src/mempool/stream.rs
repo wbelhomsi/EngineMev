@@ -1,6 +1,13 @@
 use anyhow::Result;
 use crossbeam_channel::Sender;
 use dashmap::DashMap;
+use futures::StreamExt;
+use helius_laserstream::grpc::{
+    subscribe_update::UpdateOneof,
+    CommitmentLevel, SubscribeRequest, SubscribeRequestFilterAccounts,
+    SubscribeUpdate,
+};
+use helius_laserstream::{subscribe, LaserstreamConfig, ChannelOptions};
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -8,11 +15,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::watch;
 use tracing::{info, warn, debug};
-use yellowstone_grpc_client::GeyserGrpcClient;
-use yellowstone_grpc_proto::prelude::{
-    subscribe_update::UpdateOneof,
-    CommitmentLevel, SubscribeRequest, SubscribeRequestFilterAccounts,
-};
 
 use crate::addresses;
 use crate::config::BotConfig;
@@ -85,7 +87,11 @@ impl GeyserStream {
         }
     }
 
-    /// Start streaming pool state changes via Yellowstone gRPC.
+    /// Start streaming pool state changes via LaserStream gRPC.
+    ///
+    /// LaserStream handles reconnection, TLS, and Zstd compression internally.
+    /// On disconnect, it automatically reconnects with slot-based replay to
+    /// avoid missing updates.
     pub async fn start(
         &self,
         tx_sender: Sender<PoolStateChange>,
@@ -93,24 +99,9 @@ impl GeyserStream {
     ) -> Result<()> {
         let programs = self.config.monitored_programs();
         info!(
-            "Starting Geyser stream, monitoring {} DEX programs",
+            "Starting LaserStream Geyser stream, monitoring {} DEX programs",
             programs.len()
         );
-
-        // Connect to Yellowstone gRPC endpoint with TLS (required for Helius LaserStream)
-        let mut client = GeyserGrpcClient::build_from_shared(
-            self.config.geyser_grpc_url.clone(),
-        )?
-        .x_token(if self.config.geyser_auth_token.is_empty() {
-            None
-        } else {
-            Some(self.config.geyser_auth_token.clone())
-        })?
-        .tls_config(yellowstone_grpc_client::ClientTlsConfig::new().with_native_roots())?
-        .connect()
-        .await?;
-
-        info!("Connected to Geyser gRPC at {}", crate::config::redact_url(&self.config.geyser_grpc_url));
 
         // Build subscription: watch all accounts owned by target DEX programs.
         // When a swap happens, the pool's token vault accounts get updated.
@@ -150,11 +141,24 @@ impl GeyserStream {
             ..Default::default()
         };
 
-        let (_, mut stream) = client.subscribe_with_request(Some(subscribe_request)).await?;
+        // LaserStream handles TLS, authentication, reconnection, and Zstd compression.
+        let config = LaserstreamConfig::new(
+            self.config.geyser_grpc_url.clone(),
+            self.config.geyser_auth_token.clone(),
+        )
+        .with_replay(true)
+        .with_channel_options(
+            ChannelOptions::default()
+                .with_zstd_compression()
+        );
 
-        info!("Geyser subscription active, waiting for account updates...");
+        let (stream, _handle) = subscribe(config, subscribe_request);
+        tokio::pin!(stream);
 
-        // Main event loop
+        info!("LaserStream subscription active at {}, waiting for account updates...",
+              crate::config::redact_url(&self.config.geyser_grpc_url));
+
+        // Main event loop — LaserStream handles reconnection internally
         loop {
             tokio::select! {
                 _ = shutdown_rx.changed() => {
@@ -163,14 +167,19 @@ impl GeyserStream {
                         break;
                     }
                 }
-                msg = Self::next_message(&mut stream) => {
+                msg = stream.next() => {
                     match msg {
-                        Some(update) => {
+                        Some(Ok(update)) => {
                             self.process_update(update, &tx_sender);
                         }
+                        Some(Err(e)) => {
+                            warn!("LaserStream error (auto-reconnecting): {}",
+                                  crate::config::redact_url(&e.to_string()));
+                            // LaserStream handles reconnection internally — continue the loop
+                        }
                         None => {
-                            warn!("Geyser stream ended, needs reconnect");
-                            break; // Caller should implement reconnect loop
+                            warn!("LaserStream stream ended");
+                            break;
                         }
                     }
                 }
@@ -181,14 +190,6 @@ impl GeyserStream {
         Ok(())
     }
 
-    /// Extract next message from the gRPC stream.
-    async fn next_message(
-        stream: &mut (impl tokio_stream::Stream<Item = Result<yellowstone_grpc_proto::prelude::SubscribeUpdate, yellowstone_grpc_proto::tonic::Status>> + Unpin),
-    ) -> Option<yellowstone_grpc_proto::prelude::SubscribeUpdate> {
-        use tokio_stream::StreamExt;
-        stream.next().await?.ok()
-    }
-
     /// Process a Geyser account update.
     ///
     /// Identifies DEX by account data size, dispatches to per-DEX parser,
@@ -196,7 +197,7 @@ impl GeyserStream {
     /// vault balance fetch (since those pools don't embed reserves).
     fn process_update(
         &self,
-        update: yellowstone_grpc_proto::prelude::SubscribeUpdate,
+        update: SubscribeUpdate,
         tx_sender: &Sender<PoolStateChange>,
     ) {
         let Some(update_oneof) = update.update_oneof else {
