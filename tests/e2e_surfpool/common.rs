@@ -357,26 +357,9 @@ fn build_swap_ix(
     }
 }
 
-/// Resolve the token program for a non-wSOL mint from PoolExtra flags.
-fn resolve_token_program(pool: &PoolState, mint: &Pubkey) -> Pubkey {
-    // Pool.extra flags can be wrong for Token-2022 mints.
-    // Prefer the pool flags but fall back to SPL Token.
-    // For accurate resolution, use resolve_token_program_via_rpc below.
-    let extra = &pool.extra;
-    if *mint == pool.token_a_mint {
-        extra.token_program_a.unwrap_or_else(spl_token_program)
-    } else if *mint == pool.token_b_mint {
-        extra.token_program_b.unwrap_or_else(spl_token_program)
-    } else {
-        spl_token_program()
-    }
-}
-
 /// Fetch the actual token program owning a mint via RPC getAccountInfo.
 /// This is the authoritative source — pool flags can be stale.
 fn resolve_token_program_via_rpc(harness: &SurfpoolHarness, mint: &Pubkey) -> Pubkey {
-    use base64::{engine::general_purpose, Engine as _};
-
     let payload = serde_json::json!({
         "jsonrpc": "2.0", "id": 1,
         "method": "getAccountInfo",
