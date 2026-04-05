@@ -208,6 +208,9 @@ Base DEX↔DEX backrun arb working live on mainnet.
 - ~~Grafana + OpenTelemetry metrics~~ DONE (Prometheus /metrics + OTLP tracing spans)
 - ~~Deduplication of repeated opportunities on same pool pair~~ DONE (per-pool slot dedup + arb route signature dedup with 2s window)
 - Phoenix lot size conversion (Phoenix excluded from submission for now)
+- Raydium AMM v4 Swap V2 instruction (8 accounts vs 18, removes all Serum/OpenBook — saves 320 bytes/hop)
+- Dynamic per-pool ALTs for high-volume pools (V0 supports multiple ALTs)
+- Extend arb-guard CPI executor to all DEX types (currently Orca-only)
 
 ### Phase 3: CEX↔DEX Arb (SVM — new module)
 Binance websocket price feed + divergence detector. See `docs/STRATEGY-CEX-DEX-ARB.md`.
