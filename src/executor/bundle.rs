@@ -1,4 +1,5 @@
 use anyhow::Result;
+use borsh::BorshSerialize;
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
@@ -30,6 +31,23 @@ struct HopParamsClient {
     a_to_b: bool,
 }
 
+/// Client-side mirror of on-chain ArbV2Params for Borsh serialization.
+#[derive(BorshSerialize)]
+struct ArbV2Params {
+    min_amount_out: u64,
+    hops: Vec<HopV2Params>,
+}
+
+/// Client-side mirror of on-chain HopV2Params for Borsh serialization.
+#[derive(BorshSerialize)]
+struct HopV2Params {
+    program_id_index: u8,
+    accounts_start: u8,
+    accounts_len: u8,
+    output_token_index: u8,
+    ix_data: Vec<u8>,
+}
+
 impl BundleBuilder {
     pub fn new(
         searcher_keypair: Keypair,
@@ -53,10 +71,8 @@ impl BundleBuilder {
         let mut instructions = Vec::with_capacity(route.hop_count() * 3 + 6);
         let wsol = addresses::WSOL;
 
-        // If arb-guard CPI executor is available and ALL hops are Orca, use execute_arb
-        if self.arb_guard_program_id.is_some()
-            && route.hops.iter().all(|h| h.dex_type == DexType::OrcaWhirlpool)
-        {
+        // If arb-guard CPI executor is available, use execute_arb_v2 for ALL DEX types
+        if self.arb_guard_program_id.is_some() {
             let mut instructions = Vec::with_capacity(8);
             let compute_budget_program = addresses::COMPUTE_BUDGET;
             let signer_pubkey = self.searcher_keypair.pubkey();
@@ -108,8 +124,8 @@ impl BundleBuilder {
                 });
             }
 
-            // The single execute_arb IX
-            instructions.push(self.build_execute_arb_ix(route, min_final_output)?);
+            // The single execute_arb_v2 IX (works with all DEX types)
+            instructions.push(self.build_execute_arb_v2_ix(route, min_final_output)?);
 
             // wSOL unwrap (if last hop output is wSOL)
             if !route.hops.is_empty() && route.hops.last().unwrap().output_mint == wsol {
@@ -125,7 +141,7 @@ impl BundleBuilder {
                 });
             }
 
-            debug!("Built {} arb instructions (CPI executor) for {} hops", instructions.len(), route.hop_count());
+            debug!("Built {} arb instructions (CPI executor v2) for {} hops", instructions.len(), route.hop_count());
             return Ok(instructions);
         }
 
@@ -500,6 +516,92 @@ impl BundleBuilder {
         Ok(Instruction {
             program_id: guard_program,
             accounts,
+            data,
+        })
+    }
+
+    /// Build a single `execute_arb_v2` CPI instruction that works with ALL DEXes.
+    /// Decomposes per-hop swap IXs into remaining_accounts + HopV2Params.
+    pub fn build_execute_arb_v2_ix(
+        &self,
+        route: &ArbRoute,
+        min_amount_out: u64,
+    ) -> Result<Instruction> {
+        let guard_program = self.arb_guard_program_id
+            .ok_or_else(|| anyhow::anyhow!("arb_guard_program_id not set"))?;
+
+        let signer_pubkey = self.searcher_keypair.pubkey();
+
+        // Build per-hop swap IXs using existing builders
+        let mut hop_ixs = Vec::new();
+        let last_idx = route.hops.len() - 1;
+        for (i, hop) in route.hops.iter().enumerate() {
+            let min_out = if i == last_idx { min_amount_out } else { 0 };
+            let amount_in = if i == 0 {
+                route.input_amount
+            } else {
+                route.hops[i - 1].estimated_output
+            };
+            let ix = self.build_swap_instruction_with_min_out(hop, amount_in, min_out)?;
+            hop_ixs.push(ix);
+        }
+
+        // Flatten all accounts into remaining_accounts.
+        // First account must be the signer.
+        let mut remaining_accounts: Vec<AccountMeta> = vec![
+            AccountMeta::new(signer_pubkey, true),
+        ];
+        let mut hop_params = Vec::new();
+
+        for (i, ix) in hop_ixs.iter().enumerate() {
+            // Add the DEX program as a remaining account
+            let program_id_index = remaining_accounts.len() as u8;
+            remaining_accounts.push(AccountMeta::new_readonly(ix.program_id, false));
+
+            // Add hop accounts
+            let accounts_start = remaining_accounts.len() as u8;
+            for meta in &ix.accounts {
+                remaining_accounts.push(meta.clone());
+            }
+            let accounts_len = ix.accounts.len() as u8;
+
+            // Find the output token account index in remaining_accounts.
+            // For circular arbs, the output is the signer's ATA for the hop's output_mint.
+            let output_mint = route.hops[i].output_mint;
+            let output_token_program = if output_mint == addresses::WSOL {
+                addresses::SPL_TOKEN
+            } else {
+                self.state_cache.get_mint_program(&output_mint).unwrap_or(addresses::SPL_TOKEN)
+            };
+            let output_ata = derive_ata_with_program(&signer_pubkey, &output_mint, &output_token_program);
+            let output_token_index = remaining_accounts.iter()
+                .position(|a| a.pubkey == output_ata)
+                .unwrap_or(0) as u8;
+
+            hop_params.push(HopV2Params {
+                program_id_index,
+                accounts_start,
+                accounts_len,
+                output_token_index,
+                ix_data: ix.data.clone(),
+            });
+        }
+
+        // Serialize ArbV2Params using Borsh (Anchor format).
+        // Discriminator: sha256("global:execute_arb_v2")[..8] = [141, 60, 173, 81, 122, 89, 6, 39]
+        let params = ArbV2Params {
+            min_amount_out,
+            hops: hop_params,
+        };
+
+        let discriminator: [u8; 8] = [141, 60, 173, 81, 122, 89, 6, 39];
+        let mut data = discriminator.to_vec();
+        borsh::to_writer(&mut data, &params)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize ArbV2Params: {}", e))?;
+
+        Ok(Instruction {
+            program_id: guard_program,
+            accounts: remaining_accounts,
             data,
         })
     }

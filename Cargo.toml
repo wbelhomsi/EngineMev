@@ -31,6 +31,7 @@ serde_json = "1"
 bs58 = "0.5"
 bincode = "1"
 base64 = "0.22"
+borsh = "1"
 
 # Orderbook DEX SDKs (Phoenix + Manifest)
 # NOTE: phoenix-sdk-core, manifest-dex, and phoenix-v1 all require solana-program 1.18.x
