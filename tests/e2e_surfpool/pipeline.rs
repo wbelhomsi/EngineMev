@@ -1,14 +1,13 @@
 use solana_message::AddressLookupTableAccount;
 use solana_sdk::{
-    instruction::Instruction,
     message::{v0, VersionedMessage},
     pubkey::Pubkey,
-    signature::Keypair,
     signer::Signer,
     transaction::VersionedTransaction,
 };
 use solana_system_interface::instruction as system_instruction;
 use std::str::FromStr;
+use std::time::Duration;
 
 use super::harness::SurfpoolHarness;
 
@@ -110,4 +109,130 @@ fn test_arb_pipeline_orca_swap() {
             panic!("Pipeline test failed with unexpected error: {}", error);
         }
     }
+}
+
+/// Test the multi-hop arb pipeline: build a 2-hop circular route (SOL → USDC → SOL)
+/// using Orca Whirlpool and Raydium CLMM, then call BundleBuilder::build_arb_instructions.
+///
+/// This exercises the full bundle building path without requiring profitability.
+/// The test passes as long as:
+/// - Both pools parse successfully from on-chain data
+/// - The BundleBuilder produces instructions (Ok) or returns a meaningful error (Err)
+/// - No panics or compilation errors
+#[test]
+fn test_multihop_arb_bundle_builder() {
+    use solana_mev_bot::executor::BundleBuilder;
+    use solana_mev_bot::router::pool::{ArbRoute, DexType, RouteHop};
+    use solana_mev_bot::state::StateCache;
+    use super::common::{pool_by_address, wsol_mint};
+
+    let harness = SurfpoolHarness::start();
+    let signer = SurfpoolHarness::test_keypair();
+
+    let sol_mint = wsol_mint();
+    let usdc_mint = Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").unwrap();
+
+    // Orca Whirlpool SOL/USDC
+    let orca_address = Pubkey::from_str("HJPjoWUrhoZzkNfRpHuieeFk9WcZWjwy6PBjZ81ngndJ").unwrap();
+    let _orca_known = pool_by_address(&orca_address)
+        .expect("Orca SOL/USDC pool not in registry");
+
+    // Raydium CLMM SOL/USDC
+    let clmm_address = Pubkey::from_str("2JtkunkYCRbe5YZuGU6kLFmNwN22Ba1pCicHoqW5Eqja").unwrap();
+    let _clmm_known = pool_by_address(&clmm_address)
+        .expect("Raydium CLMM SOL/USDC pool not in registry");
+
+    // Fetch and parse both pools from Surfpool (forked mainnet)
+    let orca_data = harness.get_account_data(&orca_address)
+        .expect("Failed to fetch Orca pool data from Surfpool");
+    println!("[multihop] Orca pool data: {} bytes", orca_data.len());
+
+    let clmm_data = harness.get_account_data(&clmm_address)
+        .expect("Failed to fetch CLMM pool data from Surfpool");
+    println!("[multihop] CLMM pool data: {} bytes", clmm_data.len());
+
+    use solana_mev_bot::mempool::stream::{parse_orca_whirlpool, parse_raydium_clmm};
+
+    let orca_state = parse_orca_whirlpool(&orca_address, &orca_data, 0)
+        .expect("Failed to parse Orca Whirlpool pool");
+    println!(
+        "[multihop] Orca: fee_bps={}, tick={:?}, sqrt_price={:?}, liq={:?}",
+        orca_state.fee_bps,
+        orca_state.current_tick,
+        orca_state.sqrt_price_x64,
+        orca_state.liquidity,
+    );
+
+    let clmm_state = parse_raydium_clmm(&clmm_address, &clmm_data, 0)
+        .expect("Failed to parse Raydium CLMM pool");
+    println!(
+        "[multihop] CLMM: fee_bps={}, tick={:?}, sqrt_price={:?}, liq={:?}",
+        clmm_state.fee_bps,
+        clmm_state.current_tick,
+        clmm_state.sqrt_price_x64,
+        clmm_state.liquidity,
+    );
+
+    // Insert both pools into a StateCache
+    let state_cache = StateCache::new(Duration::from_secs(300));
+    state_cache.upsert(orca_address, orca_state.clone());
+    state_cache.upsert(clmm_address, clmm_state.clone());
+
+    // Build a 2-hop circular route: SOL →[Orca]→ USDC →[CLMM]→ SOL
+    let route = ArbRoute {
+        base_mint: sol_mint,
+        input_amount: 1_000_000, // 0.001 SOL
+        estimated_profit: 0,
+        estimated_profit_lamports: 0,
+        hops: vec![
+            RouteHop {
+                pool_address: orca_address,
+                dex_type: DexType::OrcaWhirlpool,
+                input_mint: sol_mint,
+                output_mint: usdc_mint,
+                estimated_output: 0,
+            },
+            RouteHop {
+                pool_address: clmm_address,
+                dex_type: DexType::RaydiumClmm,
+                input_mint: usdc_mint,
+                output_mint: sol_mint,
+                estimated_output: 0,
+            },
+        ],
+    };
+
+    assert!(route.is_circular(), "Route should be circular (SOL → USDC → SOL)");
+    println!("[multihop] Route is circular: {} hops", route.hop_count());
+
+    // Build the arb instructions via BundleBuilder
+    let builder = BundleBuilder::new(signer, state_cache, None);
+    let min_output = route.input_amount; // break-even minimum
+
+    match builder.build_arb_instructions(&route, min_output) {
+        Ok(instructions) => {
+            println!(
+                "[multihop] BundleBuilder produced {} instructions",
+                instructions.len()
+            );
+            for (i, ix) in instructions.iter().enumerate() {
+                println!(
+                    "[multihop]   IX[{}]: program={}, {} accounts, {} data bytes",
+                    i, ix.program_id, ix.accounts.len(), ix.data.len()
+                );
+            }
+            assert!(!instructions.is_empty(), "Should produce at least one instruction");
+        }
+        Err(e) => {
+            // This is acceptable — the builder may fail because of missing tick arrays,
+            // bin arrays, or other ancillary data that isn't in the cache.
+            // The important thing is that the pipeline ran without panicking.
+            println!(
+                "[multihop] BundleBuilder returned error (acceptable): {}",
+                e
+            );
+        }
+    }
+
+    println!("[multihop] Test complete — pipeline exercised successfully");
 }
