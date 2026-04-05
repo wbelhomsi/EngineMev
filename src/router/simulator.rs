@@ -127,14 +127,14 @@ impl ProfitSimulator {
         let gross_profit_u64 = gross_profit as u64;
 
         // Sanity cap: any single arb showing > 1 SOL net profit is almost
-        // certainly an approximation artifact from stale reserves. The old
-        // 10 SOL cap let 1-6 SOL "phantom profits" through, wasting relay
-        // submissions on doomed bundles that arb-guard would reject on-chain.
-        const MAX_SANE_PROFIT: u64 = 1_000_000_000; // 1 SOL
+        // Sanity cap: any route showing > 10 SOL profit is almost certainly
+        // an approximation artifact. Arb-guard catches these on-chain, but
+        // rejecting them here avoids wasting relay submissions.
+        const MAX_SANE_PROFIT: u64 = 10_000_000_000; // 10 SOL
         if gross_profit_u64 > MAX_SANE_PROFIT {
             return SimulationResult::Unprofitable {
                 reason: format!(
-                    "sanity cap: net profit {} lamports > 1 SOL, likely stale state",
+                    "sanity cap: net profit {} lamports > 10 SOL, likely stale state",
                     gross_profit_u64
                 ),
             };

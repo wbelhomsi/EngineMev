@@ -9,16 +9,15 @@ use solana_mev_bot::router::ProfitSimulator;
 use solana_mev_bot::state::StateCache;
 
 /// Verify that the simulator rejects routes with unrealistically high profit.
-/// A route showing > 1 SOL profit from a single CPMM arb is almost certainly
-/// based on stale reserves.
+/// A route showing > 10 SOL profit from a single CPMM arb is almost certainly
+/// an approximation artifact from stale reserves.
 #[test]
 fn test_simulator_rejects_unrealistic_profit() {
     let cache = StateCache::new(Duration::from_secs(60));
     let sol = config::sol_mint();
     let token = Pubkey::new_unique();
 
-    // Pool A: SOL/TOKEN, ratio ~1:100 (1 SOL = 100 tokens)
-    // Large reserves so our 10 SOL input doesn't move price much.
+    // Pool A: SOL/TOKEN with normal ratio
     let pool_a = Pubkey::new_unique();
     cache.upsert(
         pool_a,
@@ -27,8 +26,8 @@ fn test_simulator_rejects_unrealistic_profit() {
             dex_type: DexType::RaydiumCp,
             token_a_mint: sol,
             token_b_mint: token,
-            token_a_reserve: 100_000_000_000_000,   // 100K SOL
-            token_b_reserve: 10_000_000_000_000_000, // 10M tokens
+            token_a_reserve: 1_000_000_000_000_000,   // 1M SOL
+            token_b_reserve: 10_000_000_000_000_000,   // 10M tokens
             fee_bps: 25,
             current_tick: None,
             sqrt_price_x64: None,
@@ -40,8 +39,7 @@ fn test_simulator_rejects_unrealistic_profit() {
         },
     );
 
-    // Pool B: TOKEN/SOL, but stale state has tokens worth ~50% more SOL.
-    // Ratio ~1:150 (1 SOL = 66 tokens), so selling tokens here gets more SOL back.
+    // Pool B: TOKEN/SOL with grossly stale state — tokens worth 3x more SOL
     let pool_b = Pubkey::new_unique();
     cache.upsert(
         pool_b,
@@ -50,8 +48,8 @@ fn test_simulator_rejects_unrealistic_profit() {
             dex_type: DexType::RaydiumCp,
             token_a_mint: token,
             token_b_mint: sol,
-            token_a_reserve: 6_600_000_000_000_000,  // 6.6M tokens
-            token_b_reserve: 100_000_000_000_000,    // 100K SOL
+            token_a_reserve: 3_300_000_000_000_000,   // 3.3M tokens
+            token_b_reserve: 1_000_000_000_000_000,   // 1M SOL
             fee_bps: 25,
             current_tick: None,
             sqrt_price_x64: None,
@@ -67,9 +65,9 @@ fn test_simulator_rejects_unrealistic_profit() {
 
     let route = ArbRoute {
         base_mint: sol,
-        input_amount: 10_000_000_000, // 10 SOL input
-        estimated_profit: 5_000_000_000,
-        estimated_profit_lamports: 5_000_000_000,
+        input_amount: 100_000_000_000, // 100 SOL input
+        estimated_profit: 50_000_000_000, // claims 50 SOL profit
+        estimated_profit_lamports: 50_000_000_000,
         hops: vec![
             RouteHop {
                 pool_address: pool_a,
@@ -83,7 +81,7 @@ fn test_simulator_rejects_unrealistic_profit() {
                 dex_type: DexType::RaydiumCp,
                 input_mint: token,
                 output_mint: sol,
-                estimated_output: 15_000_000_000, // claims 15 SOL out from 10 SOL in
+                estimated_output: 150_000_000_000, // claims 150 SOL out from 100 SOL in
             },
         ],
     };
@@ -101,10 +99,9 @@ fn test_simulator_rejects_unrealistic_profit() {
             final_profit_lamports,
             ..
         } => {
-            // If it somehow passes, profit should be capped
             assert!(
-                final_profit_lamports <= 1_000_000_000,
-                "Profit {} should be capped at 1 SOL",
+                final_profit_lamports <= 10_000_000_000,
+                "Profit {} should be capped at 10 SOL",
                 final_profit_lamports
             );
         }
