@@ -9,13 +9,33 @@
 pub mod counters;
 pub mod tracing_layer;
 
-/// Initialize metrics and tracing pipelines.
-/// Call once at startup before the pipeline starts.
-pub fn init(_metrics_port: Option<u16>, _otlp_endpoint: Option<&str>, _service_name: &str) {
-    // Stub — will be implemented in Task 4
+use metrics_exporter_prometheus::PrometheusBuilder;
+use tracing::info;
+
+/// Initialize the Prometheus metrics recorder.
+/// If `metrics_port` is Some, installs a Prometheus recorder with HTTP listener.
+/// If None, no recorder is installed (counter calls become no-ops).
+pub fn init(metrics_port: Option<u16>, otlp_endpoint: Option<&str>, service_name: &str) {
+    if let Some(port) = metrics_port {
+        let builder = PrometheusBuilder::new()
+            .with_http_listener(([0, 0, 0, 0], port));
+
+        match builder.install() {
+            Ok(()) => info!("Prometheus metrics server listening on 0.0.0.0:{}", port),
+            Err(e) => tracing::error!("Failed to install Prometheus recorder: {}", e),
+        }
+    }
+
+    if otlp_endpoint.is_some() {
+        info!("OTLP tracing configured (service={}), layer must be added to subscriber", service_name);
+    }
 }
 
-/// Flush pending spans and shut down exporters.
+/// Flush pending spans and shut down OTLP exporter.
+/// In OTel SDK 0.31+, shutdown is handled by dropping the `SdkTracerProvider`
+/// returned from `tracing_layer::build_layer`. The caller should store the provider
+/// and call `provider.shutdown()` or let it drop at application exit.
 pub fn shutdown() {
-    // Stub — will be implemented in Task 4
+    // No global shutdown function in OTel 0.31.
+    // SdkTracerProvider::drop triggers flush + shutdown automatically.
 }
