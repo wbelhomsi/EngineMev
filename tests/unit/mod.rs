@@ -22,3 +22,4 @@ mod rpc_helpers;
 mod sanctum_bootstrap;
 mod router_perf;
 mod sanity_cap;
+mod tx_size;
