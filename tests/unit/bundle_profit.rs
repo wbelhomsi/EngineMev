@@ -47,6 +47,12 @@ fn test_bundle_sets_min_out_on_final_hop() {
     };
     state_cache.upsert(amm_pool_address, amm_pool);
 
+    // Populate mint program cache for non-wSOL mints (required since we no longer
+    // silently default to SPL Token on cache miss).
+    let spl_token = solana_mev_bot::addresses::SPL_TOKEN;
+    state_cache.set_mint_program(base_mint, spl_token);
+    state_cache.set_mint_program(other_mint, spl_token);
+
     // Set LST indices so Sanctum IX builder can find them
     state_cache.set_lst_index(other_mint, 5);
     state_cache.set_lst_index(base_mint, 1);

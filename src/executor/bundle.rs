@@ -85,8 +85,15 @@ impl BundleBuilder {
             for hop in &route.hops {
                 for mint in [hop.input_mint, hop.output_mint] {
                     if !ata_mints.iter().any(|(m, _)| *m == mint) {
-                        let prog = if mint == wsol { token_program } else {
-                            self.state_cache.get_mint_program(&mint).unwrap_or(token_program)
+                        let prog = if mint == wsol {
+                            token_program
+                        } else {
+                            match self.state_cache.get_mint_program(&mint) {
+                                Some(p) => p,
+                                None => return Err(anyhow::anyhow!(
+                                    "Token program unknown for mint {} — cache not populated yet", mint
+                                )),
+                            }
                         };
                         ata_mints.push((mint, prog));
                     }
@@ -171,7 +178,12 @@ impl BundleBuilder {
                     let prog = if mint == wsol {
                         token_program
                     } else {
-                        self.state_cache.get_mint_program(&mint).unwrap_or(token_program)
+                        match self.state_cache.get_mint_program(&mint) {
+                            Some(p) => p,
+                            None => return Err(anyhow::anyhow!(
+                                "Token program unknown for mint {} — cache not populated yet", mint
+                            )),
+                        }
                     };
                     ata_mints.push((mint, prog));
                 }
@@ -381,7 +393,7 @@ impl BundleBuilder {
 
         // Helper: insert or find an account, return its index. If it already exists
         // but needs to be upgraded to writable/signer, upgrade it.
-        let mut get_or_insert = |meta: &AccountMeta, accounts: &mut Vec<AccountMeta>, map: &mut std::collections::HashMap<Pubkey, u8>| -> u8 {
+        let get_or_insert = |meta: &AccountMeta, accounts: &mut Vec<AccountMeta>, map: &mut std::collections::HashMap<Pubkey, u8>| -> u8 {
             if let Some(&idx) = map.get(&meta.pubkey) {
                 // Upgrade: if new meta is writable or signer, upgrade existing
                 if meta.is_writable && !accounts[idx as usize].is_writable {
