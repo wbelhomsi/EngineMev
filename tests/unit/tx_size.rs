@@ -115,29 +115,6 @@ fn test_wsol_ata_not_in_alt() {
     );
 }
 
-#[test]
-fn test_arb_guard_extra_bytes_estimate() {
-    // arb-guard adds 2 IXs (start_check + profit_check).
-    // Accounts NOT in ALT: guard_pda (appears in both IXs, deduplicated to 1 entry)
-    //                      wsol_ata (appears in both IXs, deduplicated to 1 entry)
-    // Accounts IN ALT: guard_program, system_program
-    // Signer is already in the message header.
-    //
-    // Extra static accounts = 2 (guard_pda + wsol_ata) = 64 bytes
-    // Plus instruction data: 8 bytes (start_check disc) + 16 bytes (profit_check disc + u64) = 24 bytes
-    // Plus instruction overhead (program_id index + account count + data len) ~6 bytes × 2 = 12 bytes
-    //
-    // Total overhead ≈ 64 + 24 + 12 = ~100 bytes.
-    // A tx at 1180 bytes without guard → 1280 with guard → over 1232 limit.
-    //
-    // The fix: skip arb-guard when instruction count / unique accounts exceed a threshold.
-
-    // Verify the extra account count
-    let accounts_not_in_alt = 2; // guard_pda, wsol_ata
-    let extra_bytes_accounts = accounts_not_in_alt * 32;
-    assert_eq!(extra_bytes_accounts, 64, "2 accounts not in ALT = 64 extra bytes");
-}
-
 // ---------------------------------------------------------------------------
 // build_signed_bundle_tx size-limit behavior
 // ---------------------------------------------------------------------------

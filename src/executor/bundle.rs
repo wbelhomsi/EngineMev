@@ -21,14 +21,8 @@ pub struct BundleBuilder {
     searcher_keypair: Keypair,
     state_cache: crate::state::StateCache,
     /// Optional arb-guard program ID for on-chain profit verification.
-    /// When set, start_check is prepended and profit_check is appended to arb TXs.
+    /// When set, execute_arb_v2 CPI wraps all swap hops atomically.
     arb_guard_program_id: Option<Pubkey>,
-}
-
-/// Client-side mirror of on-chain HopParams for serialization.
-struct HopParamsClient {
-    dex_type: u8,
-    a_to_b: bool,
 }
 
 /// Client-side mirror of on-chain ArbV2Params for Borsh serialization.
@@ -145,8 +139,7 @@ impl BundleBuilder {
             return Ok(instructions);
         }
 
-        // arb-guard start_check is deferred — we add it below only if the tx
-        // would still fit within the 1232-byte limit. See size guard at the end.
+        // No-guard path: raw swap IXs without arb-guard wrapping.
 
         // Compute budget: set unit limit and priority fee for Jito auction placement
         let compute_budget_program = addresses::COMPUTE_BUDGET;
@@ -236,60 +229,6 @@ impl BundleBuilder {
             instructions.push(ix);
         }
 
-        // Size guard: estimate unique accounts. If arb-guard would push the tx
-        // over the 1232-byte limit, skip it. The minimum_amount_out on each swap
-        // IX still provides slippage protection.
-        let use_guard = if let Some(ref guard_program) = self.arb_guard_program_id {
-            let wsol_ata = derive_ata(&signer_pubkey, &wsol);
-            let guard_pda = derive_guard_pda(guard_program, &signer_pubkey);
-
-            // Count what the guard would add: guard_pda + wsol_ata are likely
-            // not in the ALT (signer-specific). Check if existing instructions
-            // already reference them.
-            let current_accounts = estimate_unique_accounts(&instructions);
-            let mut extra = 0usize;
-            let existing: std::collections::HashSet<Pubkey> = instructions.iter()
-                .flat_map(|ix| ix.accounts.iter().map(|a| a.pubkey).chain(std::iter::once(ix.program_id)))
-                .collect();
-            if !existing.contains(&guard_pda) { extra += 1; }
-            if !existing.contains(&wsol_ata) { extra += 1; }
-            if !existing.contains(guard_program) { extra += 1; }
-
-            if current_accounts + extra > MAX_ACCOUNTS_FOR_GUARD {
-                debug!(
-                    "Skipping arb-guard: {} + {} = {} unique accounts exceeds {} threshold",
-                    current_accounts, extra, current_accounts + extra, MAX_ACCOUNTS_FOR_GUARD
-                );
-                crate::metrics::counters::inc_bundles_skipped("guard_too_large");
-                false
-            } else {
-                true
-            }
-        } else {
-            false
-        };
-
-        if use_guard {
-            let guard_program = self.arb_guard_program_id.as_ref().unwrap();
-            let wsol_ata = derive_ata(&signer_pubkey, &wsol);
-
-            // Insert start_check at position 1 (after compute budget)
-            let start_ix = build_guard_start_check_ix(guard_program, &signer_pubkey, &wsol_ata);
-            instructions.insert(1, start_ix);
-
-            // Append profit_check BEFORE CloseAccount
-            let min_profit: u64 = std::env::var("MIN_ON_CHAIN_PROFIT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            instructions.push(build_guard_profit_check_ix(
-                guard_program,
-                &signer_pubkey,
-                &wsol_ata,
-                min_profit,
-            ));
-        }
-
         // If the last hop outputs wSOL, close the ATA to unwrap back to native SOL.
         // This recovers the arb profit + rent as native SOL in our wallet.
         if !route.hops.is_empty() && route.hops[route.hops.len() - 1].output_mint == wsol {
@@ -307,8 +246,8 @@ impl BundleBuilder {
         }
 
         debug!(
-            "Built {} arb instructions for {} hops (guard={})",
-            instructions.len(), route.hop_count(), use_guard
+            "Built {} arb instructions for {} hops (no guard, raw swaps)",
+            instructions.len(), route.hop_count()
         );
         Ok(instructions)
     }
@@ -404,120 +343,6 @@ impl BundleBuilder {
                 ).ok_or_else(|| anyhow::anyhow!("Missing pool data for Manifest"))
             }
         }
-    }
-
-    /// Build a single `execute_arb` CPI instruction that atomically swaps through
-    /// all hops via the arb-guard on-chain program.  Currently supports Orca
-    /// Whirlpool hops only; returns an error for mixed-DEX or non-Orca routes.
-    pub fn build_execute_arb_ix(
-        &self,
-        route: &ArbRoute,
-        min_amount_out: u64,
-    ) -> Result<Instruction> {
-        let guard_program = self.arb_guard_program_id
-            .ok_or_else(|| anyhow::anyhow!("arb_guard_program_id not set"))?;
-
-        // Currently only Orca Whirlpool is wired up for CPI
-        if !route.hops.iter().all(|h| h.dex_type == DexType::OrcaWhirlpool) {
-            anyhow::bail!("execute_arb CPI only supports OrcaWhirlpool hops");
-        }
-
-        let signer_pubkey = self.searcher_keypair.pubkey();
-        let token_program = addresses::SPL_TOKEN;
-        let memo_program = addresses::MEMO;
-        let orca_program = addresses::ORCA_WHIRLPOOL;
-
-        let first_hop = route.hops.first()
-            .ok_or_else(|| anyhow::anyhow!("Route has no hops"))?;
-
-        let input_token_account = derive_ata(&signer_pubkey, &first_hop.input_mint);
-
-        // Fixed accounts [0..6]
-        let mut accounts = vec![
-            AccountMeta::new(signer_pubkey, true),                   // [0] signer
-            AccountMeta::new_readonly(token_program, false),         // [1] token_program
-            AccountMeta::new_readonly(memo_program, false),          // [2] memo_program
-            AccountMeta::new(input_token_account, false),            // [3] input_token_account
-            AccountMeta::new_readonly(first_hop.input_mint, false),  // [4] input_mint
-            AccountMeta::new_readonly(orca_program, false),          // [5] orca_program
-        ];
-
-        let mut hop_params: Vec<HopParamsClient> = Vec::with_capacity(route.hops.len());
-
-        for hop in &route.hops {
-            let pool = self.state_cache.get_any(&hop.pool_address)
-                .ok_or_else(|| anyhow::anyhow!("Pool not found: {}", hop.pool_address))?;
-            let extra = &pool.extra;
-            let vault_a = extra.vault_a
-                .ok_or_else(|| anyhow::anyhow!("Missing vault_a for pool {}", hop.pool_address))?;
-            let vault_b = extra.vault_b
-                .ok_or_else(|| anyhow::anyhow!("Missing vault_b for pool {}", hop.pool_address))?;
-            let tick_spacing = extra.tick_spacing
-                .ok_or_else(|| anyhow::anyhow!("Missing tick_spacing for pool {}", hop.pool_address))?;
-
-            let a_to_b = hop.input_mint == pool.token_a_mint;
-
-            // Oracle PDA
-            let (oracle, _) = Pubkey::find_program_address(
-                &[b"oracle", pool.address.as_ref()],
-                &orca_program,
-            );
-
-            // Tick array PDAs (same logic as build_orca_whirlpool_swap_ix)
-            let tick_current = pool.current_tick.unwrap_or(0);
-            let ticks_in_array: i32 = 88 * tick_spacing as i32;
-            let start_base = floor_div(tick_current, ticks_in_array) * ticks_in_array;
-
-            let offsets: [i32; 3] = if a_to_b {
-                [0, -1, -2]
-            } else if tick_current + tick_spacing as i32 >= start_base + ticks_in_array {
-                [1, 2, 3]
-            } else {
-                [0, 1, 2]
-            };
-
-            let tick_arrays: Vec<Pubkey> = offsets.iter().map(|&o| {
-                let start = start_base + o * ticks_in_array;
-                Pubkey::find_program_address(
-                    &[b"tick_array", pool.address.as_ref(), start.to_string().as_bytes()],
-                    &orca_program,
-                ).0
-            }).collect();
-
-            // Output ATA for this hop
-            let output_ata = derive_ata(&signer_pubkey, &hop.output_mint);
-
-            // Per-hop accounts (9 each)
-            accounts.push(AccountMeta::new(pool.address, false));       // whirlpool
-            accounts.push(AccountMeta::new(vault_a, false));            // vault_a
-            accounts.push(AccountMeta::new(vault_b, false));            // vault_b
-            accounts.push(AccountMeta::new(tick_arrays[0], false));     // tick_array_0
-            accounts.push(AccountMeta::new(tick_arrays[1], false));     // tick_array_1
-            accounts.push(AccountMeta::new(tick_arrays[2], false));     // tick_array_2
-            accounts.push(AccountMeta::new(oracle, false));             // oracle
-            accounts.push(AccountMeta::new(output_ata, false));         // output_ata
-            accounts.push(AccountMeta::new_readonly(hop.output_mint, false)); // output_mint
-
-            hop_params.push(HopParamsClient { dex_type: 0, a_to_b });
-        }
-
-        // Serialize instruction data
-        let disc = anchor_discriminator("execute_arb");
-        let mut data = Vec::with_capacity(8 + 8 + 8 + 4 + hop_params.len() * 2);
-        data.extend_from_slice(&disc);
-        data.extend_from_slice(&route.input_amount.to_le_bytes());
-        data.extend_from_slice(&min_amount_out.to_le_bytes());
-        data.extend_from_slice(&(hop_params.len() as u32).to_le_bytes()); // Borsh Vec prefix
-        for hp in &hop_params {
-            data.push(hp.dex_type);
-            data.push(if hp.a_to_b { 1u8 } else { 0u8 });
-        }
-
-        Ok(Instruction {
-            program_id: guard_program,
-            accounts,
-            data,
-        })
     }
 
     /// Build a single `execute_arb_v2` CPI instruction that works with ALL DEXes.
@@ -638,80 +463,6 @@ pub fn estimate_unique_accounts(instructions: &[Instruction]) -> usize {
         }
     }
     seen.len()
-}
-
-/// Maximum unique accounts before arb-guard IXs are stripped to stay under
-/// the 1232-byte Solana transaction limit. Empirically tuned: the guard adds
-/// ~2 accounts not in ALT (guard PDA + wSOL ATA) = 64 bytes + IX overhead.
-/// At 26 unique accounts the base tx is ~1140 bytes; adding guard pushes it
-/// to ~1240 bytes which exceeds the limit.
-const MAX_ACCOUNTS_FOR_GUARD: usize = 26;
-
-// ─── Arb-Guard IX builders ───────────────────────────────────────────────────
-
-/// Compute Anchor instruction discriminator: sha256("global:<name>")[..8]
-fn anchor_discriminator(name: &str) -> [u8; 8] {
-    let mut hasher = solana_sdk::hash::Hasher::default();
-    hasher.hash(format!("global:{}", name).as_bytes());
-    let hash = hasher.result();
-    let mut disc = [0u8; 8];
-    disc.copy_from_slice(&hash.as_ref()[..8]);
-    disc
-}
-
-/// Derive the guard state PDA: seeds=[b"guard", authority]
-fn derive_guard_pda(program_id: &Pubkey, authority: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(
-        &[b"guard", authority.as_ref()],
-        program_id,
-    ).0
-}
-
-/// Build start_check IX for arb-guard program.
-/// Records the wSOL ATA balance before swaps begin.
-fn build_guard_start_check_ix(
-    program_id: &Pubkey,
-    authority: &Pubkey,
-    token_account: &Pubkey,
-) -> Instruction {
-    let disc = anchor_discriminator("start_check");
-    let guard_state = derive_guard_pda(program_id, authority);
-
-    Instruction {
-        program_id: *program_id,
-        accounts: vec![
-            AccountMeta::new(*authority, true),                         // authority (signer, mut for init_if_needed)
-            AccountMeta::new(guard_state, false),                       // guard_state PDA (mut)
-            AccountMeta::new_readonly(*token_account, false),           // token_account
-            AccountMeta::new_readonly(solana_system_interface::program::id(), false), // system_program
-        ],
-        data: disc.to_vec(),
-    }
-}
-
-/// Build profit_check IX for arb-guard program.
-/// Verifies balance increased by at least min_profit, then unlocks the guard.
-fn build_guard_profit_check_ix(
-    program_id: &Pubkey,
-    authority: &Pubkey,
-    token_account: &Pubkey,
-    min_profit: u64,
-) -> Instruction {
-    let disc = anchor_discriminator("profit_check");
-    let guard_state = derive_guard_pda(program_id, authority);
-
-    let mut data = disc.to_vec();
-    data.extend_from_slice(&min_profit.to_le_bytes()); // Borsh-serialized u64
-
-    Instruction {
-        program_id: *program_id,
-        accounts: vec![
-            AccountMeta::new_readonly(*authority, true),   // authority (signer)
-            AccountMeta::new(guard_state, false),          // guard_state PDA (mut — updates locked flag)
-            AccountMeta::new_readonly(*token_account, false), // token_account
-        ],
-        data,
-    }
 }
 
 // ─── DEX swap IX builders ────────────────────────────────────────────────────
