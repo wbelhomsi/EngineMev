@@ -16,3 +16,4 @@ mod pricing;
 mod bundle_raydium_amm;
 mod dlmm_bin_pricing;
 mod clmm_tick_pricing;
+mod metrics;

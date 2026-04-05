@@ -57,6 +57,17 @@ anyhow = "1"
 thiserror = "2"
 dotenv = "0.15"
 
+# Prometheus metrics (atomic counters, zero hot-path cost)
+metrics = "0.24"
+metrics-exporter-prometheus = "0.18"
+
+# OpenTelemetry tracing (optional, enabled by OTLP_ENDPOINT env var)
+opentelemetry = "0.31"
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry-otlp = "0.31"
+opentelemetry-semantic-conventions = "0.31"
+tracing-opentelemetry = "0.32"
+
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 
