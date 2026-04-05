@@ -202,7 +202,7 @@ Base DEX↔DEX backrun arb working live on mainnet.
 - Deploy arb-guard to mainnet (~7 SOL for buffer)
 - ~~Upgrade solana-sdk 2.2 → modular crates 4.x~~ DONE (solana-sdk 4.0.1 + modular crates)
 - Grafana + OpenTelemetry metrics
-- Deduplication of repeated opportunities on same pool pair
+- ~~Deduplication of repeated opportunities on same pool pair~~ DONE (per-pool slot dedup + arb route signature dedup with 2s window)
 - Phoenix lot size conversion (Phoenix excluded from submission for now)
 
 ### Phase 3: CEX↔DEX Arb (SVM — new module)
