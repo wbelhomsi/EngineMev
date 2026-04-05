@@ -60,14 +60,71 @@ fn alt_addresses() -> Vec<Pubkey> {
     );
     addrs.push(guard_pda);
 
-    // Add signer's wSOL ATA
+    // Signer's wSOL ATA
     let wsol = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
-    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+    let spl_token = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+    let ata_program = Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap();
     let (wsol_ata, _) = Pubkey::find_program_address(
-        &[searcher.as_ref(), token_program.as_ref(), wsol.as_ref()],
-        &Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL").unwrap(),
+        &[searcher.as_ref(), spl_token.as_ref(), wsol.as_ref()],
+        &ata_program,
     );
     addrs.push(wsol_ata);
+
+    // ── Per-DEX global shared accounts (appear in EVERY swap of that DEX) ──
+
+    // Raydium CP: vault_and_lp_mint_auth_seed authority PDA
+    let cp_program = Pubkey::from_str("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C").unwrap();
+    let (cp_authority, _) = Pubkey::find_program_address(&[b"vault_and_lp_mint_auth_seed"], &cp_program);
+    addrs.push(cp_authority);
+
+    // Meteora DLMM: event authority PDA
+    let dlmm_program = Pubkey::from_str("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo").unwrap();
+    let (dlmm_event_auth, _) = Pubkey::find_program_address(&[b"__event_authority"], &dlmm_program);
+    addrs.push(dlmm_event_auth);
+
+    // Meteora DAMM v2: event authority PDA
+    let damm_program = Pubkey::from_str("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG").unwrap();
+    let (damm_event_auth, _) = Pubkey::find_program_address(&[b"__event_authority"], &damm_program);
+    addrs.push(damm_event_auth);
+
+    // Meteora DAMM v2: pool authority PDA (empty seeds)
+    let (damm_pool_auth, _) = Pubkey::find_program_address(&[], &damm_program);
+    addrs.push(damm_pool_auth);
+
+    // Phoenix V1: log authority PDA
+    let phoenix_program = Pubkey::from_str("PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY").unwrap();
+    let (phoenix_log_auth, _) = Pubkey::find_program_address(&[b"log"], &phoenix_program);
+    addrs.push(phoenix_log_auth);
+
+    // Sanctum: global PDAs (pool state, lst-state-list, protocol-fee)
+    let s_controller = Pubkey::from_str("5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx").unwrap();
+    let (sanctum_pool_state, _) = Pubkey::find_program_address(&[b"state"], &s_controller);
+    addrs.push(sanctum_pool_state);
+    let (sanctum_lst_list, _) = Pubkey::find_program_address(&[b"lst-state-list"], &s_controller);
+    addrs.push(sanctum_lst_list);
+    let (sanctum_protocol_fee, _) = Pubkey::find_program_address(&[b"protocol-fee"], &s_controller);
+    addrs.push(sanctum_protocol_fee);
+
+    // Sanctum Pricing program + state
+    addrs.push(Pubkey::from_str("priceMDEXR2sNwUPybbmNxVCHGKf3aMQPmyfoc1h4PV").unwrap());
+    addrs.push(Pubkey::from_str("4T9YzXnmQFMyYi2nrxyXjhtUANavmCkxGCsU3GKaNjwT").unwrap()); // pricing state
+
+    // USDT mint
+    addrs.push(Pubkey::from_str("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB").unwrap());
+
+    // Signer's USDC ATA
+    let usdc = Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").unwrap();
+    let (usdc_ata, _) = Pubkey::find_program_address(
+        &[searcher.as_ref(), spl_token.as_ref(), usdc.as_ref()], &ata_program,
+    );
+    addrs.push(usdc_ata);
+
+    // Signer's USDT ATA
+    let usdt = Pubkey::from_str("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB").unwrap();
+    let (usdt_ata, _) = Pubkey::find_program_address(
+        &[searcher.as_ref(), spl_token.as_ref(), usdt.as_ref()], &ata_program,
+    );
+    addrs.push(usdt_ata);
 
     addrs
 }
