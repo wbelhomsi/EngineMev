@@ -96,18 +96,6 @@ pub struct PoolExtra {
     pub target_orders: Option<Pubkey>,
     /// AMM authority nonce (Raydium AMM v4) — from pool state offset 8
     pub amm_nonce: Option<u8>,
-    /// Serum/OpenBook bids account — from market account offset 277
-    pub serum_bids: Option<Pubkey>,
-    /// Serum/OpenBook asks account — from market account offset 309
-    pub serum_asks: Option<Pubkey>,
-    /// Serum/OpenBook event queue — from market account offset 245
-    pub serum_event_queue: Option<Pubkey>,
-    /// Serum/OpenBook coin vault (base) — from market account offset 117
-    pub serum_coin_vault: Option<Pubkey>,
-    /// Serum/OpenBook PC vault (quote) — from market account offset 165
-    pub serum_pc_vault: Option<Pubkey>,
-    /// Serum vault signer nonce — from market account offset 45
-    pub serum_vault_signer_nonce: Option<u64>,
 }
 
 /// Represents the on-chain state of an AMM pool.

@@ -173,15 +173,7 @@ pub fn build_single_swap_tx(
     );
 
     // Parse pool state using the appropriate DEX parser
-    let mut pool_state = parse_pool(&pool.address, &pool_data, pool.dex_type);
-
-    // For Raydium AMM v4, we need to fetch Serum market accounts before building the swap IX
-    if pool.dex_type == DexType::RaydiumAmm {
-        let ok = fetch_and_populate_serum_accounts(harness, &mut pool_state);
-        if !ok {
-            panic!("Failed to fetch Serum market accounts for AMM v4 pool {}", pool.address);
-        }
-    }
+    let pool_state = parse_pool(&pool.address, &pool_data, pool.dex_type);
 
     // Determine swap direction: we always swap wSOL in, other token out
     let (input_mint, output_mint) = if pool_state.token_a_mint == wsol {
@@ -351,7 +343,7 @@ fn build_swap_ix(
         }
         DexType::RaydiumAmm => {
             build_raydium_amm_swap_ix(signer, pool, input_mint, amount_in, minimum_amount_out)
-                .expect("Failed to build Raydium AMM v4 swap IX — Serum accounts may not be populated")
+                .expect("Failed to build Raydium AMM v4 swap IX")
         }
         other => panic!("Unsupported DEX type for swap IX building: {:?}", other),
     }
@@ -402,79 +394,6 @@ pub fn create_ata_idempotent_ix(
     }
 }
 
-// ─── Serum market fetch helper ─────────────────────────────────────────────
-
-/// Fetch Serum/OpenBook market account data and populate the pool's extra fields.
-/// This is the blocking equivalent of `fetch_serum_market_accounts` in stream.rs.
-/// Returns the updated PoolState with serum_bids, serum_asks, serum_event_queue,
-/// serum_coin_vault, serum_pc_vault, and serum_vault_signer_nonce populated.
-pub fn fetch_and_populate_serum_accounts(
-    harness: &SurfpoolHarness,
-    pool: &mut PoolState,
-) -> bool {
-    let market_id = match pool.extra.market {
-        Some(m) => m,
-        None => {
-            println!("[serum] No market_id in pool extra — cannot fetch Serum accounts");
-            return false;
-        }
-    };
-
-    let market_data = match harness.get_account_data(&market_id) {
-        Some(data) => data,
-        None => {
-            println!("[serum] Failed to fetch Serum market account {}", market_id);
-            return false;
-        }
-    };
-
-    // Serum market account layout (same offsets as stream.rs):
-    // 45: vault_signer_nonce (u64)
-    // 117: coin_vault (Pubkey, 32B)
-    // 165: pc_vault (Pubkey, 32B)
-    // 245: event_queue (Pubkey, 32B)
-    // 277: bids (Pubkey, 32B)
-    // 309: asks (Pubkey, 32B)
-    if market_data.len() < 341 {
-        println!(
-            "[serum] Market data too short: {} bytes (need 341)",
-            market_data.len()
-        );
-        return false;
-    }
-
-    let vault_signer_nonce = u64::from_le_bytes(
-        market_data[45..53].try_into().unwrap(),
-    );
-    let coin_vault = Pubkey::new_from_array(
-        market_data[117..149].try_into().unwrap(),
-    );
-    let pc_vault = Pubkey::new_from_array(
-        market_data[165..197].try_into().unwrap(),
-    );
-    let event_queue = Pubkey::new_from_array(
-        market_data[245..277].try_into().unwrap(),
-    );
-    let bids = Pubkey::new_from_array(
-        market_data[277..309].try_into().unwrap(),
-    );
-    let asks = Pubkey::new_from_array(
-        market_data[309..341].try_into().unwrap(),
-    );
-
-    pool.extra.serum_bids = Some(bids);
-    pool.extra.serum_asks = Some(asks);
-    pool.extra.serum_event_queue = Some(event_queue);
-    pool.extra.serum_coin_vault = Some(coin_vault);
-    pool.extra.serum_pc_vault = Some(pc_vault);
-    pool.extra.serum_vault_signer_nonce = Some(vault_signer_nonce);
-
-    println!(
-        "[serum] Populated Serum accounts for market {}: bids={}, asks={}, eq={}, coin_vault={}, pc_vault={}, nonce={}",
-        market_id, bids, asks, event_queue, coin_vault, pc_vault, vault_signer_nonce
-    );
-    true
-}
 
 // ─── Arb-guard CPI helpers ─────────────────────────────────────────────────
 

@@ -17,19 +17,10 @@ fn test_bundle_sets_min_out_on_final_hop() {
     let other_mint = Pubkey::new_unique();
     let amm_pool_address = Pubkey::new_unique();
 
-    // Derive valid PDA nonces for AMM authority and Serum vault signer
+    // Derive valid PDA nonce for AMM authority
     let amm_program = Pubkey::from_str("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8").unwrap();
     let nonce = (0u8..=255).find(|n| {
         Pubkey::create_program_address(&[&[*n]], &amm_program).is_ok()
-    }).unwrap();
-
-    let market_program = Pubkey::from_str("srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX").unwrap();
-    let market_id = Pubkey::new_unique();
-    let serum_nonce = (0u64..=255).find(|n| {
-        Pubkey::create_program_address(
-            &[market_id.as_ref(), &n.to_le_bytes()],
-            &market_program,
-        ).is_ok()
     }).unwrap();
 
     // Insert a Raydium AMM pool into the cache so the builder can look it up
@@ -48,17 +39,7 @@ fn test_bundle_sets_min_out_on_final_hop() {
         extra: PoolExtra {
             vault_a: Some(Pubkey::new_unique()),
             vault_b: Some(Pubkey::new_unique()),
-            open_orders: Some(Pubkey::new_unique()),
-            market: Some(market_id),
-            market_program: Some(market_program),
-            target_orders: Some(Pubkey::new_unique()),
             amm_nonce: Some(nonce),
-            serum_bids: Some(Pubkey::new_unique()),
-            serum_asks: Some(Pubkey::new_unique()),
-            serum_event_queue: Some(Pubkey::new_unique()),
-            serum_coin_vault: Some(Pubkey::new_unique()),
-            serum_pc_vault: Some(Pubkey::new_unique()),
-            serum_vault_signer_nonce: Some(serum_nonce),
             ..Default::default()
         },
         best_bid_price: None,

@@ -375,15 +375,6 @@ fn make_raydium_amm_pool() -> PoolState {
         Pubkey::create_program_address(&[&[*n]], &amm_program).is_ok()
     }).expect("valid AMM nonce");
 
-    let market_program = Pubkey::from_str("srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX").unwrap();
-    let market_id = Pubkey::new_unique();
-    let serum_nonce = (0u64..=255).find(|n| {
-        Pubkey::create_program_address(
-            &[market_id.as_ref(), &n.to_le_bytes()],
-            &market_program,
-        ).is_ok()
-    }).expect("valid serum vault signer nonce");
-
     PoolState {
         address: Pubkey::new_unique(),
         dex_type: DexType::RaydiumAmm,
@@ -399,17 +390,7 @@ fn make_raydium_amm_pool() -> PoolState {
         extra: PoolExtra {
             vault_a: Some(Pubkey::new_unique()),
             vault_b: Some(Pubkey::new_unique()),
-            open_orders: Some(Pubkey::new_unique()),
-            market: Some(market_id),
-            market_program: Some(market_program),
-            target_orders: Some(Pubkey::new_unique()),
             amm_nonce: Some(nonce),
-            serum_bids: Some(Pubkey::new_unique()),
-            serum_asks: Some(Pubkey::new_unique()),
-            serum_event_queue: Some(Pubkey::new_unique()),
-            serum_coin_vault: Some(Pubkey::new_unique()),
-            serum_pc_vault: Some(Pubkey::new_unique()),
-            serum_vault_signer_nonce: Some(serum_nonce),
             ..Default::default()
         },
         best_bid_price: None,
@@ -422,7 +403,7 @@ fn test_raydium_amm_swap_ix_account_count() {
     let pool = make_raydium_amm_pool();
     let signer = Pubkey::new_unique();
     let ix = build_raydium_amm_swap_ix(&signer, &pool, pool.token_a_mint, 1000, 900).unwrap();
-    assert_eq!(ix.accounts.len(), 18, "Raydium AMM v4 swap needs 18 accounts");
+    assert_eq!(ix.accounts.len(), 8, "Raydium AMM v4 Swap V2 needs 8 accounts");
 }
 
 #[test]
@@ -430,7 +411,7 @@ fn test_raydium_amm_swap_ix_discriminator() {
     let pool = make_raydium_amm_pool();
     let signer = Pubkey::new_unique();
     let ix = build_raydium_amm_swap_ix(&signer, &pool, pool.token_a_mint, 5000, 4500).unwrap();
-    assert_eq!(ix.data[0], 9u8, "Discriminator must be 9 (swap)");
+    assert_eq!(ix.data[0], 16u8, "Discriminator must be 16 (SwapBaseInV2)");
     assert_eq!(ix.data.len(), 17, "Data must be 17 bytes: 1 disc + 8 amount_in + 8 min_out");
     let amount_in = u64::from_le_bytes(ix.data[1..9].try_into().unwrap());
     assert_eq!(amount_in, 5000);

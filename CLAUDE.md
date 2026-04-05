@@ -138,7 +138,7 @@ DRY_RUN=true
 ### Tests
 
 ```bash
-make test                                     # 198 unit tests
+make test                                     # 221 unit tests
 make lint                                     # clippy (warnings = errors)
 make coverage                                 # line coverage report (49.3%)
 make ci                                       # lint + test + coverage
@@ -192,13 +192,13 @@ Base DEX↔DEX backrun arb working live on mainnet.
 - Per-pool fee parsing: Orca from pool state offset 45, Raydium AMM from tradeFee fields
 - CLMM multi-tick crossing: walks initialized ticks with liquidity adjustment at boundaries
 - DLMM bin-by-bin simulation: real bin liquidity with Q64.64 pre-stored prices
-- Raydium AMM v4 full 18-account IX builder with lazy Serum market account fetch
+- Raydium AMM v4 SwapBaseInV2 (8-account IX, no Serum/OpenBook dependency)
 - arb-guard Phase A: on-chain profit guard (start_check/profit_check with reentrancy lock)
 - arb-guard Phase B: CPI executor for Orca Whirlpool (single execute_arb instruction, remaining_accounts, balance diffing)
 - Shared relay common.rs: RateLimiter, build_signed_bundle_tx, parse_jsonrpc_response
 - Decomposed main.rs (994→515 lines): sanctum.rs, rpc_helpers.rs, can_submit_route in router
 - Safety: TIP_FRACTION validated, SKIP_SIMULATOR has sanity cap, i128 profit math, relay key redaction
-- 198 unit tests + 3 Surfpool E2E tests, 0 clippy warnings
+- 221 unit tests + 3 Surfpool E2E tests, 0 clippy warnings
 - Makefile: make lint, make test, make coverage, make ci
 - Tested on mainnet: ~300 realistic opportunities in 5 min, ~0.000189 SOL avg profit per opp
 

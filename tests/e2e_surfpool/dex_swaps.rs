@@ -120,7 +120,7 @@ fn test_meteora_dlmm_swap() {
 }
 
 /// Swap 0.001 SOL on Raydium AMM v4 and verify the TX succeeds.
-/// AMM v4 requires Serum/OpenBook market accounts for the swap IX.
+/// AMM v4 uses SwapBaseInV2 (8 accounts, no Serum/OpenBook dependency).
 #[test]
 fn test_raydium_amm_v4_swap() {
     let harness = SurfpoolHarness::start();
