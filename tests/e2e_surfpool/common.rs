@@ -8,12 +8,12 @@ use solana_system_interface::instruction as system_instruction;
 use std::str::FromStr;
 
 use solana_mev_bot::mempool::stream::{
-    parse_meteora_damm_v2, parse_meteora_dlmm, parse_orca_whirlpool, parse_raydium_clmm,
-    parse_raydium_cp,
+    parse_meteora_damm_v2, parse_meteora_dlmm, parse_orca_whirlpool, parse_raydium_amm_v4,
+    parse_raydium_clmm, parse_raydium_cp,
 };
 use solana_mev_bot::executor::bundle::{
     build_damm_v2_swap_ix, build_meteora_dlmm_swap_ix, build_orca_whirlpool_swap_ix,
-    build_raydium_clmm_swap_ix, build_raydium_cp_swap_ix,
+    build_raydium_amm_swap_ix, build_raydium_clmm_swap_ix, build_raydium_cp_swap_ix,
 };
 use solana_mev_bot::router::pool::{DexType, PoolState};
 
@@ -92,12 +92,33 @@ pub fn known_pools() -> Vec<KnownPool> {
             token_b_mint: Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap(),
             data_size: 1112,
         },
+        // Raydium AMM v4: SOL/USDC (752 bytes)
+        KnownPool {
+            address: Pubkey::from_str("58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2").unwrap(),
+            dex_type: DexType::RaydiumAmm,
+            token_a_mint: Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap(),
+            token_b_mint: Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").unwrap(),
+            data_size: 752,
+        },
+        // Raydium CLMM: SOL/USDC (1544 bytes) — for multi-hop arb test
+        KnownPool {
+            address: Pubkey::from_str("2JtkunkYCRbe5YZuGU6kLFmNwN22Ba1pCicHoqW5Eqja").unwrap(),
+            dex_type: DexType::RaydiumClmm,
+            token_a_mint: Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap(),
+            token_b_mint: Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").unwrap(),
+            data_size: 1544,
+        },
     ]
 }
 
 /// Find a known pool for a given DEX type. Returns None if not registered.
 pub fn pool_for_dex(dex_type: DexType) -> Option<KnownPool> {
     known_pools().into_iter().find(|p| p.dex_type == dex_type)
+}
+
+/// Find a known pool by its address. Returns None if not registered.
+pub fn pool_by_address(address: &Pubkey) -> Option<KnownPool> {
+    known_pools().into_iter().find(|p| p.address == *address)
 }
 
 // ─── ATA derivation (mirrors bundle.rs logic) ──────────────────────────────
@@ -152,7 +173,15 @@ pub fn build_single_swap_tx(
     );
 
     // Parse pool state using the appropriate DEX parser
-    let pool_state = parse_pool(&pool.address, &pool_data, pool.dex_type);
+    let mut pool_state = parse_pool(&pool.address, &pool_data, pool.dex_type);
+
+    // For Raydium AMM v4, we need to fetch Serum market accounts before building the swap IX
+    if pool.dex_type == DexType::RaydiumAmm {
+        let ok = fetch_and_populate_serum_accounts(harness, &mut pool_state);
+        if !ok {
+            panic!("Failed to fetch Serum market accounts for AMM v4 pool {}", pool.address);
+        }
+    }
 
     // Determine swap direction: we always swap wSOL in, other token out
     let (input_mint, output_mint) = if pool_state.token_a_mint == wsol {
@@ -273,6 +302,14 @@ fn parse_pool(pool_address: &Pubkey, data: &[u8], dex_type: DexType) -> PoolStat
             parse_meteora_damm_v2(pool_address, data, 0)
                 .unwrap_or_else(|| panic!("Failed to parse DAMM v2 pool {}", pool_address))
         }
+        DexType::RaydiumAmm => {
+            let (mut pool, _vaults) = parse_raydium_amm_v4(pool_address, data, 0)
+                .unwrap_or_else(|| panic!("Failed to parse Raydium AMM v4 pool {}", pool_address));
+            // AMM v4 reserves come from vault accounts, not pool state — set placeholders
+            pool.token_a_reserve = 1_000_000_000;
+            pool.token_b_reserve = 1_000_000_000;
+            pool
+        }
         other => panic!("Unsupported DEX type for e2e tests: {:?}", other),
     }
 }
@@ -311,6 +348,10 @@ fn build_swap_ix(
         DexType::MeteoraDammV2 => {
             build_damm_v2_swap_ix(signer, pool, input_mint, amount_in, minimum_amount_out)
                 .expect("Failed to build DAMM v2 swap IX")
+        }
+        DexType::RaydiumAmm => {
+            build_raydium_amm_swap_ix(signer, pool, input_mint, amount_in, minimum_amount_out)
+                .expect("Failed to build Raydium AMM v4 swap IX — Serum accounts may not be populated")
         }
         other => panic!("Unsupported DEX type for swap IX building: {:?}", other),
     }
@@ -376,6 +417,80 @@ pub fn create_ata_idempotent_ix(
         ],
         data: vec![1], // 1 = CreateIdempotent
     }
+}
+
+// ─── Serum market fetch helper ─────────────────────────────────────────────
+
+/// Fetch Serum/OpenBook market account data and populate the pool's extra fields.
+/// This is the blocking equivalent of `fetch_serum_market_accounts` in stream.rs.
+/// Returns the updated PoolState with serum_bids, serum_asks, serum_event_queue,
+/// serum_coin_vault, serum_pc_vault, and serum_vault_signer_nonce populated.
+pub fn fetch_and_populate_serum_accounts(
+    harness: &SurfpoolHarness,
+    pool: &mut PoolState,
+) -> bool {
+    let market_id = match pool.extra.market {
+        Some(m) => m,
+        None => {
+            println!("[serum] No market_id in pool extra — cannot fetch Serum accounts");
+            return false;
+        }
+    };
+
+    let market_data = match harness.get_account_data(&market_id) {
+        Some(data) => data,
+        None => {
+            println!("[serum] Failed to fetch Serum market account {}", market_id);
+            return false;
+        }
+    };
+
+    // Serum market account layout (same offsets as stream.rs):
+    // 45: vault_signer_nonce (u64)
+    // 117: coin_vault (Pubkey, 32B)
+    // 165: pc_vault (Pubkey, 32B)
+    // 245: event_queue (Pubkey, 32B)
+    // 277: bids (Pubkey, 32B)
+    // 309: asks (Pubkey, 32B)
+    if market_data.len() < 341 {
+        println!(
+            "[serum] Market data too short: {} bytes (need 341)",
+            market_data.len()
+        );
+        return false;
+    }
+
+    let vault_signer_nonce = u64::from_le_bytes(
+        market_data[45..53].try_into().unwrap(),
+    );
+    let coin_vault = Pubkey::new_from_array(
+        market_data[117..149].try_into().unwrap(),
+    );
+    let pc_vault = Pubkey::new_from_array(
+        market_data[165..197].try_into().unwrap(),
+    );
+    let event_queue = Pubkey::new_from_array(
+        market_data[245..277].try_into().unwrap(),
+    );
+    let bids = Pubkey::new_from_array(
+        market_data[277..309].try_into().unwrap(),
+    );
+    let asks = Pubkey::new_from_array(
+        market_data[309..341].try_into().unwrap(),
+    );
+
+    pool.extra.serum_bids = Some(bids);
+    pool.extra.serum_asks = Some(asks);
+    pool.extra.serum_event_queue = Some(event_queue);
+    pool.extra.serum_coin_vault = Some(coin_vault);
+    pool.extra.serum_pc_vault = Some(pc_vault);
+    pool.extra.serum_vault_signer_nonce = Some(vault_signer_nonce);
+
+    println!(
+        "[serum] Populated Serum accounts for market {}: bids={}, asks={}, eq={}, coin_vault={}, pc_vault={}, nonce={}",
+        market_id, bids, asks, event_queue, coin_vault, pc_vault, vault_signer_nonce
+    );
+    true
 }
 
 // ─── Arb-guard CPI helpers ─────────────────────────────────────────────────

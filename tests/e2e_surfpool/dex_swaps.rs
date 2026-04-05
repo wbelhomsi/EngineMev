@@ -119,6 +119,35 @@ fn test_meteora_dlmm_swap() {
     assert!(token_balance > 0, "Should have received output tokens from DLMM swap");
 }
 
+/// Swap 0.001 SOL on Raydium AMM v4 and verify the TX succeeds.
+/// AMM v4 requires Serum/OpenBook market accounts for the swap IX.
+#[test]
+fn test_raydium_amm_v4_swap() {
+    let harness = SurfpoolHarness::start();
+    let signer = SurfpoolHarness::test_keypair();
+    let pool = pool_for_dex(DexType::RaydiumAmm)
+        .expect("No Raydium AMM v4 pool registered");
+
+    let instructions = build_single_swap_tx(&harness, &pool, 1_000_000, &signer);
+    println!("[raydium-amm] Built {} instructions", instructions.len());
+
+    let result = harness.send_tx(&instructions, &signer);
+    println!("[raydium-amm] Signature: {}", result.signature);
+    for log in &result.logs {
+        println!("[raydium-amm] {}", log);
+    }
+    assert!(result.success, "Raydium AMM v4 swap failed: {:?}", result.error);
+
+    let output_mint = if pool.token_a_mint == wsol_mint() {
+        pool.token_b_mint
+    } else {
+        pool.token_a_mint
+    };
+    let token_balance = harness.get_token_balance(&signer.pubkey(), &output_mint);
+    println!("[raydium-amm] Output token balance: {}", token_balance);
+    assert!(token_balance > 0, "Should have received output tokens from Raydium AMM v4 swap");
+}
+
 /// Swap 0.001 SOL on Meteora DAMM v2 and verify the TX succeeds.
 #[test]
 #[ignore = "DAMM v2 AccountNotEnoughKeys — program may have been upgraded Q1 2026"]
