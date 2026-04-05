@@ -194,7 +194,7 @@ Base DEX↔DEX backrun arb working live on mainnet.
 - DLMM bin-by-bin simulation: real bin liquidity with Q64.64 pre-stored prices
 - Raydium AMM v4 SwapBaseInV2 (8-account IX, no Serum/OpenBook dependency)
 - arb-guard Phase A: on-chain profit guard (start_check/profit_check with reentrancy lock)
-- arb-guard Phase B: CPI executor for Orca Whirlpool (single execute_arb instruction, remaining_accounts, balance diffing)
+- arb-guard Phase B: passthrough CPI executor for ALL DEXes (execute_arb_v2 — client builds raw swap IXs, program invokes via CPI and verifies profit)
 - Shared relay common.rs: RateLimiter, build_signed_bundle_tx, parse_jsonrpc_response
 - Decomposed main.rs (994→515 lines): sanctum.rs, rpc_helpers.rs, can_submit_route in router
 - Safety: TIP_FRACTION validated, SKIP_SIMULATOR has sanity cap, i128 profit math, relay key redaction
@@ -210,7 +210,7 @@ Base DEX↔DEX backrun arb working live on mainnet.
 - Phoenix lot size conversion (Phoenix excluded from submission for now)
 - Raydium AMM v4 Swap V2 instruction (8 accounts vs 18, removes all Serum/OpenBook — saves 320 bytes/hop)
 - Dynamic per-pool ALTs for high-volume pools (V0 supports multiple ALTs)
-- Extend arb-guard CPI executor to all DEX types (currently Orca-only)
+- ~~Extend arb-guard CPI executor to all DEX types~~ DONE (execute_arb_v2 passthrough CPI)
 
 ### Phase 3: CEX↔DEX Arb (SVM — new module)
 Binance websocket price feed + divergence detector. See `docs/STRATEGY-CEX-DEX-ARB.md`.
