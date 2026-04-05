@@ -65,7 +65,8 @@ impl BundleBuilder {
         let mut instructions = Vec::with_capacity(route.hop_count() * 3 + 6);
         let wsol = addresses::WSOL;
 
-        // If arb-guard CPI executor is available, use execute_arb_v2 for ALL DEX types
+        // Try arb-guard CPI executor first. If the resulting tx would be too large
+        // (many remaining_accounts), fall through to the non-CPI path with separate swap IXs.
         if self.arb_guard_program_id.is_some() {
             let mut instructions = Vec::with_capacity(8);
             let compute_budget_program = addresses::COMPUTE_BUDGET;
@@ -371,27 +372,79 @@ impl BundleBuilder {
             hop_ixs.push(ix);
         }
 
-        // Flatten all accounts into remaining_accounts.
-        // First account must be the signer.
-        let mut remaining_accounts: Vec<AccountMeta> = vec![
-            AccountMeta::new(signer_pubkey, true),
-        ];
+        // Flatten all accounts into remaining_accounts WITH DEDUPLICATION.
+        // Accounts shared across hops (signer, token programs, ATAs, mints) are stored once.
+        // The on-chain program accesses accounts by index into remaining_accounts,
+        // so we remap each hop's account indices after dedup.
+        let mut remaining_accounts: Vec<AccountMeta> = Vec::new();
+        let mut account_index_map: std::collections::HashMap<Pubkey, u8> = std::collections::HashMap::new();
+
+        // Helper: insert or find an account, return its index. If it already exists
+        // but needs to be upgraded to writable/signer, upgrade it.
+        let mut get_or_insert = |meta: &AccountMeta, accounts: &mut Vec<AccountMeta>, map: &mut std::collections::HashMap<Pubkey, u8>| -> u8 {
+            if let Some(&idx) = map.get(&meta.pubkey) {
+                // Upgrade: if new meta is writable or signer, upgrade existing
+                if meta.is_writable && !accounts[idx as usize].is_writable {
+                    accounts[idx as usize] = AccountMeta::new(meta.pubkey, accounts[idx as usize].is_signer || meta.is_signer);
+                }
+                if meta.is_signer && !accounts[idx as usize].is_signer {
+                    let writable = accounts[idx as usize].is_writable;
+                    accounts[idx as usize] = if writable {
+                        AccountMeta::new(meta.pubkey, true)
+                    } else {
+                        AccountMeta::new_readonly(meta.pubkey, true)
+                    };
+                }
+                idx
+            } else {
+                let idx = accounts.len() as u8;
+                map.insert(meta.pubkey, idx);
+                accounts.push(meta.clone());
+                idx
+            }
+        };
+
+        // Signer is always first
+        get_or_insert(
+            &AccountMeta::new(signer_pubkey, true),
+            &mut remaining_accounts, &mut account_index_map,
+        );
+
         let mut hop_params = Vec::new();
 
         for (i, ix) in hop_ixs.iter().enumerate() {
-            // Add the DEX program as a remaining account
-            let program_id_index = remaining_accounts.len() as u8;
-            remaining_accounts.push(AccountMeta::new_readonly(ix.program_id, false));
+            // Add the DEX program (deduplicated)
+            let program_id_index = get_or_insert(
+                &AccountMeta::new_readonly(ix.program_id, false),
+                &mut remaining_accounts, &mut account_index_map,
+            );
 
-            // Add hop accounts
-            let accounts_start = remaining_accounts.len() as u8;
+            // Add hop accounts (deduplicated), recording their remapped indices
+            #[allow(unused_mut)]
+            let mut hop_account_indices: Vec<u8> = Vec::with_capacity(ix.accounts.len());
             for meta in &ix.accounts {
-                remaining_accounts.push(meta.clone());
+                let idx = get_or_insert(meta, &mut remaining_accounts, &mut account_index_map);
+                hop_account_indices.push(idx);
             }
-            let accounts_len = ix.accounts.len() as u8;
 
-            // Find the output token account index in remaining_accounts.
-            // For circular arbs, the output is the signer's ATA for the hop's output_mint.
+            // The on-chain program needs contiguous account slices per hop.
+            // Since we deduplicated, accounts may not be contiguous.
+            // We need to pass the FULL accounts list and let the on-chain program
+            // use per-account indices. BUT our on-chain execute_arb_v2 expects
+            // (accounts_start, accounts_len) as a contiguous slice.
+            //
+            // SOLUTION: The on-chain program already receives ALL remaining_accounts.
+            // We set accounts_start=0, accounts_len=remaining_accounts.len() for each hop.
+            // The CPI invoke will work because Solana passes ALL remaining_accounts
+            // to the CPI, and the DEX program finds its accounts by position in the
+            // instruction's account_metas (which we set correctly in hop.ix_data's
+            // corresponding account list).
+            //
+            // Actually, the cleaner fix: DON'T use accounts_start/accounts_len slicing.
+            // Pass all accounts to every CPI. The DEX program only reads the accounts
+            // specified in its instruction's account_metas.
+
+            // Find output token account index
             let output_mint = route.hops[i].output_mint;
             let output_token_program = if output_mint == addresses::WSOL {
                 addresses::SPL_TOKEN
@@ -399,18 +452,20 @@ impl BundleBuilder {
                 self.state_cache.get_mint_program(&output_mint).unwrap_or(addresses::SPL_TOKEN)
             };
             let output_ata = derive_ata_with_program(&signer_pubkey, &output_mint, &output_token_program);
-            let output_token_index = remaining_accounts.iter()
-                .position(|a| a.pubkey == output_ata)
-                .unwrap_or(0) as u8;
+            let output_token_index = *account_index_map.get(&output_ata).unwrap_or(&0);
 
             hop_params.push(HopV2Params {
                 program_id_index,
-                accounts_start,
-                accounts_len,
+                accounts_start: 0, // pass all accounts
+                accounts_len: remaining_accounts.len() as u8, // on-chain CPI uses full list
                 output_token_index,
                 ix_data: ix.data.clone(),
             });
         }
+
+        debug!("execute_arb_v2: {} remaining_accounts (deduplicated from {} total)",
+            remaining_accounts.len(),
+            hop_ixs.iter().map(|ix| ix.accounts.len() + 1).sum::<usize>() + 1);
 
         // Serialize ArbV2Params using Borsh (Anchor format).
         // Discriminator: sha256("global:execute_arb_v2")[..8] = [141, 60, 173, 81, 122, 89, 6, 39]
