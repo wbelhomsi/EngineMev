@@ -57,9 +57,14 @@ impl JitoRelay {
         }
     }
 
-    /// Get the next tip account (rotated per bundle).
+    /// Get a random tip account for this bundle.
     fn next_tip_account(&self) -> Pubkey {
-        let idx = self.tip_index.fetch_add(1, Ordering::Relaxed) % JITO_TIP_ACCOUNTS.len();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as usize;
+        let idx = nanos % JITO_TIP_ACCOUNTS.len();
+        self.tip_index.store(idx, Ordering::Relaxed);
         JITO_TIP_ACCOUNTS[idx].parse().unwrap()
     }
 }

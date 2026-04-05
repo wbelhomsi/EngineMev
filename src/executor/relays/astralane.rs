@@ -6,7 +6,6 @@ use solana_sdk::{
     pubkey::Pubkey,
     signature::Keypair,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
@@ -40,7 +39,6 @@ pub struct AstralaneRelay {
     endpoint: Option<String>,
     http_client: reqwest::Client,
     rate_limiter: RateLimiter,
-    tip_index: AtomicUsize,
     api_key: String,
 }
 
@@ -67,7 +65,6 @@ impl AstralaneRelay {
             endpoint: endpoint.clone(),
             http_client: http_client.clone(),
             rate_limiter: RateLimiter::new(min_interval),
-            tip_index: AtomicUsize::new(0),
             api_key: api_key.clone(),
         };
 
@@ -111,7 +108,11 @@ impl AstralaneRelay {
 
     /// Get the next tip account (rotated per bundle).
     fn next_tip_account(&self) -> Pubkey {
-        let idx = self.tip_index.fetch_add(1, Ordering::Relaxed) % ASTRALANE_TIP_ACCOUNTS.len();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as usize;
+        let idx = nanos % ASTRALANE_TIP_ACCOUNTS.len();
         ASTRALANE_TIP_ACCOUNTS[idx].parse().unwrap()
     }
 

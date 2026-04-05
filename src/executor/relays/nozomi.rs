@@ -6,7 +6,6 @@ use solana_sdk::{
     pubkey::Pubkey,
     signature::Keypair,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use super::RelayResult;
@@ -30,7 +29,6 @@ pub struct NozomiRelay {
     endpoint: Option<String>,
     http_client: reqwest::Client,
     rate_limiter: RateLimiter,
-    tip_index: AtomicUsize,
 }
 
 impl NozomiRelay {
@@ -44,12 +42,15 @@ impl NozomiRelay {
             endpoint,
             http_client,
             rate_limiter: RateLimiter::new(min_interval),
-            tip_index: AtomicUsize::new(0),
         }
     }
 
     fn next_tip_account(&self) -> Pubkey {
-        let idx = self.tip_index.fetch_add(1, Ordering::Relaxed) % JITO_TIP_ACCOUNTS.len();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as usize;
+        let idx = nanos % JITO_TIP_ACCOUNTS.len();
         JITO_TIP_ACCOUNTS[idx].parse().unwrap()
     }
 }
