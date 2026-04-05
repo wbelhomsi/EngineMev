@@ -270,24 +270,61 @@ impl GeyserStream {
                 }
 
                 // Route to per-DEX parser based on account data size
-                let parsed = match data.len() {
-                    653 => parse_orca_whirlpool(&pool_address, data, slot).map(|p| (p, None)),
-                    1544 | 1560 => parse_raydium_clmm(&pool_address, data, slot).map(|p| (p, None)),
-                    904 => parse_meteora_dlmm(&pool_address, data, slot).map(|p| (p, None)),
-                    1112 => parse_meteora_damm_v2(&pool_address, data, slot).map(|p| (p, None)),
-                    752 => parse_raydium_amm_v4(&pool_address, data, slot)
-                        .map(|(p, vaults)| (p, Some(vaults))),
-                    637 => parse_raydium_cp(&pool_address, data, slot)
-                        .map(|(p, vaults)| (p, Some(vaults))),
+                let parse_start = Instant::now();
+                let (parsed, dex_label) = match data.len() {
+                    653 => (
+                        parse_orca_whirlpool(&pool_address, data, slot).map(|p| (p, None)),
+                        "orca",
+                    ),
+                    1544 | 1560 => (
+                        parse_raydium_clmm(&pool_address, data, slot).map(|p| (p, None)),
+                        "raydium_clmm",
+                    ),
+                    904 => (
+                        parse_meteora_dlmm(&pool_address, data, slot).map(|p| (p, None)),
+                        "meteora_dlmm",
+                    ),
+                    1112 => (
+                        parse_meteora_damm_v2(&pool_address, data, slot).map(|p| (p, None)),
+                        "meteora_damm_v2",
+                    ),
+                    752 => (
+                        parse_raydium_amm_v4(&pool_address, data, slot)
+                            .map(|(p, vaults)| (p, Some(vaults))),
+                        "raydium_amm",
+                    ),
+                    637 => (
+                        parse_raydium_cp(&pool_address, data, slot)
+                            .map(|(p, vaults)| (p, Some(vaults))),
+                        "raydium_cp",
+                    ),
                     _ => {
                         // Variable-size accounts: try orderbook DEX parsers
-                        try_parse_orderbook(&pool_address, data, slot).map(|p| (p, None))
+                        let ob = try_parse_orderbook(&pool_address, data, slot).map(|p| (p, None));
+                        let label = match ob {
+                            Some((ref ps, _)) => match ps.dex_type {
+                                DexType::Phoenix => "phoenix",
+                                DexType::Manifest => "manifest",
+                                _ => "unknown",
+                            },
+                            None => "unknown",
+                        };
+                        (ob, label)
                     }
                 };
+                let parse_elapsed_us = parse_start.elapsed().as_micros() as u64;
 
                 let Some((pool_state, vault_info)) = parsed else {
+                    // Only record parse errors for known DEX data sizes (not random accounts)
+                    if dex_label != "unknown" {
+                        crate::metrics::counters::inc_geyser_parse_errors(dex_label);
+                    }
+                    crate::metrics::counters::record_geyser_parse_duration_us(dex_label, parse_elapsed_us);
                     return;
                 };
+
+                crate::metrics::counters::inc_geyser_updates(dex_label);
+                crate::metrics::counters::record_geyser_parse_duration_us(dex_label, parse_elapsed_us);
 
                 // Update cache with parsed pool state
                 let pool_mints = (pool_state.token_a_mint, pool_state.token_b_mint);
@@ -320,6 +357,7 @@ impl GeyserStream {
                         .map(|t| t.value().elapsed() >= VAULT_FETCH_COOLDOWN)
                         .unwrap_or(true);
                     if should_fetch {
+                        crate::metrics::counters::inc_vault_fetches(dex_label);
                         self.vault_last_fetch.insert(pool_address, Instant::now());
                         let client = self.http_client.clone();
                         let url = self.config.rpc_url.clone();
@@ -392,6 +430,7 @@ impl GeyserStream {
                                 .map(|prev_idx| *prev_idx != array_idx)
                                 .unwrap_or(true);
                             if should_fetch {
+                                crate::metrics::counters::inc_vault_fetches("meteora_dlmm");
                                 self.bin_arrays_checked.insert(pool_address, array_idx);
                                 let client = self.http_client.clone();
                                 let url = self.config.rpc_url.clone();
@@ -452,6 +491,11 @@ impl GeyserStream {
                                     .unwrap_or(true);
 
                                 if should_fetch {
+                                    let tick_dex_label = match pool.dex_type {
+                                        crate::router::pool::DexType::OrcaWhirlpool => "orca",
+                                        _ => "raydium_clmm",
+                                    };
+                                    crate::metrics::counters::inc_vault_fetches(tick_dex_label);
                                     self.tick_arrays_checked.insert(pool_address, array_start);
                                     let client = self.http_client.clone();
                                     let url = self.config.rpc_url.clone();
@@ -497,6 +541,7 @@ impl GeyserStream {
                         if let Some(market_id) = self.state_cache.get_any(&pool_address)
                             .and_then(|p| p.extra.market)
                         {
+                            crate::metrics::counters::inc_vault_fetches("raydium_amm");
                             self.serum_checked.insert(pool_address, false); // mark as in-flight
                             let client = self.http_client.clone();
                             let url = self.config.rpc_url.clone();
