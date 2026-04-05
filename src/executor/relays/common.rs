@@ -109,6 +109,16 @@ pub fn build_signed_bundle_tx(
         .map_err(|e| fail(relay_name, format!("Serialize error: {}", e)))?;
 
     if serialized.len() > 1232 {
+        // Log account details for debugging oversized transactions
+        tracing::debug!(
+            "[{}] Tx {} bytes (limit 1232), {} instructions, {} accounts in message",
+            relay_name, serialized.len(), instructions.len(),
+            match &tx.message {
+                VersionedMessage::V0(m) => format!("{} static + ALT", m.account_keys.len()),
+                VersionedMessage::Legacy(m) => format!("{} legacy", m.account_keys.len()),
+                _ => "unknown".to_string(),
+            }
+        );
         return Err(fail(
             relay_name,
             format!("Tx too large: {} bytes (limit 1232)", serialized.len()),

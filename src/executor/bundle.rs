@@ -65,9 +65,7 @@ impl BundleBuilder {
             let mut cu_limit_data = vec![2u8];
             cu_limit_data.extend_from_slice(&400_000u32.to_le_bytes());
             instructions.push(Instruction { program_id: compute_budget_program, accounts: vec![], data: cu_limit_data });
-            let mut cu_price_data = vec![3u8];
-            cu_price_data.extend_from_slice(&1_000u64.to_le_bytes());
-            instructions.push(Instruction { program_id: compute_budget_program, accounts: vec![], data: cu_price_data });
+            // SetComputeUnitPrice omitted — tip determines bundle priority, not CU price
 
             // ATA creates (reuse existing logic pattern)
             let ata_program = addresses::ATA_PROGRAM;
@@ -147,14 +145,9 @@ impl BundleBuilder {
             accounts: vec![],
             data: cu_limit_data,
         });
-        // SetComputeUnitPrice: instruction index 3, data = [3, price_u64_le] (micro-lamports)
-        let mut cu_price_data = vec![3u8];
-        cu_price_data.extend_from_slice(&1_000u64.to_le_bytes());
-        instructions.push(Instruction {
-            program_id: compute_budget_program,
-            accounts: vec![],
-            data: cu_price_data,
-        });
+        // Note: SetComputeUnitPrice omitted — for bundle submission, priority is
+        // determined by the Jito tip, not the compute unit price. Omitting saves
+        // ~20 bytes per tx, keeping routes under the 1232-byte limit with ALT.
 
         let signer_pubkey = self.searcher_keypair.pubkey();
         let ata_program = addresses::ATA_PROGRAM;
