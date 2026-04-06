@@ -211,7 +211,7 @@ pub async fn send_public_tx(
             tx_b64,
             {
                 "encoding": "base64",
-                "skipPreflight": false,
+                "skipPreflight": true,
                 "preflightCommitment": "processed",
                 "maxRetries": 3
             }
