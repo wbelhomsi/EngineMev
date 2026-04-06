@@ -293,9 +293,28 @@ TDD for each component:
 7. Submission filter: PumpSwap routes accepted
 8. E2e: route discovery with PumpSwap + Orca pools
 
+## 10. Cashback / Volume Tracking
+
+Always include volume accumulator accounts — cashback accumulates automatically from trading volume.
+
+**Extra accounts for all PumpSwap swaps:**
+
+| Account | Source | Writable |
+|---------|--------|----------|
+| `user_volume_accumulator` | PDA `["user_volume_accumulator", signer]` on PumpSwap | Yes |
+| `user_volume_accumulator_wsol_ata` | ATA from (user_volume_accumulator, wSOL) | Yes (cashback only) |
+| `global_volume_accumulator` | `C2aFPdENg4A2HQsmrd5rTw5TaYBX5Ku887cWjbFKtZpw` (hardcoded) | Yes (buy only) |
+
+For **buy**: always include global_volume_accumulator + user_volume_accumulator (IDL positions 19-20).
+For **sell with cashback**: include user_volume_accumulator_wsol_ata + user_volume_accumulator.
+For **sell without cashback**: no extra volume accounts needed.
+
+Since we want to accumulate cashback: always pass volume accounts when the pool is a cashback coin. For non-cashback pools, volume tracking is still useful for buy instructions.
+
+`user_volume_accumulator` PDA and `global_volume_accumulator` should be added to the ALT.
+
 ## Non-Goals
 
-- Cashback coin special handling (first pass ignores cashback — treats as normal sell)
-- Mayhem mode fee recipient override (uses normal round-robin)
-- Volume tracking (track_volume = false/None)
+- Mayhem mode fee recipient override (uses normal round-robin — rare edge case)
 - Per-pool ALTs for PumpSwap (future optimization)
+- Cashback claiming (separate periodic transaction, not in arb flow)
