@@ -302,18 +302,26 @@ async fn main() -> Result<()> {
                 solana_mev_bot::metrics::counters::set_channel_backpressure(change_rx.len());
 
                 // Pool state was already updated by the Geyser stream.
-                let pool_state = match state_cache.get_any(&change.pool_address) {
+                let pool_state = match state_cache.get(&change.pool_address) {
                     Some(s) => s,
                     None => continue,
                 };
 
-                // Skip pools with negligible reserves — not worth route calculation.
-                // Both reserves must be below the threshold to skip (if one side
-                // is large the pool may still offer meaningful liquidity).
-                const MIN_RESERVE_LAMPORTS: u64 = 1_000_000_000; // 1 SOL
-                if pool_state.token_a_reserve < MIN_RESERVE_LAMPORTS
-                    && pool_state.token_b_reserve < MIN_RESERVE_LAMPORTS
-                {
+                // Skip dust pools — too small for meaningful arb.
+                // Check the SOL-side reserve specifically (we arb in SOL).
+                // The old `&&` check let pools like 0.84 SOL + 200K USDT through
+                // because the USDT side was numerically large in raw units.
+                const MIN_SOL_RESERVE: u64 = 10_000_000_000; // 10 SOL
+                let sol = config::sol_mint();
+                let sol_reserve = if pool_state.token_a_mint == sol {
+                    pool_state.token_a_reserve
+                } else if pool_state.token_b_mint == sol {
+                    pool_state.token_b_reserve
+                } else {
+                    // Non-SOL pair — use the smaller reserve as a proxy
+                    std::cmp::min(pool_state.token_a_reserve, pool_state.token_b_reserve)
+                };
+                if sol_reserve < MIN_SOL_RESERVE {
                     continue;
                 }
 

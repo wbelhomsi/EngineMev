@@ -34,7 +34,7 @@ impl RouteCalculator {
         let mut routes = Vec::new();
 
         // Get the pool state for the swapped pool
-        let _pool_state = match self.state_cache.get_any(&swap.pool_address) {
+        let _pool_state = match self.state_cache.get(&swap.pool_address) {
             Some(s) => s,
             None => {
                 debug!("No cached state for pool {}", swap.pool_address);
@@ -101,7 +101,7 @@ impl RouteCalculator {
         let base_pools = self.state_cache.pools_for_token(base_mint);
 
         for pool_a_addr in &base_pools {
-            let pool_a = match self.state_cache.get_any(pool_a_addr) {
+            let pool_a = match self.state_cache.get(pool_a_addr) {
                 Some(s) => s,
                 None => continue,
             };
@@ -120,7 +120,7 @@ impl RouteCalculator {
                     continue;
                 }
 
-                let pool_b = match self.state_cache.get_any(pool_b_addr) {
+                let pool_b = match self.state_cache.get(pool_b_addr) {
                     Some(s) => s,
                     None => continue,
                 };
@@ -153,7 +153,7 @@ impl RouteCalculator {
         let base_pools = self.state_cache.pools_for_token(base_mint);
 
         for pool_a_addr in &base_pools {
-            let pool_a = match self.state_cache.get_any(pool_a_addr) {
+            let pool_a = match self.state_cache.get(pool_a_addr) {
                 Some(s) => s,
                 None => continue,
             };
@@ -171,7 +171,7 @@ impl RouteCalculator {
                     continue;
                 }
 
-                let pool_b = match self.state_cache.get_any(pool_b_addr) {
+                let pool_b = match self.state_cache.get(pool_b_addr) {
                     Some(s) => s,
                     None => continue,
                 };
@@ -194,7 +194,7 @@ impl RouteCalculator {
                         continue;
                     }
 
-                    let pool_c = match self.state_cache.get_any(pool_c_addr) {
+                    let pool_c = match self.state_cache.get(pool_c_addr) {
                         Some(s) => s,
                         None => continue,
                     };
