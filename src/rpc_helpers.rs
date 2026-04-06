@@ -151,18 +151,19 @@ pub async fn send_public_tx(
     base_instructions: &[solana_sdk::instruction::Instruction],
     signer: &solana_sdk::signature::Keypair,
     recent_blockhash: solana_sdk::hash::Hash,
-    alt: Option<&solana_message::AddressLookupTableAccount>,
+    alts: &[&solana_message::AddressLookupTableAccount],
 ) {
     use base64::{engine::general_purpose, Engine as _};
     use solana_sdk::message::{v0, VersionedMessage};
     use solana_sdk::transaction::{Transaction, VersionedTransaction};
 
-    // Try V0 with ALT first, fall back to legacy
-    let tx_bytes = if let Some(alt_account) = alt {
+    // Try V0 with ALTs first, fall back to legacy
+    let tx_bytes = if !alts.is_empty() {
+        let alt_vec: Vec<solana_message::AddressLookupTableAccount> = alts.iter().map(|a| (*a).clone()).collect();
         match v0::Message::try_compile(
             &signer.pubkey(),
             base_instructions,
-            std::slice::from_ref(alt_account),
+            &alt_vec,
             recent_blockhash,
         ) {
             Ok(v0_msg) => {

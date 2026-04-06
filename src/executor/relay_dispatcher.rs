@@ -12,16 +12,16 @@ use super::relays::Relay;
 pub struct RelayDispatcher {
     relays: Vec<Arc<dyn Relay>>,
     signer: Arc<Keypair>,
-    alt: Option<Arc<AddressLookupTableAccount>>,
+    alts: Vec<Arc<AddressLookupTableAccount>>,
 }
 
 impl RelayDispatcher {
     pub fn new(
         relays: Vec<Arc<dyn Relay>>,
         signer: Arc<Keypair>,
-        alt: Option<Arc<AddressLookupTableAccount>>,
+        alts: Vec<Arc<AddressLookupTableAccount>>,
     ) -> Self {
-        Self { relays, signer, alt }
+        Self { relays, signer, alts }
     }
 
     pub fn signer(&self) -> Arc<Keypair> {
@@ -46,9 +46,10 @@ impl RelayDispatcher {
             let signer = self.signer.clone();
             let tip = tip_lamports;
             let bh = recent_blockhash;
-            let alt = self.alt.clone();
+            let alts = self.alts.clone();
             rt.spawn(async move {
-                let result = relay.submit(&ixs, tip, &signer, bh, alt.as_deref()).await;
+                let alt_refs: Vec<&AddressLookupTableAccount> = alts.iter().map(|a| a.as_ref()).collect();
+                let result = relay.submit(&ixs, tip, &signer, bh, &alt_refs).await;
                 if result.success {
                     info!(
                         "Bundle accepted by {}: id={:?} latency={}us",

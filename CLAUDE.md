@@ -266,7 +266,7 @@ See `.env.example`. Key ones:
 - `SEARCHER_KEYPAIR` — Path to signer keypair JSON
 - `DRY_RUN=true` — Log opportunities without submitting (default)
 - `MIN_PROFIT_LAMPORTS` — Minimum net profit to submit (default 100000 = 0.0001 SOL)
-- `TIP_FRACTION` — Fraction of profit given as Jito tip (default 0.50)
+- `TIP_FRACTION` — Fraction of profit given as Jito tip (default 0.15)
 - `LST_ARB_ENABLED` — Enable LST rate arb (default true)
 - `LST_MIN_SPREAD_BPS` — Minimum spread for LST arb (default 5)
 - `METRICS_PORT` — Prometheus `/metrics` HTTP endpoint port (disabled if unset)

@@ -38,6 +38,6 @@ pub trait Relay: Send + Sync {
         tip_lamports: u64,
         signer: &Keypair,
         recent_blockhash: Hash,
-        alt: Option<&AddressLookupTableAccount>,
+        alts: &[&AddressLookupTableAccount],
     ) -> RelayResult;
 }

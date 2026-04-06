@@ -173,23 +173,33 @@ async fn main() -> Result<()> {
         config.arb_guard_program_id,
     ));
 
-    // Load Address Lookup Table if configured (enables V0 versioned transactions)
-    let alt_account: Option<Arc<solana_message::AddressLookupTableAccount>> =
-        if let Ok(alt_addr_str) = std::env::var("ALT_ADDRESS") {
-            match rpc_helpers::load_alt(&http_client, &config.rpc_url, &alt_addr_str).await {
-                Ok(alt) => {
-                    info!("Loaded ALT {} with {} addresses", alt_addr_str, alt.addresses.len());
-                    Some(Arc::new(alt))
-                }
-                Err(e) => {
-                    warn!("Failed to load ALT: {} — using legacy transactions", e);
-                    None
-                }
+    // Load Address Lookup Tables (enables V0 versioned transactions)
+    let mut alts: Vec<Arc<solana_message::AddressLookupTableAccount>> = Vec::new();
+
+    if let Ok(alt_addr_str) = std::env::var("ALT_ADDRESS") {
+        match rpc_helpers::load_alt(&http_client, &config.rpc_url, &alt_addr_str).await {
+            Ok(alt) => {
+                info!("Loaded ALT {} with {} addresses", alt_addr_str, alt.addresses.len());
+                alts.push(Arc::new(alt));
             }
-        } else {
-            info!("No ALT_ADDRESS configured — using legacy transactions");
-            None
-        };
+            Err(e) => {
+                warn!("Failed to load ALT: {} — using legacy transactions", e);
+            }
+        }
+    } else {
+        info!("No ALT_ADDRESS configured — using legacy transactions");
+    }
+
+    // Load additional public ALTs for better V0 compression
+    match rpc_helpers::load_alt(&http_client, &config.rpc_url, "2kkWwe1YoqdrhyVsfcgVJ5sqhxxunX4RieGs7GuV1shf").await {
+        Ok(alt) => {
+            info!("Loaded external ALT with {} addresses", alt.addresses.len());
+            alts.push(Arc::new(alt));
+        }
+        Err(e) => {
+            warn!("Failed to load external ALT: {} — continuing without it", e);
+        }
+    }
 
     // Initialize per-relay modules — each owns its own tip accounts, rate limiting, and submission
     let relays: Vec<Arc<dyn Relay>> = vec![
@@ -199,8 +209,8 @@ async fn main() -> Result<()> {
         Arc::new(BloxrouteRelay::new(&config)),
         Arc::new(ZeroSlotRelay::new(&config)),
     ];
-    let alt_for_public = alt_account.clone(); // Keep a ref for SEND_PUBLIC
-    let relay_dispatcher = Arc::new(RelayDispatcher::new(relays, Arc::new(searcher_keypair), alt_account));
+    let alts_for_public = alts.clone(); // Keep a ref for SEND_PUBLIC
+    let relay_dispatcher = Arc::new(RelayDispatcher::new(relays, Arc::new(searcher_keypair), alts));
     relay_dispatcher.warmup().await;
 
     info!("All components initialized, starting pipeline...");
@@ -524,10 +534,11 @@ async fn main() -> Result<()> {
                                     let ixs = instructions.clone();
                                     let bh = blockhash;
                                     let signer_arc = relay_dispatcher.signer();
-                                    let alt_ref = alt_for_public.clone();
+                                    let public_alts = alts_for_public.clone();
                                     warn!("SEND_PUBLIC: sending 1 tx via public RPC...");
                                     rt.spawn(async move {
-                                        rpc_helpers::send_public_tx(&http, &rpc, &ixs, &signer_arc, bh, alt_ref.as_deref()).await;
+                                        let alt_refs: Vec<&solana_message::AddressLookupTableAccount> = public_alts.iter().map(|a| a.as_ref()).collect();
+                                        rpc_helpers::send_public_tx(&http, &rpc, &ixs, &signer_arc, bh, &alt_refs).await;
                                     });
                                 }
 

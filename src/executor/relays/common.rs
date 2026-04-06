@@ -77,7 +77,7 @@ pub fn build_signed_bundle_tx(
     tip_account: &Pubkey,
     signer: &Keypair,
     recent_blockhash: Hash,
-    alt: Option<&AddressLookupTableAccount>,
+    alts: &[&AddressLookupTableAccount],
 ) -> Result<Vec<u8>, RelayResult> {
     let mut instructions = base_instructions.to_vec();
     instructions.push(system_instruction::transfer(
@@ -86,12 +86,13 @@ pub fn build_signed_bundle_tx(
         tip_lamports,
     ));
 
-    // Try V0 with ALT, fall back to legacy
-    let tx = if let Some(alt_account) = alt {
+    // Try V0 with ALTs, fall back to legacy
+    let tx = if !alts.is_empty() {
+        let alt_vec: Vec<AddressLookupTableAccount> = alts.iter().map(|a| (*a).clone()).collect();
         match v0::Message::try_compile(
             &signer.pubkey(),
             &instructions,
-            std::slice::from_ref(alt_account),
+            &alt_vec,
             recent_blockhash,
         ) {
             Ok(v0_msg) => {

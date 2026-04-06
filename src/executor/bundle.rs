@@ -76,6 +76,11 @@ impl BundleBuilder {
             let mut cu_limit_data = vec![2u8];
             cu_limit_data.extend_from_slice(&400_000u32.to_le_bytes());
             instructions.push(Instruction { program_id: compute_budget_program, accounts: vec![], data: cu_limit_data });
+
+            // RequestHeapFrame: expand heap from 32KB to 256KB for complex CPI chains
+            let mut heap_data = vec![1u8]; // instruction type 1
+            heap_data.extend_from_slice(&(256 * 1024u32).to_le_bytes());
+            instructions.push(Instruction { program_id: compute_budget_program, accounts: vec![], data: heap_data });
             // SetComputeUnitPrice omitted — tip determines bundle priority, not CU price
 
             // ATA creates (reuse existing logic pattern)
@@ -153,6 +158,15 @@ impl BundleBuilder {
             program_id: compute_budget_program,
             accounts: vec![],
             data: cu_limit_data,
+        });
+
+        // RequestHeapFrame: expand heap from 32KB to 256KB for complex CPI chains
+        let mut heap_data = vec![1u8]; // instruction type 1
+        heap_data.extend_from_slice(&(256 * 1024u32).to_le_bytes());
+        instructions.push(Instruction {
+            program_id: compute_budget_program,
+            accounts: vec![],
+            data: heap_data,
         });
         // Note: SetComputeUnitPrice omitted — for bundle submission, priority is
         // determined by the Jito tip, not the compute unit price. Omitting saves

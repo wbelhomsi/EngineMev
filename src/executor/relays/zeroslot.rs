@@ -71,7 +71,7 @@ impl super::Relay for ZeroSlotRelay {
         tip_lamports: u64,
         signer: &Keypair,
         recent_blockhash: Hash,
-        alt: Option<&AddressLookupTableAccount>,
+        alts: &[&AddressLookupTableAccount],
     ) -> RelayResult {
         let url = match &self.endpoint {
             Some(url) => url.clone(),
@@ -91,7 +91,7 @@ impl super::Relay for ZeroSlotRelay {
         let tip_account = self.next_tip_account();
 
         let serialized = match common::build_signed_bundle_tx(
-            "zeroslot", base_instructions, tip_lamports, &tip_account, signer, recent_blockhash, alt,
+            "zeroslot", base_instructions, tip_lamports, &tip_account, signer, recent_blockhash, alts,
         ) {
             Ok(bytes) => bytes,
             Err(mut r) => {
