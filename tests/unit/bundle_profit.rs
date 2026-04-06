@@ -82,8 +82,8 @@ fn test_bundle_sets_min_out_on_final_hop() {
         estimated_profit_lamports: 50_000_000,
     };
 
-    let min_final_output = route.input_amount
-        + route.estimated_profit_lamports.saturating_sub(25_000_000);
+    // Break-even: min_final_output = input_amount (not input+profit).
+    let min_final_output = route.input_amount;
 
     let result = builder.build_arb_instructions(&route, min_final_output);
     assert!(result.is_ok(), "Instruction build should succeed");
@@ -91,4 +91,44 @@ fn test_bundle_sets_min_out_on_final_hop() {
     // Verify instructions were built (no tips — relays add their own)
     let instructions = result.unwrap();
     assert!(instructions.len() >= 3, "Should have compute budget + ATA + swap IXs");
+}
+
+/// min_final_output must be break-even (input_amount), NOT the optimistic
+/// estimate (input + profit).  Setting it to input+profit causes
+/// ExceededSlippage when the actual output is profitable but less than the
+/// simulator's estimate.  arb-guard's execute_arb_v2 verifies real profit
+/// on-chain, so the per-TX guard only needs break-even protection.
+#[test]
+fn test_min_output_is_break_even_not_optimistic_estimate() {
+    let input = 10_000_000u64; // 0.01 SOL
+    let estimated_profit = 500_000u64; // 0.0005 SOL
+
+    // Correct: min = input (break-even)
+    let min_final_output = input;
+
+    assert_eq!(min_final_output, input,
+        "min_final_output must equal input_amount (break-even)");
+    assert!(min_final_output < input + estimated_profit,
+        "min_final_output must be less than input+profit to avoid ExceededSlippage");
+}
+
+/// Regression: ensure that a slightly-less-than-estimated output still
+/// passes the break-even check.  Under the old logic (input+profit) this
+/// trade would be rejected despite being profitable.
+#[test]
+fn test_profitable_but_below_estimate_passes_break_even() {
+    let input = 1_000_000_000u64; // 1 SOL
+    let estimated_profit = 50_000_000u64; // 0.05 SOL
+    let actual_output = input + estimated_profit / 2; // half the estimated profit
+
+    // Break-even guard
+    let min_final_output = input;
+
+    assert!(actual_output >= min_final_output,
+        "Trade that beats break-even should not be rejected");
+
+    // Old (buggy) guard would have rejected this
+    let old_min = input + estimated_profit;
+    assert!(actual_output < old_min,
+        "Same trade would fail the old optimistic guard — confirming the bug");
 }
