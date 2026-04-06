@@ -110,6 +110,7 @@ src/
 | Sanctum S Controller | `5ocnV1qiCgaQR8Jb8xWnVbApfaygJ8tNoZfgPwsgx9kx` | varies | Yes |
 | Phoenix V1 | `PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY` | variable (624+ header) | No (Shank) |
 | Manifest | `MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms` | variable (256+ header) | No |
+| PumpSwap AMM | `pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA` | 243-301 (discriminator routed) | Yes |
 
 **See `docs/DEX-REFERENCE.md` for full account layouts, byte offsets, and quoting math.**
 
@@ -138,7 +139,7 @@ DRY_RUN=true
 ### Tests
 
 ```bash
-make test                                     # 221 unit tests
+make test                                     # 237 unit tests
 make lint                                     # clippy (warnings = errors)
 make coverage                                 # line coverage report (49.3%)
 make ci                                       # lint + test + coverage
@@ -194,23 +195,35 @@ Base DEX↔DEX backrun arb working live on mainnet.
 - DLMM bin-by-bin simulation: real bin liquidity with Q64.64 pre-stored prices
 - Raydium AMM v4 SwapBaseInV2 (8-account IX, no Serum/OpenBook dependency)
 - arb-guard Phase A: on-chain profit guard (start_check/profit_check with reentrancy lock)
-- arb-guard Phase B: passthrough CPI executor for ALL DEXes (execute_arb_v2 — client builds raw swap IXs, program invokes via CPI and verifies profit)
-- Shared relay common.rs: RateLimiter, build_signed_bundle_tx, parse_jsonrpc_response
-- Decomposed main.rs (994→515 lines): sanctum.rs, rpc_helpers.rs, can_submit_route in router
-- Safety: TIP_FRACTION validated, SKIP_SIMULATOR has sanity cap, i128 profit math, relay key redaction
-- 221 unit tests + 3 Surfpool E2E tests, 0 clippy warnings
+- arb-guard Phase B: passthrough CPI executor for ALL DEXes (execute_arb_v2 with per-hop amount_in rewriting via balance diff)
+- PumpSwap AMM integration (10th DEX): Pump.fun graduated tokens, 21-23 accounts, 125 bps conservative fee, cashback/volume tracking
+- Shared relay common.rs: RateLimiter, build_signed_bundle_tx (multi-ALT), parse_jsonrpc_response
+- Multiple ALT support: 56-address base ALT + competitor's 170-address ALT (226 unique addresses)
+- RequestHeapFrame (256KB) in every transaction for complex CPI chains
+- Decomposed main.rs: sanctum.rs, rpc_helpers.rs, can_submit_route in router
+- Safety: TIP_FRACTION=0.15, smart tip with min_tip floor, sanity cap 10 SOL, i128 profit math, relay key redaction
+- TTL-enforced route calculator (get() not get_any()), 10 SOL minimum pool reserve filter
+- Raydium AMM v4 SwapBaseInV2 (8 accounts, no Serum/OpenBook)
+- Base58 encoding for Jito/Nozomi/ZeroSlot, base64 for Astralane/bloXroute
+- Random tip account selection per bundle
+- Route cap (10 per event) + min reserve filter (10 SOL)
+- Prometheus + OTLP metrics with error categorization and profiling histograms
+- 237 unit tests + 10 e2e + 1 integration, 0 clippy warnings
 - Makefile: make lint, make test, make coverage, make ci
-- Tested on mainnet: ~300 realistic opportunities in 5 min, ~0.000189 SOL avg profit per opp
+- 87% simulation success rate on mainnet, 177 bundles accepted per 5 min
+- Monitoring: Prometheus + Grafana docker-compose in monitoring/ dir
 
 **Remaining:**
-- ~~Deploy arb-guard to mainnet~~ DONE (CbjPG5TEEhZGXsA8prmJPfvgH51rudYgcubRUtCCGyUw, 500KB buffer, 3.56 SOL)
-- ~~Upgrade solana-sdk 2.2 → modular crates 4.x~~ DONE (solana-sdk 4.0.1 + modular crates)
-- ~~Grafana + OpenTelemetry metrics~~ DONE (Prometheus /metrics + OTLP tracing spans)
-- ~~Deduplication of repeated opportunities on same pool pair~~ DONE (per-pool slot dedup + arb route signature dedup with 2s window)
+- ~~Deploy arb-guard to mainnet~~ DONE
+- ~~Upgrade solana-sdk 2.2 → modular crates 4.x~~ DONE
+- ~~Grafana + OpenTelemetry metrics~~ DONE
+- ~~Deduplication of repeated opportunities~~ DONE
+- ~~Raydium AMM v4 Swap V2~~ DONE (8 accounts, no Serum)
+- ~~Extend arb-guard CPI to all DEX types~~ DONE (execute_arb_v2 passthrough with hop chaining)
+- ~~PumpSwap AMM integration~~ DONE (10th DEX)
 - Phoenix lot size conversion (Phoenix excluded from submission for now)
-- Raydium AMM v4 Swap V2 instruction (8 accounts vs 18, removes all Serum/OpenBook — saves 320 bytes/hop)
-- Dynamic per-pool ALTs for high-volume pools (V0 supports multiple ALTs)
-- ~~Extend arb-guard CPI executor to all DEX types~~ DONE (execute_arb_v2 passthrough CPI)
+- Dynamic per-pool ALTs for high-volume pools
+- Co-located server near Jito validators (latency is the final blocker for profit)
 
 ### Phase 3: CEX↔DEX Arb (SVM — new module)
 Binance websocket price feed + divergence detector. See `docs/STRATEGY-CEX-DEX-ARB.md`.
@@ -255,6 +268,10 @@ Flashbots MEV-Share on Ethereum. See `docs/STRATEGY-MEVSHARE-ETH.md`.
 19. **Phoenix/Manifest SDK crates (phoenix-v1, manifest-dex) conflict with solana-sdk 2.2.** We use raw byte-offset parsing with bytemuck instead. Do not add these crates to Cargo.toml.
 20. **Phoenix market accounts are variable-size.** Can't route by data.len() like AMMs. The `try_parse_orderbook()` fallback handles this.
 21. **Phoenix orderbook top-of-book requires Red-Black tree traversal.** Currently deferred — pools are discovered with zero reserves/pricing. Full book parsing needs the sokoban crate or manual tree walk.
+22. **PumpSwap fees are tiered 30-125 bps by market cap**, not flat. We use 125 bps (worst-case) for conservative quoting. The on-chain Fee Program handles the actual tier.
+23. **PumpSwap pool_v2 is NOT part of the PumpSwap IDL** — it's from the Pump bonding curve program. Do not include it in swap instructions.
+24. **execute_arb_v2 rewrites amount_in per hop** via `amount_in_offset` in HopV2Params. Offset is 1 for Raydium AMM V4, 8 for all Anchor DEXes. The on-chain program patches ix_data with actual received amount (balance diff) before invoking the next hop.
+25. **Always use multiple ALTs in V0 messages.** Our 56-addr ALT + competitor's 170-addr ALT = 226 unique addresses for maximum compression.
 
 ## Environment Variables
 
