@@ -269,6 +269,7 @@ async fn main() -> Result<()> {
             let mut recent_arbs: std::collections::HashMap<Vec<solana_sdk::pubkey::Pubkey>, (u32, std::time::Instant)>
                 = std::collections::HashMap::new();
 
+            let sol_mint_for_filter = config::sol_mint();
             loop {
                 // Check shutdown
                 if *shutdown_rx.borrow() {
@@ -312,10 +313,9 @@ async fn main() -> Result<()> {
                 // The old `&&` check let pools like 0.84 SOL + 200K USDT through
                 // because the USDT side was numerically large in raw units.
                 const MIN_SOL_RESERVE: u64 = 10_000_000_000; // 10 SOL
-                let sol = config::sol_mint();
-                let sol_reserve = if pool_state.token_a_mint == sol {
+                let sol_reserve = if pool_state.token_a_mint == sol_mint_for_filter {
                     pool_state.token_a_reserve
-                } else if pool_state.token_b_mint == sol {
+                } else if pool_state.token_b_mint == sol_mint_for_filter {
                     pool_state.token_b_reserve
                 } else {
                     // Non-SOL pair — use the smaller reserve as a proxy
@@ -490,11 +490,11 @@ async fn main() -> Result<()> {
                         };
 
                         // Build base instructions (no tips — each relay adds its own).
-                        // min_final_output protects the SWAP output only.
-                        // The tip is a separate SOL transfer added by each relay,
-                        // so the swap must return at least input + gross_profit.
-                        let min_final_output = route.input_amount
-                            + route.estimated_profit_lamports;
+                        // min_final_output = input_amount (break-even protection).
+                        // arb-guard's execute_arb_v2 verifies actual profit on-chain.
+                        // Using input (not input+profit) avoids ExceededSlippage when
+                        // the actual output is profitable but below the optimistic estimate.
+                        let min_final_output = route.input_amount;
                         let build_start = std::time::Instant::now();
                         match bundle_builder.build_arb_instructions(&route, min_final_output) {
                             Ok(instructions) => {

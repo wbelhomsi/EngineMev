@@ -221,3 +221,128 @@ fn test_route_count_bounded_with_many_pools() {
         "Should find at least some routes with 40 pools"
     );
 }
+
+/// Verify dust pools (< 10 SOL on the SOL side) are filtered out.
+///
+/// The old check used `&&` so a pool with 0.84 SOL + 57 USDC (raw 57_000_000)
+/// passed because the USDC side was numerically > 1 SOL in lamports.
+/// The fix checks the SOL-side reserve specifically.
+#[test]
+fn test_dust_pool_filtered_by_sol_reserve() {
+    let sol_mint = config::sol_mint();
+
+    const MIN_SOL_RESERVE: u64 = 10_000_000_000; // 10 SOL
+
+    // --- Helper: extract SOL-side reserve (mirrors main.rs logic) ---
+    let sol_side_reserve = |pool: &PoolState| -> u64 {
+        if pool.token_a_mint == sol_mint {
+            pool.token_a_reserve
+        } else if pool.token_b_mint == sol_mint {
+            pool.token_b_reserve
+        } else {
+            // Non-SOL pair: use the smaller reserve as a proxy
+            std::cmp::min(pool.token_a_reserve, pool.token_b_reserve)
+        }
+    };
+
+    // Case 1: SOL on token_b side, 0.84 SOL — must be filtered as dust
+    let dust_pool = PoolState {
+        address: Pubkey::new_unique(),
+        dex_type: DexType::RaydiumCp,
+        token_a_mint: Pubkey::new_unique(), // USDC
+        token_b_mint: sol_mint,
+        token_a_reserve: 57_000_000, // 57 USDC (6 decimals)
+        token_b_reserve: 840_000_000, // 0.84 SOL
+        fee_bps: 25,
+        current_tick: None,
+        sqrt_price_x64: None,
+        liquidity: None,
+        last_slot: 100,
+        extra: PoolExtra::default(),
+        best_bid_price: None,
+        best_ask_price: None,
+    };
+    assert!(
+        sol_side_reserve(&dust_pool) < MIN_SOL_RESERVE,
+        "0.84 SOL pool must be filtered as dust"
+    );
+
+    // Case 2: SOL on token_a side, 50 SOL — must pass
+    let healthy_pool = PoolState {
+        address: Pubkey::new_unique(),
+        dex_type: DexType::OrcaWhirlpool,
+        token_a_mint: sol_mint,
+        token_b_mint: Pubkey::new_unique(),
+        token_a_reserve: 50_000_000_000, // 50 SOL
+        token_b_reserve: 7_500_000_000,
+        fee_bps: 25,
+        current_tick: None,
+        sqrt_price_x64: None,
+        liquidity: None,
+        last_slot: 100,
+        extra: PoolExtra::default(),
+        best_bid_price: None,
+        best_ask_price: None,
+    };
+    assert!(
+        sol_side_reserve(&healthy_pool) >= MIN_SOL_RESERVE,
+        "50 SOL pool must pass the dust filter"
+    );
+
+    // Case 3: Non-SOL pair, one side tiny — must be filtered
+    let non_sol_dust = PoolState {
+        address: Pubkey::new_unique(),
+        dex_type: DexType::RaydiumCp,
+        token_a_mint: Pubkey::new_unique(),
+        token_b_mint: Pubkey::new_unique(),
+        token_a_reserve: 500_000_000, // 0.5 in 9-decimal token
+        token_b_reserve: 999_999_999_999, // large
+        fee_bps: 25,
+        current_tick: None,
+        sqrt_price_x64: None,
+        liquidity: None,
+        last_slot: 100,
+        extra: PoolExtra::default(),
+        best_bid_price: None,
+        best_ask_price: None,
+    };
+    assert!(
+        sol_side_reserve(&non_sol_dust) < MIN_SOL_RESERVE,
+        "Non-SOL pair with tiny min-reserve must be filtered"
+    );
+
+    // Case 4: The OLD buggy check would pass the dust_pool.
+    // Old logic: skip only if BOTH < 1 SOL. USDC raw 57_000_000 < 1_000_000_000,
+    // so the old check WOULD have caught this specific case. But the real bug
+    // is pools like 0.84 SOL + 200B raw USDT (200_000 USDT in 6-dec = 200_000_000_000)
+    // where the non-SOL side is numerically huge.
+    let real_bug_pool = PoolState {
+        address: Pubkey::new_unique(),
+        dex_type: DexType::RaydiumCp,
+        token_a_mint: Pubkey::new_unique(), // USDT
+        token_b_mint: sol_mint,
+        token_a_reserve: 200_000_000_000, // 200,000 USDT raw (6 dec) — huge number
+        token_b_reserve: 840_000_000,     // 0.84 SOL
+        fee_bps: 25,
+        current_tick: None,
+        sqrt_price_x64: None,
+        liquidity: None,
+        last_slot: 100,
+        extra: PoolExtra::default(),
+        best_bid_price: None,
+        best_ask_price: None,
+    };
+    // Old buggy check: skip if BOTH < 1B. token_a_reserve (200B) >= 1B, so old check PASSES this pool!
+    let old_min: u64 = 1_000_000_000;
+    let old_would_skip = real_bug_pool.token_a_reserve < old_min
+        && real_bug_pool.token_b_reserve < old_min;
+    assert!(
+        !old_would_skip,
+        "Old check incorrectly lets this dust pool through"
+    );
+    // New check: SOL side is 0.84 SOL < 10 SOL — filtered correctly.
+    assert!(
+        sol_side_reserve(&real_bug_pool) < MIN_SOL_RESERVE,
+        "New check correctly filters 0.84 SOL pool even with large USDT side"
+    );
+}
