@@ -28,6 +28,7 @@ pub struct HopV2Params {
     pub accounts_start: u8,      // Start index in remaining_accounts for this hop
     pub accounts_len: u8,        // Number of accounts for this hop
     pub output_token_index: u8,  // Index in remaining_accounts of output token account
+    pub amount_in_offset: u8,    // Byte offset of amount_in (u64 LE) in ix_data
     pub ix_data: Vec<u8>,        // Raw instruction data (client-built, DEX-specific)
 }
 
@@ -259,7 +260,9 @@ pub mod arb_guard {
         require!(profit_token_idx < remaining.len(), ArbGuardError::InvalidHopParams);
         let start_balance = get_token_balance(&remaining[profit_token_idx])?;
 
-        // Execute each hop
+        // Execute each hop, rewriting amount_in for hops 1+ with actual output from prior hop
+        let mut interim_amount_in: u64 = 0;
+
         for (hop_idx, hop) in params.hops.iter().enumerate() {
             let prog_idx = hop.program_id_index as usize;
             let acct_start = hop.accounts_start as usize;
@@ -274,6 +277,15 @@ pub mod arb_guard {
 
             // Pre-swap balance of output token
             let pre_balance = get_token_balance(&remaining[out_idx])?;
+
+            // For hops after the first, rewrite amount_in with actual received from previous hop
+            let mut ix_data = hop.ix_data.clone();
+            if hop_idx > 0 {
+                let offset = hop.amount_in_offset as usize;
+                if offset + 8 <= ix_data.len() {
+                    ix_data[offset..offset + 8].copy_from_slice(&interim_amount_in.to_le_bytes());
+                }
+            }
 
             // Build CPI instruction from hop params
             let program_id = remaining[prog_idx].key();
@@ -295,7 +307,7 @@ pub mod arb_guard {
             let ix = solana_program::instruction::Instruction {
                 program_id,
                 accounts: account_metas,
-                data: hop.ix_data.clone(),
+                data: ix_data,
             };
 
             solana_program::program::invoke(&ix, &account_infos)?;
@@ -303,9 +315,9 @@ pub mod arb_guard {
             // Post-swap balance — verify non-zero output
             let post_balance = get_token_balance(&remaining[out_idx])?;
             require!(post_balance > pre_balance, ArbGuardError::SwapOutputZero);
-            let actual_received = post_balance - pre_balance;
+            interim_amount_in = post_balance - pre_balance;
 
-            msg!("Hop {}: received {} tokens", hop_idx, actual_received);
+            msg!("Hop {}: received {} tokens", hop_idx, interim_amount_in);
         }
 
         // Final profit check: end balance must exceed start + min_amount_out

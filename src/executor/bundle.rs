@@ -39,6 +39,7 @@ struct HopV2Params {
     accounts_start: u8,
     accounts_len: u8,
     output_token_index: u8,
+    amount_in_offset: u8,
     ix_data: Vec<u8>,
 }
 
@@ -429,11 +430,21 @@ impl BundleBuilder {
                 .position(|a| a.pubkey == output_ata)
                 .unwrap_or(0) as u8;
 
+            // amount_in byte offset in instruction data:
+            // Raydium AMM V4: 1-byte discriminator, then amount_in at offset 1
+            // Anchor DEXes (Orca, CLMM, DLMM, DAMM v2, Raydium CP, Sanctum): 8-byte discriminator, then amount_in at offset 8
+            // Phoenix/Manifest: 8-byte discriminator, then amount_in at offset 8
+            let amount_in_offset: u8 = match route.hops[i].dex_type {
+                DexType::RaydiumAmm => 1,
+                _ => 8,
+            };
+
             hop_params.push(HopV2Params {
                 program_id_index,
                 accounts_start,
                 accounts_len,
                 output_token_index,
+                amount_in_offset,
                 ix_data: ix.data.clone(),
             });
         }
