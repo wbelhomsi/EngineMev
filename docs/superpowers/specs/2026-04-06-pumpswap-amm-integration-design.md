@@ -57,7 +57,7 @@ New function `parse_pumpswap` in `stream.rs`.
 
 **Discriminator:** `[0xf1, 0x9a, 0x6d, 0x04, 0x11, 0xb1, 0x6d, 0xbc]`
 
-**Valid data sizes:** 243, 244, 245, 300, 301. Reject others.
+**Valid data sizes:** Minimum 243 bytes. Known sizes: 243 (no optional fields), 244 (+mayhem), 245 (+mayhem+cashback). Accept any size >= 243 with correct discriminator (some pools may have extra padding from `extend_account`).
 
 **Output:** `(PoolState, (base_vault, quote_vault))` — same as `parse_raydium_cp`.
 
@@ -106,25 +106,41 @@ The vault fetch cooldown (2s) and semaphore (10 concurrent) already exist — Pu
 
 ## 4. CPMM Pricing
 
-Standard constant product with 30 bps fee:
+### Fee Structure (TIERED, not flat)
+
+PumpSwap fees are **dynamic, based on token market cap**. The Fee Program determines the tier at execution time:
+
+| Market Cap (SOL) | LP Fee | Protocol Fee | Creator Fee | Total |
+|-------------------|--------|-------------|-------------|-------|
+| 0 – 420 | 2 bps | 93 bps | 30 bps | **125 bps** |
+| 420 – 4,420 | 15 bps | 35 bps | 50 bps | **100 bps** |
+| 4,420 – 9,820 | 15 bps | 25 bps | 10 bps | **50 bps** |
+| 9,820 – 98,240 | 20 bps | 10 bps | 10 bps | **40 bps** |
+| 98,240+ | 20 bps | 5 bps | 5 bps | **30 bps** |
+| Non-canonical pools | 25 bps | 5 bps | 0 bps | **30 bps** |
+
+**For off-chain quoting:** Use worst-case **125 bps** as the fee estimate. This is conservative — we'll underestimate profit but never overestimate. The on-chain program applies the correct fee via the Fee Program CPI.
+
+### Formula
+
+Only the LP fee portion is deducted from input before xy=k. Protocol + creator fees are deducted from output. For conservative quoting, we apply the full worst-case fee to input:
 
 ```rust
+// Conservative estimate: use 125 bps (worst case) for quoting
+// The on-chain program applies the exact correct fee via Fee Program CPI
+let fee_bps: u128 = 125; // worst-case for low-cap tokens
+let amount_in_after_fee = (amount_in as u128) * (10000 - fee_bps) / 10000;
+
 // Sell: base_in → quote_out (token → SOL)
-let fee_factor_num: u128 = 9970;
-let fee_factor_den: u128 = 10000;
-let amount_in_after_fee = (base_in as u128) * fee_factor_num / fee_factor_den;
 let quote_out = (quote_reserve as u128) * amount_in_after_fee
     / ((base_reserve as u128) + amount_in_after_fee);
 
 // Buy: quote_in → base_out (SOL → token)
-let amount_in_after_fee = (quote_in as u128) * fee_factor_num / fee_factor_den;
 let base_out = (base_reserve as u128) * amount_in_after_fee
     / ((quote_reserve as u128) + amount_in_after_fee);
 ```
 
-The existing `get_cpmm_output` in `pool.rs` already implements this formula. PumpSwap just needs `fee_bps: 30` set in the pool state.
-
-**Note:** The fee is applied to the input amount before the swap, not after. This matches what the on-chain program does.
+Set `fee_bps: 125` in the PumpSwap PoolState. This makes the simulator conservative — it only approves routes where profit exceeds 125 bps of fees. Routes on high-cap tokens will have lower actual fees, so the on-chain execution gets more output than estimated (never less).
 
 ## 5. Swap IX Builder
 
@@ -159,7 +175,7 @@ data.extend_from_slice(&max_quote_amount_in.to_le_bytes()); // u64
 data.push(0u8); // track_volume = None (OptionBool)
 ```
 
-### CPI Account Order (Sell, 20 accounts)
+### CPI Account Order (Sell, 21 accounts)
 
 | # | Account | Writable | Source |
 |---|---------|----------|--------|
@@ -173,7 +189,7 @@ data.push(0u8); // track_volume = None (OptionBool)
 | 7 | pool_base_token_account | Yes | from pool state (vault_a) |
 | 8 | pool_quote_token_account | Yes | from pool state (vault_b) |
 | 9 | protocol_fee_recipient | No | round-robin from 8 addresses |
-| 10 | protocol_fee_recipient_ata | Yes | derive_ata(fee_recipient, quote_mint) |
+| 10 | protocol_fee_recipient_token_account | Yes | derive_ata(fee_recipient, quote_mint) |
 | 11 | base_token_program | No | resolved from mint (SPL Token or Token-2022) |
 | 12 | quote_token_program | No | SPL Token (wSOL is always SPL Token) |
 | 13 | system_program | No | `11111111111111111111111111111111` |
@@ -185,9 +201,9 @@ data.push(0u8); // track_volume = None (OptionBool)
 | 19 | fee_config | No | `5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx` (hardcoded) |
 | 20 | fee_program | No | `pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ` (hardcoded) |
 
-**Buy adds 2 more:** global_volume_accumulator + user_volume_accumulator + pool_v2 = 23 accounts.
+**Buy adds 2 more:** global_volume_accumulator (19) + user_volume_accumulator (20), shifting fee_config/fee_program to 21/22 = **23 accounts total**.
 
-**Sell needs pool_v2 as last account:** PDA `["pool-v2", base_mint]` on PumpSwap = 21 accounts total.
+Note: pool_v2 is NOT part of the PumpSwap AMM IDL (it's from the Pump bonding curve program). Do not include it.
 
 ### Protocol Fee Recipients (round-robin)
 
