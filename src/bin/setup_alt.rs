@@ -126,6 +126,52 @@ fn alt_addresses() -> Vec<Pubkey> {
     );
     addrs.push(usdt_ata);
 
+    // ── PumpSwap global accounts ──
+
+    // PumpSwap program
+    addrs.push(Pubkey::from_str("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA").unwrap());
+    // Global Config
+    addrs.push(Pubkey::from_str("ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw").unwrap());
+    // Event Authority
+    addrs.push(Pubkey::from_str("GS4CU59F31iL7aR2Q8zVS8DRrcRnXX1yjQ66TqNVQnaR").unwrap());
+    // Fee Config
+    addrs.push(Pubkey::from_str("5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx").unwrap());
+    // Fee Program
+    addrs.push(Pubkey::from_str("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ").unwrap());
+    // Global Volume Accumulator
+    addrs.push(Pubkey::from_str("C2aFPdENg4A2HQsmrd5rTw5TaYBX5Ku887cWjbFKtZpw").unwrap());
+
+    // Protocol fee recipients (8)
+    let fee_recipients = [
+        "FWsW1xNtWscwNmKv6wVsU1iTzRN6wmmk3MjxRP5tT7hz",
+        "G5UZAVbAf46s7cKWoyKu8kYTip9DGTpbLZ2qa9Aq69dP",
+        "7hTckgnGnLQR6sdH7YkqFTAA7VwTfYFaZ6EhEsU3saCX",
+        "9rPYyANsfQZw3DnDmKE3YCQF5E8oD89UXoHn9JFEhJUz",
+        "7VtfL8fvgNfhz17qKRMjzQEXgbdpnHHHQRh54R9jP2RJ",
+        "AVmoTthdrX6tKt4nDjco2D775W2YK3sDhxPcMmzUAmTY",
+        "62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV",
+        "JCRGumoE9Qi5BBgULTgdgTLjSgkCMSbF62ZZfGs84JeU",
+    ];
+    for addr in &fee_recipients {
+        addrs.push(Pubkey::from_str(addr).unwrap());
+    }
+
+    // Fee recipient wSOL ATAs (8)
+    for addr in &fee_recipients {
+        let recipient = Pubkey::from_str(addr).unwrap();
+        let (ata, _) = Pubkey::find_program_address(
+            &[recipient.as_ref(), spl_token.as_ref(), wsol.as_ref()], &ata_program,
+        );
+        addrs.push(ata);
+    }
+
+    // User volume accumulator PDA
+    let pumpswap_program = Pubkey::from_str("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA").unwrap();
+    let (user_vol_acc, _) = Pubkey::find_program_address(
+        &[b"user_volume_accumulator", searcher.as_ref()], &pumpswap_program,
+    );
+    addrs.push(user_vol_acc);
+
     addrs
 }
 
