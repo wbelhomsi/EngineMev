@@ -216,8 +216,6 @@ fn test_no_guard_still_builds_swap_ixs() {
 
 // ─── Token-2022 ATA creation tests ─────────────────────────────────────────
 
-/// If a non-wSOL mint's token program is not in cache, build_arb_instructions
-
 /// When mint programs ARE in cache, build should succeed (both paths).
 #[test]
 fn test_build_arb_succeeds_with_mint_program_in_cache() {

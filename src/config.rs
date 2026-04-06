@@ -311,6 +311,7 @@ impl BotConfig {
             addresses::METEORA_DAMM_V2,
             addresses::PHOENIX_V1,
             addresses::MANIFEST,
+            addresses::PUMPSWAP,
         ];
         if self.lst_arb_enabled {
             programs.push(addresses::SANCTUM_S_CONTROLLER);

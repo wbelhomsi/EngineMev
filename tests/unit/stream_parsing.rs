@@ -3,7 +3,7 @@ use solana_mev_bot::router::pool::DexType;
 use solana_mev_bot::mempool::stream::{
     parse_orca_whirlpool, parse_raydium_clmm, parse_meteora_dlmm,
     parse_meteora_damm_v2, parse_raydium_amm_v4, parse_raydium_cp,
-    parse_phoenix_market, parse_manifest_market,
+    parse_phoenix_market, parse_manifest_market, parse_pumpswap,
 };
 
 fn make_whirlpool_data(mint_a: &Pubkey, vault_a: &Pubkey, mint_b: &Pubkey, vault_b: &Pubkey, sqrt_price: u128, tick: i32, liquidity: u128) -> Vec<u8> {
@@ -453,4 +453,93 @@ fn test_parse_manifest_empty_book() {
     assert_eq!(pool.best_ask_price, None);
     assert_eq!(pool.token_a_reserve, 0);
     assert_eq!(pool.token_b_reserve, 0);
+}
+
+// ─── PumpSwap parser tests ─────────────────────────────────────────────────
+
+#[test]
+fn test_parse_pumpswap_pool() {
+    // Build a 245-byte PumpSwap pool account
+    let mut data = vec![0u8; 245];
+    // Discriminator at offset 0
+    data[0..8].copy_from_slice(&[0xf1, 0x9a, 0x6d, 0x04, 0x11, 0xb1, 0x6d, 0xbc]);
+    // pool_bump at offset 8
+    data[8] = 254;
+    // index at offset 9 (u16 LE)
+    data[9..11].copy_from_slice(&0u16.to_le_bytes());
+    // creator at offset 11
+    let creator = Pubkey::new_unique();
+    data[11..43].copy_from_slice(creator.as_ref());
+    // base_mint at offset 43
+    let base_mint = Pubkey::new_unique();
+    data[43..75].copy_from_slice(base_mint.as_ref());
+    // quote_mint at offset 75 (wSOL)
+    let quote_mint = solana_mev_bot::config::sol_mint();
+    data[75..107].copy_from_slice(quote_mint.as_ref());
+    // lp_mint at offset 107
+    data[107..139].copy_from_slice(Pubkey::new_unique().as_ref());
+    // base vault at offset 139
+    let base_vault = Pubkey::new_unique();
+    data[139..171].copy_from_slice(base_vault.as_ref());
+    // quote vault at offset 171
+    let quote_vault = Pubkey::new_unique();
+    data[171..203].copy_from_slice(quote_vault.as_ref());
+    // lp_supply at offset 203
+    data[203..211].copy_from_slice(&1000000u64.to_le_bytes());
+    // coin_creator at offset 211
+    let coin_creator = Pubkey::new_unique();
+    data[211..243].copy_from_slice(coin_creator.as_ref());
+    // is_mayhem_mode at offset 243
+    data[243] = 0;
+    // is_cashback_coin at offset 244
+    data[244] = 1;
+
+    let pool_address = Pubkey::new_unique();
+    let result = parse_pumpswap(&pool_address, &data, 100);
+    assert!(result.is_some(), "Should parse valid PumpSwap pool");
+
+    let (pool, (v_a, v_b)) = result.unwrap();
+    assert_eq!(pool.dex_type, DexType::PumpSwap);
+    assert_eq!(pool.token_a_mint, base_mint);
+    assert_eq!(pool.token_b_mint, quote_mint);
+    assert_eq!(pool.fee_bps, 125);
+    assert_eq!(pool.token_a_reserve, 0); // not yet fetched
+    assert_eq!(pool.token_b_reserve, 0);
+    assert_eq!(v_a, base_vault);
+    assert_eq!(v_b, quote_vault);
+    assert_eq!(pool.extra.coin_creator, Some(coin_creator));
+    assert_eq!(pool.extra.is_mayhem_mode, Some(false));
+    assert_eq!(pool.extra.is_cashback_coin, Some(true));
+}
+
+#[test]
+fn test_parse_pumpswap_wrong_discriminator() {
+    let mut data = vec![0u8; 245];
+    data[0..8].copy_from_slice(&[0x00; 8]); // wrong discriminator
+    let result = parse_pumpswap(&Pubkey::new_unique(), &data, 0);
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_parse_pumpswap_too_short() {
+    let data = vec![0u8; 200]; // too short (min 243)
+    let result = parse_pumpswap(&Pubkey::new_unique(), &data, 0);
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_parse_pumpswap_243_bytes_no_optional() {
+    let mut data = vec![0u8; 243];
+    data[0..8].copy_from_slice(&[0xf1, 0x9a, 0x6d, 0x04, 0x11, 0xb1, 0x6d, 0xbc]);
+    data[43..75].copy_from_slice(Pubkey::new_unique().as_ref()); // base_mint
+    data[75..107].copy_from_slice(solana_mev_bot::config::sol_mint().as_ref()); // quote_mint
+    data[139..171].copy_from_slice(Pubkey::new_unique().as_ref()); // base vault
+    data[171..203].copy_from_slice(Pubkey::new_unique().as_ref()); // quote vault
+    data[211..243].copy_from_slice(Pubkey::new_unique().as_ref()); // coin_creator
+
+    let result = parse_pumpswap(&Pubkey::new_unique(), &data, 0);
+    assert!(result.is_some());
+    let (pool, _) = result.unwrap();
+    assert_eq!(pool.extra.is_mayhem_mode, Some(false)); // default
+    assert_eq!(pool.extra.is_cashback_coin, Some(false)); // default
 }

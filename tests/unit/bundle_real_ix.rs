@@ -4,7 +4,7 @@ use std::str::FromStr;
 use solana_mev_bot::executor::bundle::{
     build_raydium_cp_swap_ix, build_damm_v2_swap_ix,
     build_orca_whirlpool_swap_ix, build_raydium_clmm_swap_ix, build_meteora_dlmm_swap_ix,
-    build_raydium_amm_swap_ix,
+    build_raydium_amm_swap_ix, build_pumpswap_swap_ix,
 };
 use solana_mev_bot::router::pool::{DexType, PoolState, PoolExtra};
 
@@ -440,4 +440,91 @@ fn test_raydium_amm_swap_ix_returns_none_without_vaults() {
     let signer = Pubkey::new_unique();
     let ix = build_raydium_amm_swap_ix(&signer, &pool, pool.token_a_mint, 1000, 900);
     assert!(ix.is_none(), "Should return None when PoolExtra is empty");
+}
+
+// ─── PumpSwap tests ────────────────────────────────────────────────────────
+
+fn make_pumpswap_pool() -> PoolState {
+    PoolState {
+        address: Pubkey::new_unique(),
+        dex_type: DexType::PumpSwap,
+        token_a_mint: Pubkey::new_unique(), // base (memecoin)
+        token_b_mint: Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap(), // wSOL
+        token_a_reserve: 1_000_000_000,
+        token_b_reserve: 5_000_000_000,
+        fee_bps: 125,
+        current_tick: None,
+        sqrt_price_x64: None,
+        liquidity: None,
+        last_slot: 100,
+        extra: PoolExtra {
+            vault_a: Some(Pubkey::new_unique()),
+            vault_b: Some(Pubkey::new_unique()),
+            coin_creator: Some(Pubkey::new_unique()),
+            is_mayhem_mode: Some(false),
+            is_cashback_coin: Some(false),
+            token_program_a: Some(Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap()),
+            token_program_b: Some(Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap()),
+            ..Default::default()
+        },
+        best_bid_price: None,
+        best_ask_price: None,
+    }
+}
+
+#[test]
+fn test_pumpswap_sell_ix_account_count() {
+    let pool = make_pumpswap_pool();
+    let signer = Pubkey::new_unique();
+    // Sell: input is base (token_a_mint)
+    let ix = build_pumpswap_swap_ix(&signer, &pool, pool.token_a_mint, 1_000_000, 900_000);
+    assert!(ix.is_some(), "Should produce an instruction with full PumpSwap extra");
+    let ix = ix.unwrap();
+    assert_eq!(ix.accounts.len(), 21, "PumpSwap sell requires 21 accounts");
+}
+
+#[test]
+fn test_pumpswap_sell_ix_discriminator() {
+    let pool = make_pumpswap_pool();
+    let signer = Pubkey::new_unique();
+    let ix = build_pumpswap_swap_ix(&signer, &pool, pool.token_a_mint, 500_000, 400_000).unwrap();
+    assert_eq!(&ix.data[0..8], &[51, 230, 133, 164, 1, 127, 131, 173]);
+}
+
+#[test]
+fn test_pumpswap_buy_ix_account_count() {
+    let pool = make_pumpswap_pool();
+    let signer = Pubkey::new_unique();
+    // Buy: input is quote (token_b_mint / wSOL)
+    let ix = build_pumpswap_swap_ix(&signer, &pool, pool.token_b_mint, 1_000_000, 900_000);
+    assert!(ix.is_some(), "Should produce a buy instruction");
+    let ix = ix.unwrap();
+    assert_eq!(ix.accounts.len(), 23, "PumpSwap buy requires 23 accounts");
+}
+
+#[test]
+fn test_pumpswap_buy_ix_discriminator() {
+    let pool = make_pumpswap_pool();
+    let signer = Pubkey::new_unique();
+    let ix = build_pumpswap_swap_ix(&signer, &pool, pool.token_b_mint, 500_000, 400_000).unwrap();
+    assert_eq!(&ix.data[0..8], &[102, 6, 61, 18, 1, 218, 235, 234]);
+}
+
+#[test]
+fn test_pumpswap_ix_returns_none_without_vaults() {
+    let mut pool = make_pumpswap_pool();
+    pool.extra.vault_a = None;
+    pool.extra.vault_b = None;
+    let signer = Pubkey::new_unique();
+    let ix = build_pumpswap_swap_ix(&signer, &pool, pool.token_a_mint, 1_000_000, 900_000);
+    assert!(ix.is_none(), "Should return None when vaults are missing");
+}
+
+#[test]
+fn test_pumpswap_ix_returns_none_without_coin_creator() {
+    let mut pool = make_pumpswap_pool();
+    pool.extra.coin_creator = None;
+    let signer = Pubkey::new_unique();
+    let ix = build_pumpswap_swap_ix(&signer, &pool, pool.token_a_mint, 1_000_000, 900_000);
+    assert!(ix.is_none(), "Should return None when coin_creator is missing");
 }

@@ -15,6 +15,7 @@ fn can_submit_route(route: &ArbRoute) -> bool {
         | DexType::SanctumInfinity
         | DexType::Phoenix
         | DexType::Manifest
+        | DexType::PumpSwap
     ))
 }
 
@@ -62,6 +63,7 @@ fn test_all_submittable_types_accepted() {
         DexType::RaydiumAmm, DexType::RaydiumCp, DexType::RaydiumClmm,
         DexType::OrcaWhirlpool, DexType::MeteoraDlmm, DexType::MeteoraDammV2,
         DexType::SanctumInfinity, DexType::Phoenix, DexType::Manifest,
+        DexType::PumpSwap,
     ] {
         let route = make_route(vec![make_hop(dex)]);
         assert!(can_submit_route(&route), "Expected {:?} to be accepted", dex);
@@ -77,5 +79,11 @@ fn test_raydium_amm_accepted() {
 #[test]
 fn test_mixed_raydium_amm_phoenix_accepted() {
     let route = make_route(vec![make_hop(DexType::Phoenix), make_hop(DexType::RaydiumAmm)]);
+    assert!(can_submit_route(&route));
+}
+
+#[test]
+fn test_pumpswap_route_accepted() {
+    let route = make_route(vec![make_hop(DexType::PumpSwap), make_hop(DexType::OrcaWhirlpool)]);
     assert!(can_submit_route(&route));
 }

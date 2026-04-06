@@ -52,6 +52,7 @@ pub enum DexType {
     SanctumInfinity,
     Phoenix,
     Manifest,
+    PumpSwap,
 }
 
 impl DexType {
@@ -68,6 +69,7 @@ impl DexType {
             DexType::SanctumInfinity => 3,  // ~3bps flat fee
             DexType::Phoenix => 2,          // ~2bps taker fee on major markets
             DexType::Manifest => 0,         // zero fees
+            DexType::PumpSwap => 125,       // conservative worst-case (tiered 30-125 bps)
         }
     }
 }
@@ -96,6 +98,12 @@ pub struct PoolExtra {
     pub target_orders: Option<Pubkey>,
     /// AMM authority nonce (Raydium AMM v4) — from pool state offset 8
     pub amm_nonce: Option<u8>,
+    /// Coin creator address (PumpSwap) — used for creator vault PDA
+    pub coin_creator: Option<Pubkey>,
+    /// Whether mayhem mode is active (PumpSwap)
+    pub is_mayhem_mode: Option<bool>,
+    /// Whether the coin participates in cashback program (PumpSwap)
+    pub is_cashback_coin: Option<bool>,
 }
 
 /// Represents the on-chain state of an AMM pool.

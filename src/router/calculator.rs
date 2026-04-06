@@ -393,5 +393,6 @@ pub fn can_submit_route(route: &ArbRoute) -> bool {
         | DexType::SanctumInfinity
         | DexType::Phoenix
         | DexType::Manifest
+        | DexType::PumpSwap
     ))
 }
