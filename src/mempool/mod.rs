@@ -1,4 +1,5 @@
 pub mod stream;
+pub mod parsers;
 
 // decoder.rs removed — no longer needed.
 // Old approach: decode pending swap txs from Jito mempool (dead since March 2024).

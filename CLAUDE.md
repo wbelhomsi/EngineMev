@@ -70,17 +70,36 @@ src/
 ├── rpc_helpers.rs       # load_keypair, load_alt, simulate_bundle_tx, send_public_tx
 ├── mempool/
 │   ├── mod.rs           # Exports GeyserStream, PoolStateChange
-│   └── stream.rs        # LaserStream gRPC subscription, per-DEX pool state parsers,
-│                        # lazy vault/Serum/bin-array/tick-array fetches
+│   ├── stream.rs        # LaserStream gRPC subscription, data-size routing,
+│   │                    # lazy vault/bin-array/tick-array fetches
+│   └── parsers/         # Per-DEX Geyser pool state parsers
+│       ├── mod.rs       # Shared: approx_reserves_from_sqrt_price, re-exports
+│       ├── orca.rs, raydium_amm.rs, raydium_cp.rs, raydium_clmm.rs
+│       ├── meteora_dlmm.rs, meteora_damm_v2.rs
+│       ├── phoenix.rs, manifest.rs, pumpswap.rs
+│       └── (each file: one parse_*() function)
 ├── router/
 │   ├── mod.rs           # Exports RouteCalculator, ProfitSimulator, can_submit_route
-│   ├── pool.rs          # DexType, PoolState, ArbRoute, RouteHop, DetectedSwap,
-│   │                    # CLMM multi-tick quoting, DLMM bin-by-bin quoting, CPMM math
-│   ├── calculator.rs    # 2-hop and 3-hop circular route discovery, O(1) via token→pool index, can_submit_route
-│   └── simulator.rs     # Final go/no-go gate: re-reads fresh state, calculates tip, checks min profit
+│   ├── pool.rs          # DexType, PoolState (types + dispatcher), ArbRoute, RouteHop
+│   ├── calculator.rs    # 2-hop and 3-hop route discovery, pool cap, early exit
+│   ├── simulator.rs     # Go/no-go gate: slippage-adjusted tips, min_final_output
+│   └── dex/             # Per-DEX quoting math
+│       ├── mod.rs       # Shared: ceil_div, compute_swap_step, tick_to_sqrt_price, clmm_single_tick
+│       ├── cpmm.rs      # Constant product (Raydium AMM/CP, PumpSwap, DAMM v2 flat)
+│       ├── clmm_orca.rs, clmm_raydium.rs  # Multi-tick crossing
+│       ├── dlmm.rs      # Meteora DLMM bin-by-bin
+│       ├── damm_v2.rs, sanctum.rs
+│       └── phoenix.rs, manifest.rs  # Orderbook quoting
 ├── executor/
 │   ├── mod.rs           # Exports BundleBuilder, RelayDispatcher
-│   ├── bundle.rs        # Builds arb IXs for all 9 DEXes + execute_arb CPI path for Orca
+│   ├── bundle.rs        # BundleBuilder, execute_arb_v2 CPI, ATA/wSOL logic
+│   ├── swaps/           # Per-DEX swap instruction builders
+│   │   ├── mod.rs       # Re-exports + shared floor_div
+│   │   ├── raydium_amm.rs, raydium_cp.rs, raydium_clmm.rs
+│   │   ├── orca.rs, meteora_dlmm.rs, meteora_damm_v2.rs
+│   │   ├── sanctum.rs, phoenix.rs, manifest.rs, pumpswap.rs
+│   │   └── (each file: one build_*_swap_ix() function)
+│   ├── confirmation.rs  # Bundle confirmation tracker + competitor analysis
 │   ├── relay_dispatcher.rs  # Concurrent relay fan-out with ALT support
 │   └── relays/
 │       ├── mod.rs       # BundleRelay trait, RelayResult
@@ -95,9 +114,10 @@ src/
 │   ├── counters.rs      # All metric helper functions (atomic, zero-cost)
 │   └── tracing_layer.rs # Optional OTLP tracing layer builder
 └── state/
-    ├── mod.rs           # Exports StateCache, BlockhashCache
+    ├── mod.rs           # Exports StateCache, BlockhashCache, TipFloorCache
     ├── cache.rs         # DashMap pool cache with TTL, token→pool index, bin/tick array caches
-    └── blockhash.rs     # BlockhashCache: Arc<RwLock>, 5s staleness, background 2s fetch loop
+    ├── blockhash.rs     # BlockhashCache: Arc<RwLock>, 5s staleness, background 2s fetch loop
+    └── tip_floor.rs     # TipFloorCache: Jito WebSocket stream, REST fallback
 ```
 
 ## DEX Program IDs (verified current)

@@ -113,7 +113,7 @@ pub fn verify_tip_write_locked(
             // that the V0 compiler placed in the writable section.
             for table_lookup in &msg.address_table_lookups {
                 // Find the matching ALT to resolve the actual addresses
-                if let Some(alt) = alts.iter().find(|a| a.key == table_lookup.account_key.into()) {
+                if let Some(alt) = alts.iter().find(|a| a.key == table_lookup.account_key) {
                     for &idx in &table_lookup.writable_indexes {
                         if let Some(addr) = alt.addresses.get(idx as usize) {
                             if *addr == *tip_account {

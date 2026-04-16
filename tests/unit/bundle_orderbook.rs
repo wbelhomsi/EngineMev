@@ -1,5 +1,5 @@
 use solana_sdk::pubkey::Pubkey;
-use solana_mev_bot::executor::bundle::{build_phoenix_swap_ix, build_manifest_swap_ix};
+use solana_mev_bot::executor::swaps::{build_phoenix_swap_ix, build_manifest_swap_ix};
 use solana_mev_bot::router::pool::{DexType, PoolState, PoolExtra};
 
 fn make_phoenix_pool() -> PoolState {

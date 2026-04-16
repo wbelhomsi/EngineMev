@@ -1,7 +1,7 @@
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 
-use solana_mev_bot::executor::bundle::build_raydium_amm_swap_ix;
+use solana_mev_bot::executor::swaps::build_raydium_amm_swap_ix;
 use solana_mev_bot::router::pool::{DexType, PoolState, PoolExtra};
 
 /// Helper: build a PoolState with Raydium AMM v4 fields for Swap V2.

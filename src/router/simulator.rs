@@ -1,6 +1,6 @@
 use tracing::debug;
 
-use crate::router::pool::{ArbRoute, DexType};
+use crate::router::pool::ArbRoute;
 use crate::state::{StateCache, TipFloorCache};
 
 /// Final profit simulation before bundle submission.

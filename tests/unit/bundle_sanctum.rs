@@ -2,7 +2,7 @@ use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 
 use solana_mev_bot::config;
-use solana_mev_bot::executor::bundle::build_sanctum_swap_ix;
+use solana_mev_bot::executor::swaps::build_sanctum_swap_ix;
 
 #[test]
 fn test_sanctum_pda_derivation() {
