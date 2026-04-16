@@ -133,9 +133,8 @@ pub async fn simulate_v0_tx(
             tx_b64,
             {
                 "encoding": "base64",
-                "replaceRecentBlockhash": true,
                 "sigVerify": false,
-                "commitment": "processed"
+                "commitment": "confirmed"
             }
         ]
     });
