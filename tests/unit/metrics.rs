@@ -10,8 +10,12 @@ fn test_counter_helpers_callable_without_init() {
     solana_mev_bot::metrics::counters::inc_bundles_skipped("dedup");
     solana_mev_bot::metrics::counters::inc_relay_submission("jito", "accepted");
     solana_mev_bot::metrics::counters::inc_bundle_build_errors();
-    solana_mev_bot::metrics::counters::add_profit_lamports(50000);
-    solana_mev_bot::metrics::counters::add_tips_paid_lamports(25000);
+    solana_mev_bot::metrics::counters::add_estimated_profit_lamports(50000);
+    solana_mev_bot::metrics::counters::add_estimated_tips_lamports(25000);
+    solana_mev_bot::metrics::counters::add_confirmed_profit_lamports(40000);
+    solana_mev_bot::metrics::counters::add_confirmed_tips_paid_lamports(20000);
+    solana_mev_bot::metrics::counters::inc_bundles_confirmed();
+    solana_mev_bot::metrics::counters::inc_bundles_dropped();
     solana_mev_bot::metrics::counters::inc_vault_fetches("raydium_cp");
     solana_mev_bot::metrics::counters::set_cache_pools_tracked(1500);
     solana_mev_bot::metrics::counters::set_geyser_lag_slots(2);

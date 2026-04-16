@@ -44,12 +44,36 @@ pub fn inc_bundle_build_errors() {
     counter!("bundle_build_errors_total").increment(1);
 }
 
-pub fn add_profit_lamports(lamports: u64) {
-    counter!("profit_lamports_total").increment(lamports);
+/// Estimated profit at submission time (before on-chain confirmation).
+pub fn add_estimated_profit_lamports(lamports: u64) {
+    counter!("estimated_profit_lamports_total").increment(lamports);
 }
 
-pub fn add_tips_paid_lamports(lamports: u64) {
-    counter!("tips_paid_lamports_total").increment(lamports);
+/// Estimated tips at submission time (before on-chain confirmation).
+pub fn add_estimated_tips_lamports(lamports: u64) {
+    counter!("estimated_tips_lamports_total").increment(lamports);
+}
+
+/// Estimated profit for bundles that landed on-chain (per getBundleStatuses).
+/// NOTE: This is the simulator's pre-submission estimate, NOT actual on-chain profit.
+/// Actual profit may differ due to slippage or partial fills.
+pub fn add_confirmed_profit_lamports(lamports: u64) {
+    counter!("landed_estimated_profit_lamports_total").increment(lamports);
+}
+
+/// Estimated tips for bundles that landed on-chain.
+pub fn add_confirmed_tips_paid_lamports(lamports: u64) {
+    counter!("landed_estimated_tips_lamports_total").increment(lamports);
+}
+
+/// Bundles confirmed on-chain via getBundleStatuses.
+pub fn inc_bundles_confirmed() {
+    counter!("bundles_landed_total").increment(1);
+}
+
+/// Bundles submitted but never confirmed on-chain within timeout.
+pub fn inc_bundles_dropped() {
+    counter!("bundles_dropped_total").increment(1);
 }
 
 pub fn inc_vault_fetches(dex_type: &str) {

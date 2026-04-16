@@ -152,6 +152,24 @@ async fn main() -> Result<()> {
         })
     };
 
+    // Initialize dynamic tip floor cache (polls Jito REST API)
+    let tip_floor_cache = state::TipFloorCache::new();
+    if let Err(e) = state::tip_floor::fetch_and_update(&http_client, &tip_floor_cache).await {
+        warn!("Initial tip floor fetch failed (will retry in background): {}", e);
+    } else if let Some(floor) = tip_floor_cache.get_floor_lamports() {
+        info!("Tip floor fetched: {} lamports (ema p50)", floor);
+    }
+
+    // Task: Tip floor refresh (async, 5s interval)
+    let _tip_floor_handle = {
+        let client = http_client.clone();
+        let cache = tip_floor_cache.clone();
+        let shutdown_rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            state::tip_floor::run_tip_floor_loop(client, cache, shutdown_rx).await;
+        })
+    };
+
     // Channel for pool state changes: Geyser stream → router
     let (change_tx, change_rx) = bounded(STATE_CHANGE_CHANNEL_CAPACITY);
 
@@ -163,7 +181,7 @@ async fn main() -> Result<()> {
         config.tip_fraction,
         config.min_profit_lamports,
         config.min_tip_lamports,
-    );
+    ).with_tip_floor(tip_floor_cache.clone());
 
     // Load searcher keypair
     let searcher_keypair = rpc_helpers::load_keypair(&config.searcher_keypair_path)?;
@@ -410,7 +428,8 @@ async fn main() -> Result<()> {
                         }
                     } else {
                         let fraction_tip = (best_route.estimated_profit_lamports as f64 * config.tip_fraction) as u64;
-                        let tip = fraction_tip.max(config.min_tip_lamports);
+                        let dynamic_floor = tip_floor_cache.get_floor_lamports().unwrap_or(0);
+                        let tip = fraction_tip.max(config.min_tip_lamports.max(dynamic_floor));
                         // Safety: tip must be less than profit
                         if tip >= best_route.estimated_profit_lamports {
                             warn!("SKIP_SIMULATOR: tip {} >= profit {}, skipping",
@@ -452,7 +471,7 @@ async fn main() -> Result<()> {
                         opportunities_found += 1;
                         solana_mev_bot::metrics::counters::inc_opportunities(
                             &format!("{:?}", route.hops[0].dex_type));
-                        solana_mev_bot::metrics::counters::add_profit_lamports(final_profit_lamports);
+                        solana_mev_bot::metrics::counters::add_estimated_profit_lamports(final_profit_lamports);
                         info!(
                             "OPPORTUNITY #{}: {} hops, gross={}, tip={}, net={} lamports, pool={}",
                             opportunities_found,
@@ -543,14 +562,33 @@ async fn main() -> Result<()> {
                                 }
 
                                 // Dispatch to all relays concurrently
-                                relay_dispatcher.dispatch(
+                                let relay_rx = relay_dispatcher.dispatch(
                                     &instructions, tip_lamports, blockhash, &rt,
                                 );
                                 bundles_submitted += 1;
                                 solana_mev_bot::metrics::counters::inc_bundles_submitted();
-                                solana_mev_bot::metrics::counters::add_tips_paid_lamports(tip_lamports);
+                                // Record estimated (pre-confirmation) metrics
+                                solana_mev_bot::metrics::counters::add_estimated_tips_lamports(tip_lamports);
                                 solana_mev_bot::metrics::counters::record_pipeline_duration_us(
                                     pipeline_start.elapsed().as_micros() as u64);
+
+                                // Spawn async confirmation tracker (non-blocking).
+                                // Polls getBundleStatuses to determine if the bundle
+                                // actually landed. Only confirmed bundles increment
+                                // the confirmed profit/tip metrics.
+                                if !config.dry_run {
+                                    let confirm_jito = format!(
+                                        "{}/api/v1/bundles",
+                                        config.relay_endpoints.jito.trim_end_matches('/')
+                                    );
+                                    executor::spawn_confirmation_tracker(
+                                        http_client.clone(),
+                                        confirm_jito,
+                                        final_profit_lamports,
+                                        tip_lamports,
+                                        relay_rx,
+                                    );
+                                }
                             }
                             Err(e) => {
                                 error!("Bundle build failed: {}", e);

@@ -25,3 +25,5 @@ mod sanity_cap;
 mod tx_size;
 mod tip_writelock;
 mod staleness;
+mod confirmation;
+mod tip_floor;

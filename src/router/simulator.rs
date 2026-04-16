@@ -1,7 +1,7 @@
 use tracing::debug;
 
 use crate::router::pool::{ArbRoute, DexType};
-use crate::state::StateCache;
+use crate::state::{StateCache, TipFloorCache};
 
 /// Final profit simulation before bundle submission.
 ///
@@ -10,6 +10,7 @@ use crate::state::StateCache;
 /// - Re-reads freshest pool state from cache
 /// - Accounts for exact fees and tick-crossing (CLMM)
 /// - Calculates tip amount based on profit
+/// - Uses dynamic Jito tip floor (polled from REST API) as minimum
 /// - Returns a go/no-go decision
 ///
 /// This is the last gate before we spend money (Jito tip).
@@ -18,7 +19,10 @@ pub struct ProfitSimulator {
     state_cache: StateCache,
     tip_fraction: f64,
     min_profit_lamports: u64,
+    /// Static minimum tip from config (fallback when tip floor API is unavailable).
     min_tip_lamports: u64,
+    /// Dynamic tip floor from Jito REST API (overrides min_tip_lamports when available).
+    tip_floor_cache: Option<TipFloorCache>,
 }
 
 /// Result of profit simulation — either a confirmed opportunity or a rejection.
@@ -41,7 +45,23 @@ pub enum SimulationResult {
 
 impl ProfitSimulator {
     pub fn new(state_cache: StateCache, tip_fraction: f64, min_profit_lamports: u64, min_tip_lamports: u64) -> Self {
-        Self { state_cache, tip_fraction, min_profit_lamports, min_tip_lamports }
+        Self { state_cache, tip_fraction, min_profit_lamports, min_tip_lamports, tip_floor_cache: None }
+    }
+
+    /// Attach a dynamic tip floor cache (from Jito REST API).
+    /// When available, the dynamic floor overrides `min_tip_lamports`.
+    pub fn with_tip_floor(mut self, cache: TipFloorCache) -> Self {
+        self.tip_floor_cache = Some(cache);
+        self
+    }
+
+    /// Get the effective minimum tip: max of static config floor and dynamic Jito floor.
+    fn effective_min_tip(&self) -> u64 {
+        let dynamic_floor = self.tip_floor_cache
+            .as_ref()
+            .and_then(|c| c.get_floor_lamports())
+            .unwrap_or(0);
+        self.min_tip_lamports.max(dynamic_floor)
     }
 
     /// Run full simulation on a candidate route.
@@ -146,7 +166,7 @@ impl ProfitSimulator {
         // - If profit * fraction < min_tip: use min_tip (floor for auction competitiveness)
         // - If profit * fraction >= min_tip: use profit * fraction (normal %)
         let fraction_tip = (gross_profit_u64 as f64 * self.tip_fraction) as u64;
-        let tip_lamports = fraction_tip.max(self.min_tip_lamports);
+        let tip_lamports = fraction_tip.max(self.effective_min_tip());
 
         // Step 5: Reject if tip would exceed or equal profit (can't tip more than we earn)
         if tip_lamports >= gross_profit_u64 {

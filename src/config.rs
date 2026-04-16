@@ -232,7 +232,7 @@ impl BotConfig {
         dotenv::dotenv().ok();
 
         let tip_fraction: f64 = std::env::var("TIP_FRACTION")
-            .unwrap_or_else(|_| "0.15".to_string())
+            .unwrap_or_else(|_| "0.50".to_string())
             .parse()?;
 
         anyhow::ensure!(

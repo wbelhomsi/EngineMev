@@ -21,7 +21,7 @@ async fn test_prometheus_metrics_endpoint() {
     // 4. Record some metrics across counters, gauges, and histograms.
     solana_mev_bot::metrics::counters::inc_bundles_submitted();
     solana_mev_bot::metrics::counters::inc_bundles_submitted();
-    solana_mev_bot::metrics::counters::add_profit_lamports(50000);
+    solana_mev_bot::metrics::counters::add_estimated_profit_lamports(50000);
     solana_mev_bot::metrics::counters::inc_relay_submission("jito", "accepted");
     solana_mev_bot::metrics::counters::set_cache_pools_tracked(42);
     solana_mev_bot::metrics::counters::record_route_calc_duration_us(350);
