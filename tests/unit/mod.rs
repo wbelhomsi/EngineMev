@@ -31,3 +31,4 @@ mod confirmation;
 mod tip_floor;
 mod bug_fixes;
 mod cexdex_inventory;
+mod cexdex_detector;
