@@ -170,6 +170,28 @@ cargo test --features e2e --test e2e          # 4 e2e tests
 cargo test --features e2e_surfpool --test e2e_surfpool  # Surfpool E2E (needs RPC_URL + surfpool)
 ```
 
+### CEX-DEX Binary
+
+Separate binary for Binance SOL/USDC CEX-DEX arbitrage (Model A, inventory-based).
+Uses a separate wallet for clean P&L isolation.
+
+```bash
+# First time: generate a separate searcher keypair
+solana-keygen new -o cexdex-searcher.json
+
+# Fund it with SOL + USDC (manual top-up)
+
+# Set CEXDEX_POOLS to the specific pool addresses to monitor in .env
+
+# Run in dry-run first
+CEXDEX_DRY_RUN=true cargo run --release --bin cexdex
+
+# Go live
+CEXDEX_DRY_RUN=false cargo run --release --bin cexdex
+```
+
+See `docs/superpowers/specs/2026-04-16-cex-dex-arb-design.md` for the full design.
+
 ## Critical Rules for Development
 
 1. **ALWAYS web-search to verify any external API, SDK, or crate is current before using it.** We lost a full session building on the dead Jito mempool API. Training data goes stale.
