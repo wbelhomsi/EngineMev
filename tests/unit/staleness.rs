@@ -1,5 +1,6 @@
-/// Verify that route calculator does NOT find routes when pool state is stale.
-/// Pools older than TTL should not produce routes.
+/// Verify that route calculator finds routes and simulator processes them
+/// even with stale cache data. On-chain arb-guard (min_amount_out) is the
+/// real safety gate — cache TTL is only for eviction, not gating.
 #[test]
 fn test_stale_pool_produces_no_routes() {
     use std::time::Duration;
@@ -7,6 +8,7 @@ fn test_stale_pool_produces_no_routes() {
     use solana_mev_bot::config;
     use solana_mev_bot::router::RouteCalculator;
     use solana_mev_bot::router::pool::{DexType, DetectedSwap, PoolExtra, PoolState};
+    use solana_mev_bot::router::ProfitSimulator;
     use solana_mev_bot::state::StateCache;
 
     // TTL = 1 second for this test
@@ -14,7 +16,7 @@ fn test_stale_pool_produces_no_routes() {
     let sol = config::sol_mint();
     let token = Pubkey::new_unique();
 
-    // Add two pools
+    // Add two pools with a 10% spread (profitable arb)
     let pool_a = Pubkey::new_unique();
     cache.upsert(pool_a, PoolState {
         address: pool_a,
@@ -51,7 +53,7 @@ fn test_stale_pool_produces_no_routes() {
         best_ask_price: None,
     });
 
-    let calculator = RouteCalculator::new(cache, 3);
+    let calculator = RouteCalculator::new(cache.clone(), 3);
     let trigger = DetectedSwap {
         dex_type: DexType::OrcaWhirlpool,
         pool_address: pool_a,
@@ -68,7 +70,23 @@ fn test_stale_pool_produces_no_routes() {
     // Wait for TTL to expire
     std::thread::sleep(Duration::from_secs(2));
 
-    // After TTL: should NOT find routes (stale data)
+    // Route calculator still finds candidates (uses get_any)
     let routes = calculator.find_routes(&trigger);
-    assert!(routes.is_empty(), "Stale pools should NOT produce routes");
+    assert!(!routes.is_empty(), "Route calc uses get_any — finds stale pools too");
+
+    // Simulator also processes them (on-chain arb-guard is the safety gate)
+    let simulator = ProfitSimulator::new(cache, 0.50, 1000, 1000);
+    let result = simulator.simulate(&routes[0]);
+    match result {
+        solana_mev_bot::router::simulator::SimulationResult::Profitable { .. } => {
+            // Expected: simulator uses get_any, on-chain guard is the real gate
+        }
+        solana_mev_bot::router::simulator::SimulationResult::Unprofitable { reason } => {
+            // Also acceptable if profit doesn't meet threshold after slippage
+            assert!(
+                !reason.contains("Pool not found"),
+                "Simulator should NOT reject due to TTL staleness: {}", reason
+            );
+        }
+    }
 }

@@ -26,6 +26,7 @@ const MAX_RPC_ERRORS: u32 = 2;
 ///
 /// Collects bundle IDs from the relay result channel, then polls
 /// `getBundleStatuses` (Jito) until one confirms or the timeout expires.
+/// On drop, checks who won the slot to learn from competitors.
 ///
 /// This function is non-blocking -- it spawns a tokio task and returns immediately.
 pub fn spawn_confirmation_tracker(
@@ -34,6 +35,9 @@ pub fn spawn_confirmation_tracker(
     estimated_profit_lamports: u64,
     tip_lamports: u64,
     mut relay_rx: tokio::sync::mpsc::Receiver<crate::executor::relays::RelayResult>,
+    rpc_url: String,
+    pool_address: String,
+    trigger_slot: u64,
 ) {
     tokio::spawn(async move {
         // Phase 1: Collect bundle IDs from relay results (with short timeout).
@@ -93,19 +97,26 @@ pub fn spawn_confirmation_tracker(
         loop {
             if tokio::time::Instant::now() >= deadline {
                 info!(
-                    "Bundle DROPPED: {} ID(s) not confirmed after {:?}",
+                    "Bundle DROPPED: {} ID(s) not confirmed after {:?} | pool={} slot={}",
                     bundle_ids.len(),
-                    CONFIRMATION_TIMEOUT
+                    CONFIRMATION_TIMEOUT,
+                    pool_address,
+                    trigger_slot,
                 );
                 counters::inc_bundles_dropped();
+
+                // Competitor analysis: check who transacted on this pool in the next few slots
+                check_competitor(
+                    &http_client, &rpc_url, &pool_address, trigger_slot, tip_lamports,
+                ).await;
                 return;
             }
 
             match check_bundle_statuses(&http_client, &jito_url, &bundle_ids).await {
                 ConfirmationStatus::Landed => {
                     info!(
-                        "Bundle CONFIRMED on-chain: profit={} tip={} lamports",
-                        estimated_profit_lamports, tip_lamports
+                        "Bundle CONFIRMED on-chain: profit={} tip={} lamports | pool={} slot={}",
+                        estimated_profit_lamports, tip_lamports, pool_address, trigger_slot
                     );
                     counters::inc_bundles_confirmed();
                     counters::add_confirmed_profit_lamports(estimated_profit_lamports);
@@ -113,8 +124,15 @@ pub fn spawn_confirmation_tracker(
                     return;
                 }
                 ConfirmationStatus::Failed => {
-                    info!("Bundle tx landed but FAILED on-chain");
+                    info!(
+                        "Bundle tx FAILED on-chain | pool={} slot={}",
+                        pool_address, trigger_slot
+                    );
                     counters::inc_bundles_dropped();
+
+                    check_competitor(
+                        &http_client, &rpc_url, &pool_address, trigger_slot, tip_lamports,
+                    ).await;
                     return;
                 }
                 ConfirmationStatus::Pending => {
@@ -138,6 +156,163 @@ pub fn spawn_confirmation_tracker(
             tokio::time::sleep(POLL_INTERVAL).await;
         }
     });
+}
+
+/// Check who transacted on this pool after our trigger slot.
+/// Logs competitor signers, programs, and fees to learn from winners.
+async fn check_competitor(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    pool_address: &str,
+    trigger_slot: u64,
+    our_tip: u64,
+) {
+    // Get recent transaction signatures for the pool account
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getSignaturesForAddress",
+        "params": [
+            pool_address,
+            {
+                "limit": 5,
+                "commitment": "confirmed"
+            }
+        ]
+    });
+
+    let resp = match client.post(rpc_url).json(&payload)
+        .timeout(std::time::Duration::from_secs(5))
+        .send().await
+    {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let body: serde_json::Value = match resp.json().await {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    let sigs = match body.get("result").and_then(|r| r.as_array()) {
+        Some(arr) => arr,
+        None => return,
+    };
+
+    // Find transactions in slots near our trigger
+    let mut competitor_sigs: Vec<(String, u64)> = Vec::new();
+    for sig_info in sigs {
+        let slot = sig_info.get("slot").and_then(|s| s.as_u64()).unwrap_or(0);
+        let sig = sig_info.get("signature").and_then(|s| s.as_str()).unwrap_or("");
+        // Look at transactions within 2 slots of our trigger
+        if slot >= trigger_slot && slot <= trigger_slot + 2 && !sig.is_empty() {
+            competitor_sigs.push((sig.to_string(), slot));
+        }
+    }
+
+    if competitor_sigs.is_empty() {
+        debug!("COMPETITOR: no transactions on pool {} in slots {}..{}",
+               pool_address, trigger_slot, trigger_slot + 2);
+        return;
+    }
+
+    // Fetch first competitor tx details
+    let (sig, slot) = &competitor_sigs[0];
+    let tx_payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTransaction",
+        "params": [
+            sig,
+            { "encoding": "jsonParsed", "maxSupportedTransactionVersion": 0 }
+        ]
+    });
+
+    let tx_resp = match client.post(rpc_url).json(&tx_payload)
+        .timeout(std::time::Duration::from_secs(5))
+        .send().await
+    {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let tx_body: serde_json::Value = match tx_resp.json().await {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    if let Some(result) = tx_body.get("result") {
+        // Extract fee
+        let fee = result.get("meta")
+            .and_then(|m| m.get("fee"))
+            .and_then(|f| f.as_u64())
+            .unwrap_or(0);
+
+        // Extract signer (first account key)
+        let signer = result.get("transaction")
+            .and_then(|t| t.get("message"))
+            .and_then(|m| m.get("accountKeys"))
+            .and_then(|keys| keys.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|k| {
+                // jsonParsed format: {"pubkey": "...", "signer": true}
+                k.get("pubkey").and_then(|p| p.as_str())
+                    .or_else(|| k.as_str())
+            })
+            .unwrap_or("unknown");
+
+        // Extract programs invoked
+        let programs: Vec<&str> = result.get("transaction")
+            .and_then(|t| t.get("message"))
+            .and_then(|m| m.get("instructions"))
+            .and_then(|ixs| ixs.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|ix| {
+                        ix.get("programId").and_then(|p| p.as_str())
+                            .or_else(|| ix.get("program").and_then(|p| p.as_str()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Extract Jito tip (look for transfers to known tip accounts)
+        let inner_ixs = result.get("meta")
+            .and_then(|m| m.get("innerInstructions"))
+            .and_then(|i| i.as_array());
+
+        let mut jito_tip: u64 = 0;
+        if let Some(inner) = inner_ixs {
+            for group in inner {
+                if let Some(instructions) = group.get("instructions").and_then(|i| i.as_array()) {
+                    for ix in instructions {
+                        // Look for system program transfers (potential tips)
+                        let prog = ix.get("programId").and_then(|p| p.as_str()).unwrap_or("");
+                        if prog == "11111111111111111111111111111111" {
+                            if let Some(parsed) = ix.get("parsed") {
+                                if let Some(info) = parsed.get("info") {
+                                    let lamports = info.get("lamports")
+                                        .and_then(|l| l.as_u64())
+                                        .unwrap_or(0);
+                                    // Tips are usually the last transfer and go to known Jito addresses
+                                    if lamports > jito_tip {
+                                        jito_tip = lamports;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        info!(
+            "COMPETITOR on pool={} slot={}: signer={} fee={} tip~={} our_tip={} \
+             programs=[{}] sig={} ({} txs in window)",
+            pool_address, slot, signer, fee, jito_tip, our_tip,
+            programs.join(", "), sig, competitor_sigs.len(),
+        );
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -360,6 +535,9 @@ mod tests {
             100_000,
             15_000,
             rx,
+            "http://localhost:0".to_string(),
+            "TestPool111111111111111111111111111111111".to_string(),
+            0,
         );
         // Give the spawned task a moment to complete
         tokio::time::sleep(Duration::from_millis(200)).await;

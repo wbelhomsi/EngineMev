@@ -11,7 +11,7 @@ use executor::{BundleBuilder, RelayDispatcher};
 use executor::relays::{Relay, jito::JitoRelay, astralane::AstralaneRelay,
     nozomi::NozomiRelay, bloxroute::BloxrouteRelay, zeroslot::ZeroSlotRelay};
 use mempool::{GeyserStream, PoolStateChange};
-use router::pool::DetectedSwap;
+// DetectedSwap no longer used — routes found via find_routes_for_base(SOL, pool)
 use router::{RouteCalculator, ProfitSimulator};
 use router::simulator::SimulationResult;
 use state::StateCache;
@@ -74,8 +74,9 @@ async fn main() -> Result<()> {
     }
 
     info!(
-        "Config: tip_fraction={:.0}%, min_profit={} lamports, max_hops={}",
+        "Config: tip_fraction={:.0}%, slippage={:.0}%, min_profit={} lamports, max_hops={}",
         config.tip_fraction * 100.0,
+        config.slippage_tolerance * 100.0,
         config.min_profit_lamports,
         config.max_hops,
     );
@@ -181,7 +182,8 @@ async fn main() -> Result<()> {
         config.tip_fraction,
         config.min_profit_lamports,
         config.min_tip_lamports,
-    ).with_tip_floor(tip_floor_cache.clone());
+    ).with_slippage_tolerance(config.slippage_tolerance)
+     .with_tip_floor(tip_floor_cache.clone());
 
     // Load searcher keypair
     let searcher_keypair = rpc_helpers::load_keypair(&config.searcher_keypair_path)?;
@@ -355,43 +357,16 @@ async fn main() -> Result<()> {
 
                 let pool_address = change.pool_address;
 
-                // Construct a DetectedSwap trigger from the state change.
-                // We don't know the exact swap direction, so we set output_mint
-                // to token_a — the route calculator will search both directions.
-                let trigger = DetectedSwap {
-                    dex_type: pool_state.dex_type,
-                    pool_address,
-                    input_mint: pool_state.token_a_mint,
-                    output_mint: pool_state.token_b_mint,
-                    amount: None,
-                    observed_slot: change.slot,
-                };
-
-                // Also search with reversed direction for full coverage.
-                let trigger_reverse = DetectedSwap {
-                    dex_type: pool_state.dex_type,
-                    pool_address,
-                    input_mint: pool_state.token_b_mint,
-                    output_mint: pool_state.token_a_mint,
-                    amount: None,
-                    observed_slot: change.slot,
-                };
-
-                // Find profitable routes in both directions
+                // Find profitable SOL-base routes (single call, searches all pairs)
                 let route_start = std::time::Instant::now();
-                let mut routes = route_calculator.find_routes(&trigger);
-                routes.extend(route_calculator.find_routes(&trigger_reverse));
+                let sol = config::sol_mint();
+                let mut routes = route_calculator.find_routes_for_base(&sol, &pool_address);
                 solana_mev_bot::metrics::counters::record_route_calc_duration_us(
                     route_start.elapsed().as_micros() as u64);
 
-                // Filter: only keep routes that start/end with SOL (the token we hold)
-                let sol = config::sol_mint();
-                let total_before = routes.len();
-                routes.retain(|r| r.base_mint == sol);
-                if total_before > 0 && routes.is_empty() {
-                    tracing::debug!("Filtered {} routes (none SOL-base)", total_before);
-                } else if total_before > 0 {
-                    tracing::debug!("{} routes found, {} SOL-base", total_before, routes.len());
+                let route_us = route_start.elapsed().as_micros() as u64;
+                if !routes.is_empty() {
+                    tracing::debug!("{} routes found (SOL-base) in {}us", routes.len(), route_us);
                 }
 
                 // Deduplicate by sorting and taking best
@@ -427,19 +402,21 @@ async fn main() -> Result<()> {
                                             best_route.estimated_profit_lamports),
                         }
                     } else {
-                        let fraction_tip = (best_route.estimated_profit_lamports as f64 * config.tip_fraction) as u64;
+                        // Apply slippage tolerance, same as simulator
+                        let gross = best_route.estimated_profit_lamports;
+                        let adj_profit = (gross as f64 * (1.0 - config.slippage_tolerance)) as u64;
                         let dynamic_floor = tip_floor_cache.get_floor_lamports().unwrap_or(0);
+                        let fraction_tip = (adj_profit as f64 * config.tip_fraction) as u64;
                         let tip = fraction_tip.max(config.min_tip_lamports.max(dynamic_floor));
-                        // Safety: tip must be less than profit
-                        if tip >= best_route.estimated_profit_lamports {
-                            warn!("SKIP_SIMULATOR: tip {} >= profit {}, skipping",
-                                  tip, best_route.estimated_profit_lamports);
+                        if tip >= adj_profit {
+                            warn!("SKIP_SIMULATOR: tip {} >= adj profit {}, skipping",
+                                  tip, adj_profit);
                             SimulationResult::Unprofitable {
-                                reason: format!("tip {} >= profit {}",
-                                                tip, best_route.estimated_profit_lamports),
+                                reason: format!("tip {} >= adj profit {}",
+                                                tip, adj_profit),
                             }
                         } else {
-                            let net = best_route.estimated_profit_lamports.saturating_sub(tip);
+                            let net = adj_profit.saturating_sub(tip);
                             if net < config.min_profit_lamports {
                                 SimulationResult::Unprofitable {
                                     reason: format!("net profit {} < min {}",
@@ -448,9 +425,10 @@ async fn main() -> Result<()> {
                             } else {
                                 SimulationResult::Profitable {
                                     route: best_route.clone(),
-                                    net_profit_lamports: best_route.estimated_profit_lamports,
+                                    net_profit_lamports: gross,
                                     tip_lamports: tip,
                                     final_profit_lamports: net,
+                                    min_final_output: best_route.input_amount + adj_profit,
                                 }
                             }
                         }
@@ -461,25 +439,43 @@ async fn main() -> Result<()> {
                 solana_mev_bot::metrics::counters::record_simulation_duration_us(
                     sim_start.elapsed().as_micros() as u64);
 
+                let sim_elapsed_us = sim_start.elapsed().as_micros() as u64;
+
                 match sim_result {
                     SimulationResult::Profitable {
                         route,
                         net_profit_lamports,
                         tip_lamports,
                         final_profit_lamports,
+                        min_final_output,
                     } => {
                         opportunities_found += 1;
+                        let pipeline_so_far_us = pipeline_start.elapsed().as_micros() as u64;
                         solana_mev_bot::metrics::counters::inc_opportunities(
                             &format!("{:?}", route.hops[0].dex_type));
                         solana_mev_bot::metrics::counters::add_estimated_profit_lamports(final_profit_lamports);
+
+                        // Detailed pipeline log for analysis
+                        let dex_names: Vec<String> = route.hops.iter()
+                            .map(|h| format!("{:?}", h.dex_type))
+                            .collect();
                         info!(
-                            "OPPORTUNITY #{}: {} hops, gross={}, tip={}, net={} lamports, pool={}",
+                            "OPPORTUNITY #{}: {} hops [{}], gross={}, tip={}, net={} lamports, \
+                             pool={}, slot={}, input={}, min_out={}, \
+                             timing: route={}us sim={}us total={}us",
                             opportunities_found,
                             route.hop_count(),
+                            dex_names.join("→"),
                             net_profit_lamports,
                             tip_lamports,
                             final_profit_lamports,
                             pool_address,
+                            change.slot,
+                            route.input_amount,
+                            min_final_output,
+                            route_start.elapsed().as_micros(),
+                            sim_elapsed_us,
+                            pipeline_so_far_us,
                         );
 
                         if config.dry_run {
@@ -519,11 +515,8 @@ async fn main() -> Result<()> {
                         };
 
                         // Build base instructions (no tips — each relay adds its own).
-                        // min_final_output = input_amount (break-even protection).
-                        // arb-guard's execute_arb_v2 verifies actual profit on-chain.
-                        // Using input (not input+profit) avoids ExceededSlippage when
-                        // the actual output is profitable but below the optimistic estimate.
-                        let min_final_output = route.input_amount;
+                        // min_final_output from simulator = input + (profit * 0.75).
+                        // arb-guard's execute_arb_v2 enforces this on-chain.
                         let build_start = std::time::Instant::now();
                         match bundle_builder.build_arb_instructions(&route, min_final_output) {
                             Ok(instructions) => {
@@ -567,10 +560,15 @@ async fn main() -> Result<()> {
                                 );
                                 bundles_submitted += 1;
                                 solana_mev_bot::metrics::counters::inc_bundles_submitted();
-                                // Record estimated (pre-confirmation) metrics
                                 solana_mev_bot::metrics::counters::add_estimated_tips_lamports(tip_lamports);
-                                solana_mev_bot::metrics::counters::record_pipeline_duration_us(
-                                    pipeline_start.elapsed().as_micros() as u64);
+                                let total_pipeline_us = pipeline_start.elapsed().as_micros() as u64;
+                                solana_mev_bot::metrics::counters::record_pipeline_duration_us(total_pipeline_us);
+
+                                info!(
+                                    "SUBMITTED bundle #{}: tip={} net={} pipeline={}us slot={} pool={}",
+                                    bundles_submitted, tip_lamports, final_profit_lamports,
+                                    total_pipeline_us, change.slot, pool_address,
+                                );
 
                                 // Spawn async confirmation tracker (non-blocking).
                                 // Polls getBundleStatuses to determine if the bundle
@@ -587,6 +585,9 @@ async fn main() -> Result<()> {
                                         final_profit_lamports,
                                         tip_lamports,
                                         relay_rx,
+                                        config.rpc_url.clone(),
+                                        pool_address.to_string(),
+                                        change.slot,
                                     );
                                 }
                             }

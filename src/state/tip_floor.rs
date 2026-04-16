@@ -152,12 +152,18 @@ pub async fn fetch_and_update(
     parse_and_update(&resp, cache)
 }
 
-/// Parse tip value from JSON — Jito returns either a number or a float.
+/// Parse tip value from JSON — Jito may return lamports (integer) or SOL (float).
+/// Values < 1000 are assumed to be SOL and converted to lamports.
 fn parse_tip_value(v: &serde_json::Value) -> Option<u64> {
     if let Some(n) = v.as_u64() {
         Some(n)
     } else if let Some(f) = v.as_f64() {
-        Some(f as u64)
+        if f > 0.0 && f < 1000.0 {
+            // Likely SOL, convert to lamports
+            Some((f * 1_000_000_000.0) as u64)
+        } else {
+            Some(f as u64)
+        }
     } else {
         None
     }
@@ -191,6 +197,7 @@ pub async fn run_tip_floor_loop(
             Ok(Ok((ws_stream, _response))) => {
                 info!("Jito tip stream WebSocket connected");
                 let (_write, mut read) = ws_stream.split();
+                let mut first_msg = true;
 
                 loop {
                     tokio::select! {
@@ -203,9 +210,19 @@ pub async fn run_tip_floor_loop(
                         msg = tokio::time::timeout(WS_TIMEOUT, read.next()) => {
                             match msg {
                                 Ok(Some(Ok(Message::Text(text)))) => {
+                                    if first_msg {
+                                        info!("Tip stream first message (raw): {}", &text[..text.len().min(500)]);
+                                        first_msg = false;
+                                    }
                                     match serde_json::from_str::<serde_json::Value>(&text) {
                                         Ok(json) => {
-                                            if let Err(e) = parse_and_update(&json, &cache) {
+                                            // WS may send a single object or an array
+                                            let as_array = if json.is_array() {
+                                                json
+                                            } else {
+                                                serde_json::Value::Array(vec![json])
+                                            };
+                                            if let Err(e) = parse_and_update(&as_array, &cache) {
                                                 debug!("Failed to parse tip stream message: {}", e);
                                             }
                                         }

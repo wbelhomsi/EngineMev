@@ -12,7 +12,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 Halal-compliant MEV backrun engine on Solana. Detects price dislocations across 8 DEXes (6 AMMs + 2 CLOBs) via Yellowstone Geyser (Helius LaserStream) account streaming, then submits atomic arbitrage bundles via multi-relay fan-out (Jito, Nozomi, bloXroute, Astralane, ZeroSlot).
 
 **Repo:** github.com/wbelhomsi/EngineMev
-**Status:** DRY_RUN mode working. Detecting real arb opportunities on mainnet (~27 in 3 min, ~0.0117 SOL potential profit). Not yet submitting bundles.
+**Status:** LIVE on co-located Frankfurt server. Submitting bundles via Jito + Astralane. Pipeline latency p50=906us (optimized from 15ms). No profitable arb landed yet — competing against sub-ms co-located bots.
 
 ## Halal Compliance — Non-Negotiable
 
@@ -53,6 +53,9 @@ Subscribe by **DEX program owner** — NOT by individual vault accounts or Token
 - **DashMap** for lock-free concurrent cache reads across threads.
 - **Per-DEX parsers in stream.rs**: Route by data size (653=Orca, 1560=CLMM, 904=DLMM, 1112=DAMM v2, 752=Raydium AMM, 637=Raydium CP). Phoenix and Manifest use variable-size accounts routed by `try_parse_orderbook()` fallback instead of data size.
 - **BlockhashCache**: `Arc<RwLock>` with 5s staleness, background 2s refresh via `getLatestBlockhash`.
+- **Jito tip floor via WebSocket**: `wss://bundles.jito.wtf/api/v1/bundles/tip_stream` pushes real-time tip data (SOL floats, converted to lamports). Falls back to REST polling. Replaces 5s REST polling.
+- **Slippage-tolerant profit model**: `SLIPPAGE_TOLERANCE` env (default 0.25). Gross profit discounted by 25% before calculating tip and `min_final_output`. On-chain arb-guard enforces the slippage-adjusted minimum.
+- **Route calculator optimizations** (see "Tunable Constraints" below): pool cap per token, early exit, single SOL-base search, `get_any()` skips TTL in route discovery. Reduced pipeline from 15ms to <1ms.
 - **API key redaction**: `config::redact_url()` strips keys from all log output.
 
 ## Module Map
@@ -139,7 +142,7 @@ DRY_RUN=true
 ### Tests
 
 ```bash
-make test                                     # 237 unit tests
+make test                                     # 242 unit tests
 make lint                                     # clippy (warnings = errors)
 make coverage                                 # line coverage report (49.3%)
 make ci                                       # lint + test + coverage
@@ -201,14 +204,14 @@ Base DEX↔DEX backrun arb working live on mainnet.
 - Multiple ALT support: 56-address base ALT + competitor's 170-address ALT (226 unique addresses)
 - RequestHeapFrame (256KB) in every transaction for complex CPI chains
 - Decomposed main.rs: sanctum.rs, rpc_helpers.rs, can_submit_route in router
-- Safety: TIP_FRACTION=0.15, smart tip with min_tip floor, sanity cap 10 SOL, i128 profit math, relay key redaction
-- TTL-enforced route calculator (get() not get_any()), 10 SOL minimum pool reserve filter
+- Safety: TIP_FRACTION=0.50, slippage-adjusted tips, smart tip with dynamic Jito WS floor, sanity cap 10 SOL, i128 profit math, relay key redaction
+- Optimized route calculator: get_any() (no TTL gate), pool cap per token (20), early exit (5 routes), 10 SOL minimum pool reserve filter
 - Raydium AMM v4 SwapBaseInV2 (8 accounts, no Serum/OpenBook)
 - Base58 encoding for Jito/Nozomi/ZeroSlot, base64 for Astralane/bloXroute
 - Random tip account selection per bundle
 - Route cap (10 per event) + min reserve filter (10 SOL)
 - Prometheus + OTLP metrics with error categorization and profiling histograms
-- 237 unit tests + 10 e2e + 1 integration, 0 clippy warnings
+- 242 unit tests + 10 e2e + 1 integration, 0 clippy warnings
 - Makefile: make lint, make test, make coverage, make ci
 - 87% simulation success rate on mainnet, 177 bundles accepted per 5 min
 - Monitoring: Prometheus + Grafana docker-compose in monitoring/ dir
@@ -221,9 +224,14 @@ Base DEX↔DEX backrun arb working live on mainnet.
 - ~~Raydium AMM v4 Swap V2~~ DONE (8 accounts, no Serum)
 - ~~Extend arb-guard CPI to all DEX types~~ DONE (execute_arb_v2 passthrough with hop chaining)
 - ~~PumpSwap AMM integration~~ DONE (10th DEX)
+- ~~Co-located server~~ DONE (Frankfurt, near Helius LaserStream FRA endpoint)
+- ~~Pipeline latency optimization~~ DONE (15ms → <1ms p50)
+- ~~Jito tip floor WebSocket~~ DONE (real-time tip stream)
+- ~~Slippage-tolerant profit model~~ DONE (SLIPPAGE_TOLERANCE env)
+- ~~Competitor analysis logging~~ DONE (pool/slot/signer/tip on dropped bundles)
 - Phoenix lot size conversion (Phoenix excluded from submission for now)
 - Dynamic per-pool ALTs for high-volume pools
-- Co-located server near Jito validators (latency is the final blocker for profit)
+- DEX module refactor (per-DEX files, see `docs/superpowers/plans/2026-04-16-dex-module-refactor.md`)
 
 ### Phase 3: CEX↔DEX Arb (SVM — new module)
 Binance websocket price feed + divergence detector. See `docs/STRATEGY-CEX-DEX-ARB.md`.
@@ -272,6 +280,26 @@ Flashbots MEV-Share on Ethereum. See `docs/STRATEGY-MEVSHARE-ETH.md`.
 23. **PumpSwap pool_v2 is NOT part of the PumpSwap IDL** — it's from the Pump bonding curve program. Do not include it in swap instructions.
 24. **execute_arb_v2 rewrites amount_in per hop** via `amount_in_offset` in HopV2Params. Offset is 1 for Raydium AMM V4, 8 for all Anchor DEXes. The on-chain program patches ix_data with actual received amount (balance diff) before invoking the next hop.
 25. **Always use multiple ALTs in V0 messages.** Our 56-addr ALT + competitor's 170-addr ALT = 226 unique addresses for maximum compression.
+26. **Jito tip stream WS sends SOL floats, not lamports.** Values like `2.6665e-6` are SOL. `parse_tip_value()` auto-converts values < 1000 to lamports (multiply by 1e9). The REST API returns the same format.
+27. **Route calculator uses `get_any()` (no TTL).** The simulator also uses `get_any()`. On-chain arb-guard's `min_amount_out` is the real safety gate, not cache TTL. See "Tunable Constraints" section to revert if needed.
+28. **`getBundleStatuses` is heavily rate-limited** on shared Helius RPC (1 req/sec, 120s backoff). Confirmation tracker gives up after 2 RPC errors. Consider a dedicated Jito RPC endpoint for status checks.
+
+## Tunable Constraints — Latency vs Coverage Trade-offs
+
+These were introduced to cut pipeline latency from 15ms to <1ms. If we're missing profitable routes, these are the knobs to turn (at the cost of increased latency):
+
+| Constraint | Location | Current | What it does | Relaxing it |
+|-----------|----------|---------|-------------|-------------|
+| `MAX_POOLS_PER_TOKEN` | `router/calculator.rs` | 20 | Caps pools iterated per token in route search | Increase to 50+ to find more pairs, but route calc time grows quadratically |
+| `EARLY_EXIT_ROUTES` | `router/calculator.rs` | 5 | Stop searching after N profitable routes found | Increase to find more candidates, but diminishing returns |
+| 3-hop gating | `calculator.rs` | Only runs if 2-hop found < EARLY_EXIT routes | 3-hop search is O(N^3) | Remove the gate to always search 3-hop (adds ~5-10ms) |
+| `get_any()` in calculator | `calculator.rs` | Skips TTL check | Finds routes from stale pool data | Revert to `get()` if too many stale-state rejections |
+| `get_any()` in simulator | `simulator.rs` | Skips TTL check | On-chain arb-guard is the safety net | Revert to `get()` if seeing too many on-chain failures |
+| Single SOL-base search | `main.rs` | One `find_routes_for_base(SOL)` call | Was two `find_routes()` calls (trigger + reverse) | The old approach searched from the trigger token too, which found some non-SOL-base routes |
+| `pool_state_ttl` | `config.rs` | 2s | Cache freshness window | Increase back to 5s if too many cache misses; decrease to 1s if state is reliably fresh |
+| `SLIPPAGE_TOLERANCE` | `.env` | 0.25 | Discounts profit by 25% before tipping | Lower to 0.10 to tip more aggressively, higher to be more conservative |
+
+**How to diagnose:** Run engine for 5 min, check `OPPORTUNITY` count vs old runs. If opportunities dropped significantly, relax `MAX_POOLS_PER_TOKEN` first (cheapest knob). If route calc time is fine but no bundles land, the issue is tip competitiveness, not route discovery.
 
 ## Environment Variables
 
@@ -283,7 +311,8 @@ See `.env.example`. Key ones:
 - `SEARCHER_KEYPAIR` — Path to signer keypair JSON
 - `DRY_RUN=true` — Log opportunities without submitting (default)
 - `MIN_PROFIT_LAMPORTS` — Minimum net profit to submit (default 100000 = 0.0001 SOL)
-- `TIP_FRACTION` — Fraction of profit given as Jito tip (default 0.15)
+- `TIP_FRACTION` — Fraction of slippage-adjusted profit given as tip (default 0.50)
+- `SLIPPAGE_TOLERANCE` — Discount on estimated profit before tipping (default 0.25 = 25%)
 - `LST_ARB_ENABLED` — Enable LST rate arb (default true)
 - `LST_MIN_SPREAD_BPS` — Minimum spread for LST arb (default 5)
 - `METRICS_PORT` — Prometheus `/metrics` HTTP endpoint port (disabled if unset)

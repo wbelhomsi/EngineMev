@@ -1,18 +1,20 @@
 use solana_sdk::pubkey::Pubkey;
-use tracing::debug;
 
 use crate::router::pool::{ArbRoute, DexType, DetectedSwap, RouteHop};
 use crate::state::StateCache;
 
+/// Maximum pools to consider per token during route search.
+/// Limits the combinatorial explosion while keeping the best liquidity pools.
+const MAX_POOLS_PER_TOKEN: usize = 20;
+
+/// Early-exit: stop searching once we have this many profitable routes.
+/// The first few are almost always the best (sorted by reserve-based heuristic).
+const EARLY_EXIT_ROUTES: usize = 5;
+
 /// Finds profitable circular arbitrage routes after a detected swap.
 ///
-/// The strategy:
-/// 1. A large swap on Pool A moves the price of Token X
-/// 2. Token X is now mispriced on Pool A relative to Pool B, C, etc.
-/// 3. We find a circular path that exploits this: buy cheap on A → sell expensive on B → back to start
-///
-/// Speed matters enormously here. We pre-index all token→pool mappings
-/// in the StateCache so route discovery is O(1) lookups, not O(n) scans.
+/// Speed-optimized: caps pool iteration, skips 3-hop by default,
+/// early-exits on sufficient candidates.
 pub struct RouteCalculator {
     state_cache: StateCache,
     max_hops: usize,
@@ -26,82 +28,50 @@ impl RouteCalculator {
         }
     }
 
-    /// Find all profitable circular routes that can be executed as a backrun
-    /// after the given detected swap.
-    ///
-    /// Returns routes sorted by estimated profit (highest first).
-    pub fn find_routes(&self, swap: &DetectedSwap) -> Vec<ArbRoute> {
-        let mut routes = Vec::new();
+    /// Find all profitable circular routes starting from a single base mint.
+    /// Called once per event with SOL as base (the only token we hold).
+    pub fn find_routes_for_base(
+        &self,
+        base_mint: &Pubkey,
+        trigger_pool: &Pubkey,
+    ) -> Vec<ArbRoute> {
+        let mut routes = Vec::with_capacity(EARLY_EXIT_ROUTES);
 
-        // Get the pool state for the swapped pool
-        let _pool_state = match self.state_cache.get(&swap.pool_address) {
-            Some(s) => s,
-            None => {
-                debug!("No cached state for pool {}", swap.pool_address);
-                return routes;
-            }
-        };
+        self.find_2_hop_routes(base_mint, trigger_pool, &mut routes);
 
-        // The swap disturbs the price on this pool.
-        // We look for circular paths starting from the output token.
-        //
-        // Example: User swaps SOL → USDC on Raydium
-        // After swap, SOL is relatively cheaper on Raydium (more SOL in pool)
-        // We look for: buy SOL cheap on Raydium → sell SOL on Orca → back to USDC
-        //
-        // Base token: we use the OUTPUT token of the detected swap as our starting point
-        // because the price dislocation creates opportunity in the output direction.
-        let base_mint = swap.output_mint;
-
-        // Find 2-hop routes: base → X → base (through different pools)
-        self.find_2_hop_routes(&base_mint, &swap.pool_address, &mut routes);
-
-        // Find 3-hop routes: base → X → Y → base
-        if self.max_hops >= 3 {
-            self.find_3_hop_routes(&base_mint, &swap.pool_address, &mut routes);
+        if self.max_hops >= 3 && routes.len() < EARLY_EXIT_ROUTES {
+            self.find_3_hop_routes(base_mint, trigger_pool, &mut routes);
         }
 
-        // ALWAYS search with SOL as base — we hold SOL, so SOL→X→SOL routes
-        // are always executable. Any pool state change could create a SOL arb.
-        let sol = crate::config::sol_mint();
-        if base_mint != sol {
-            // Search SOL-base routes through ALL pools (not just trigger pool)
-            let sol_trigger = crate::router::pool::DetectedSwap {
-                dex_type: swap.dex_type,
-                pool_address: swap.pool_address,
-                input_mint: sol,
-                output_mint: swap.input_mint, // use the other token
-                amount: None,
-                observed_slot: swap.observed_slot,
-            };
-            self.find_2_hop_routes(&sol, &sol_trigger.pool_address, &mut routes);
-            if self.max_hops >= 3 {
-                self.find_3_hop_routes(&sol, &sol_trigger.pool_address, &mut routes);
-            }
-        }
-
-        // Sort by estimated profit descending
-        routes.sort_by(|a, b| b.estimated_profit.cmp(&a.estimated_profit));
-
+        routes.sort_unstable_by(|a, b| b.estimated_profit.cmp(&a.estimated_profit));
         routes
     }
 
+    /// Legacy entry point — calls find_routes_for_base with SOL as base.
+    pub fn find_routes(&self, swap: &DetectedSwap) -> Vec<ArbRoute> {
+        let sol = crate::config::sol_mint();
+        self.find_routes_for_base(&sol, &swap.pool_address)
+    }
+
     /// Find 2-hop circular routes: base → other → base
-    ///
-    /// This looks for pairs of pools where:
-    /// Pool 1: trades base/other
-    /// Pool 2: also trades base/other (different DEX or different pool)
     fn find_2_hop_routes(
         &self,
         base_mint: &Pubkey,
         _trigger_pool: &Pubkey,
         routes: &mut Vec<ArbRoute>,
     ) {
-        // Get all pools that contain our base token
         let base_pools = self.state_cache.pools_for_token(base_mint);
 
-        for pool_a_addr in &base_pools {
-            let pool_a = match self.state_cache.get(pool_a_addr) {
+        // Cap iteration to the first N pools (DashMap order is arbitrary but stable
+        // within a single read — good enough for our purposes)
+        let pool_limit = base_pools.len().min(MAX_POOLS_PER_TOKEN);
+
+        for pool_a_addr in &base_pools[..pool_limit] {
+            if routes.len() >= EARLY_EXIT_ROUTES {
+                return;
+            }
+
+            let pool_a = match self.state_cache.get_any(pool_a_addr) {
                 Some(s) => s,
                 None => continue,
             };
@@ -111,21 +81,18 @@ impl RouteCalculator {
                 None => continue,
             };
 
-            // Find pools that also trade base/other but are different pools
             let return_pools = self.state_cache.pools_for_pair(base_mint, &other_mint);
 
             for pool_b_addr in &return_pools {
-                // Skip same pool
                 if pool_b_addr == pool_a_addr {
                     continue;
                 }
 
-                let pool_b = match self.state_cache.get(pool_b_addr) {
+                let pool_b = match self.state_cache.get_any(pool_b_addr) {
                     Some(s) => s,
                     None => continue,
                 };
 
-                // Simulate the 2-hop route with a small test amount
                 let test_amount = self.calculate_optimal_input(&pool_a, &pool_b, base_mint);
 
                 if let Some(route) = self.simulate_2_hop(
@@ -137,6 +104,9 @@ impl RouteCalculator {
                 ) {
                     if route.is_profitable() {
                         routes.push(route);
+                        if routes.len() >= EARLY_EXIT_ROUTES {
+                            return;
+                        }
                     }
                 }
             }
@@ -144,6 +114,7 @@ impl RouteCalculator {
     }
 
     /// Find 3-hop circular routes: base → mid1 → mid2 → base
+    /// Only runs when 2-hop didn't find enough candidates.
     fn find_3_hop_routes(
         &self,
         base_mint: &Pubkey,
@@ -151,9 +122,14 @@ impl RouteCalculator {
         routes: &mut Vec<ArbRoute>,
     ) {
         let base_pools = self.state_cache.pools_for_token(base_mint);
+        let pool_limit = base_pools.len().min(MAX_POOLS_PER_TOKEN);
 
-        for pool_a_addr in &base_pools {
-            let pool_a = match self.state_cache.get(pool_a_addr) {
+        for pool_a_addr in &base_pools[..pool_limit] {
+            if routes.len() >= EARLY_EXIT_ROUTES {
+                return;
+            }
+
+            let pool_a = match self.state_cache.get_any(pool_a_addr) {
                 Some(s) => s,
                 None => continue,
             };
@@ -163,15 +139,18 @@ impl RouteCalculator {
                 None => continue,
             };
 
-            // Find pools containing mid1
             let mid1_pools = self.state_cache.pools_for_token(&mid1_mint);
+            let mid1_limit = mid1_pools.len().min(MAX_POOLS_PER_TOKEN);
 
-            for pool_b_addr in &mid1_pools {
+            for pool_b_addr in &mid1_pools[..mid1_limit] {
                 if pool_b_addr == pool_a_addr {
                     continue;
                 }
+                if routes.len() >= EARLY_EXIT_ROUTES {
+                    return;
+                }
 
-                let pool_b = match self.state_cache.get(pool_b_addr) {
+                let pool_b = match self.state_cache.get_any(pool_b_addr) {
                     Some(s) => s,
                     None => continue,
                 };
@@ -181,12 +160,10 @@ impl RouteCalculator {
                     None => continue,
                 };
 
-                // Skip if mid2 == base (that's a 2-hop, already covered)
                 if mid2_mint == *base_mint {
                     continue;
                 }
 
-                // Find pools that trade mid2/base to close the circle
                 let return_pools = self.state_cache.pools_for_pair(&mid2_mint, base_mint);
 
                 for pool_c_addr in &return_pools {
@@ -194,13 +171,12 @@ impl RouteCalculator {
                         continue;
                     }
 
-                    let pool_c = match self.state_cache.get(pool_c_addr) {
+                    let pool_c = match self.state_cache.get_any(pool_c_addr) {
                         Some(s) => s,
                         None => continue,
                     };
 
-                    // Use a conservative test amount for 3-hop
-                    let test_amount = 1_000_000u64; // 0.001 SOL worth in lamports
+                    let test_amount = 1_000_000u64; // 0.001 SOL
 
                     if let Some(route) = self.simulate_3_hop(
                         base_mint,
@@ -213,6 +189,9 @@ impl RouteCalculator {
                     ) {
                         if route.is_profitable() {
                             routes.push(route);
+                            if routes.len() >= EARLY_EXIT_ROUTES {
+                                return;
+                            }
                         }
                     }
                 }
@@ -229,7 +208,6 @@ impl RouteCalculator {
         pool_b: &crate::router::pool::PoolState,
         input_amount: u64,
     ) -> Option<ArbRoute> {
-        // Hop 1: base → other on pool_a
         let a_to_b_a = pool_a.is_a_to_b(base_mint)?;
         let bins_a = self.state_cache.get_bin_arrays(&pool_a.address);
         let ticks_a = self.state_cache.get_tick_arrays(&pool_a.address);
@@ -244,7 +222,6 @@ impl RouteCalculator {
             return None;
         }
 
-        // Hop 2: other → base on pool_b
         let a_to_b_b = pool_b.is_a_to_b(other_mint)?;
         let bins_b = self.state_cache.get_bin_arrays(&pool_b.address);
         let ticks_b = self.state_cache.get_tick_arrays(&pool_b.address);
@@ -292,7 +269,6 @@ impl RouteCalculator {
         pool_c: &crate::router::pool::PoolState,
         input_amount: u64,
     ) -> Option<ArbRoute> {
-        // Hop 1: base → mid1
         let a_to_b_a = pool_a.is_a_to_b(base_mint)?;
         let bins_a = self.state_cache.get_bin_arrays(&pool_a.address);
         let ticks_a = self.state_cache.get_tick_arrays(&pool_a.address);
@@ -301,7 +277,6 @@ impl RouteCalculator {
         )?;
         if amount_1 == 0 { return None; }
 
-        // Hop 2: mid1 → mid2
         let a_to_b_b = pool_b.is_a_to_b(mid1_mint)?;
         let bins_b = self.state_cache.get_bin_arrays(&pool_b.address);
         let ticks_b = self.state_cache.get_tick_arrays(&pool_b.address);
@@ -310,7 +285,6 @@ impl RouteCalculator {
         )?;
         if amount_2 == 0 { return None; }
 
-        // Hop 3: mid2 → base
         let a_to_b_c = pool_c.is_a_to_b(mid2_mint)?;
         let bins_c = self.state_cache.get_bin_arrays(&pool_c.address);
         let ticks_c = self.state_cache.get_tick_arrays(&pool_c.address);
@@ -352,16 +326,12 @@ impl RouteCalculator {
     }
 
     /// Estimate optimal input amount for a 2-hop arb.
-    ///
-    /// For constant-product pools, optimal input can be derived analytically.
-    /// For now, we use a conservative fixed fraction of the smaller pool's reserves.
     fn calculate_optimal_input(
         &self,
         pool_a: &crate::router::pool::PoolState,
         pool_b: &crate::router::pool::PoolState,
         base_mint: &Pubkey,
     ) -> u64 {
-        // Use 1% of the smaller pool's base-side reserve as starting input
         let reserve_a = if pool_a.token_a_mint == *base_mint {
             pool_a.token_a_reserve
         } else {
@@ -375,7 +345,6 @@ impl RouteCalculator {
         };
 
         let min_reserve = reserve_a.min(reserve_b);
-        // 1% of smaller reserve, minimum 10000 lamports
         (min_reserve / 100).max(10_000)
     }
 }

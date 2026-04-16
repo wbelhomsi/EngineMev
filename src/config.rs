@@ -202,6 +202,9 @@ pub struct BotConfig {
     pub max_hops: usize,
     /// How long to cache pool state before refreshing
     pub pool_state_ttl: Duration,
+    /// Slippage tolerance on estimated profit (0.0 - 1.0). Default 0.25 = 25%.
+    /// Plan as if we realize (1 - slippage) of gross profit for tipping and min_amount_out.
+    pub slippage_tolerance: f64,
     /// Simulation mode — log opportunities without submitting
     pub dry_run: bool,
     /// Enable LST rate arbitrage (jitoSOL, mSOL, bSOL cross-DEX + Sanctum)
@@ -278,7 +281,10 @@ impl BotConfig {
             min_profit_lamports,
             min_tip_lamports,
             max_hops,
-            pool_state_ttl: Duration::from_secs(5), // 5s — allows mint cache to populate + second Geyser event to arrive
+            pool_state_ttl: Duration::from_secs(2), // 2s — tight TTL for co-located Frankfurt server
+            slippage_tolerance: std::env::var("SLIPPAGE_TOLERANCE")
+                .unwrap_or_else(|_| "0.25".to_string())
+                .parse()?,
             dry_run: std::env::var("DRY_RUN")
                 .unwrap_or_else(|_| "true".to_string())
                 .parse()?,
