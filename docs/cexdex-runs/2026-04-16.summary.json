@@ -1,0 +1,25 @@
+{
+  "start_ts_ms": 1776379830098,
+  "end_ts_ms": 1776383429894,
+  "duration_secs": 3599,
+  "total_detections": 25,
+  "sim_profitable": 15,
+  "sim_rejected": 10,
+  "submitted": 0,
+  "by_direction": {
+    "sell_on_dex": 25
+  },
+  "by_pool": {
+    "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE": 25
+  },
+  "by_reject_reason": {
+    "below threshold: net=0.008966 usd < min=0.0100": 1,
+    "below threshold: net=0.007906 usd < min=0.0100": 2,
+    "below threshold: net=0.008607 usd < min=0.0100": 5,
+    "below threshold: net=0.009447 usd < min=0.0100": 1,
+    "below threshold: net=0.009059 usd < min=0.0100": 1
+  },
+  "final_inventory_ratio": 1.0,
+  "final_sol_lamports": 7166187272,
+  "final_usdc_atoms": 0
+}

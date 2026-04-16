@@ -291,8 +291,16 @@ Base DEX↔DEX backrun arb working live on mainnet.
 - Dynamic per-pool ALTs for high-volume pools
 - DEX module refactor (per-DEX files, see `docs/superpowers/plans/2026-04-16-dex-module-refactor.md`)
 
-### Phase 3: CEX↔DEX Arb (SVM — new module)
-Binance websocket price feed + divergence detector. See `docs/STRATEGY-CEX-DEX-ARB.md`.
+### Phase 3: CEX↔DEX Arb (cexdex binary) — v1 COMPLETE
+Binance SOL/USDC bookTicker WS + narrow Geyser → divergence detector → CEX-priced simulator → bundle builder. Model A (inventory-based, single-leg on-chain swap, no CEX leg).
+
+**Built:** `src/bin/cexdex.rs` + `src/cexdex/` (detector, simulator, inventory, stats) + `src/feed/binance.rs`. 30+ unit tests + 3 e2e tests. Stats collector writes `records.jsonl` + `summary.json` on shutdown.
+
+**First 1h dry-run (2026-04-16):** 25 detections, 15 profitable, $0.25 gross total. Wallet was 100% SOL so only SellOnDex tested. Only 1 of 4 configured pools hit the 5 bps threshold. See `docs/CEXDEX-RUN-2026-04-16.md` for full analysis and recommended parameter changes.
+
+**Before going live:** balance wallet to 50/50, add detector time-dedup, expand pool list, run 4+ hours across volatility windows.
+
+Design spec: `docs/superpowers/specs/2026-04-16-cex-dex-arb-design.md` · Implementation plan: `docs/superpowers/plans/2026-04-16-cex-dex-arb.md`
 
 ### Phase 4: MEV-Share Backruns (EVM — separate binary)
 Flashbots MEV-Share on Ethereum. See `docs/STRATEGY-MEVSHARE-ETH.md`.
@@ -306,6 +314,7 @@ Flashbots MEV-Share on Ethereum. See `docs/STRATEGY-MEVSHARE-ETH.md`.
 | `docs/DEX-REFERENCE.md` | **Primary reference.** All 9 DEX account layouts, byte offsets, quoting math, Geyser strategy |
 | `docs/STRATEGY-LST-ARB.md` | LST rate arb strategy (jitoSOL/mSOL/bSOL) |
 | `docs/STRATEGY-CEX-DEX-ARB.md` | CEX↔DEX arb strategy (Binance WS) |
+| `docs/CEXDEX-RUN-2026-04-16.md` | First 1h dry-run analysis and recommended parameter tuning |
 | `docs/STRATEGY-MEVSHARE-ETH.md` | MEV-Share on Ethereum (Flashbots) |
 | `docs/superpowers/specs/` | Design specs for each feature |
 | `docs/superpowers/plans/` | Implementation plans (task-by-task) |
