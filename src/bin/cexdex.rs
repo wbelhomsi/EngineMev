@@ -7,6 +7,7 @@ use crossbeam_channel::bounded;
 use solana_mev_bot::cexdex::detector::{Detector, DetectorConfig};
 use solana_mev_bot::cexdex::geyser::{narrow_bot_config, start_geyser};
 use solana_mev_bot::cexdex::simulator::{CexDexSimulator, CexDexSimulatorConfig, SimulationResult};
+use solana_mev_bot::cexdex::stats::{now_ms, OpportunityRecord, StatsCollector};
 use solana_mev_bot::cexdex::{CexDexConfig, Inventory, PriceStore};
 use solana_mev_bot::config::{BotConfig, RelayEndpoints};
 use solana_mev_bot::executor::relays::{
@@ -96,6 +97,18 @@ async fn main() -> Result<()> {
         info!("Shutdown signal received");
         let _ = shutdown_tx_ctrlc.send(true);
     });
+
+    // Optional auto-shutdown after N seconds (useful for analysis runs).
+    // Set CEXDEX_RUN_SECS=3600 to auto-terminate after 1 hour.
+    if let Ok(secs) = std::env::var("CEXDEX_RUN_SECS").and_then(|s| s.parse::<u64>().map_err(|_| std::env::VarError::NotPresent)) {
+        info!("Auto-shutdown scheduled after {}s", secs);
+        let shutdown_tx_timer = shutdown_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+            info!("Auto-shutdown timer elapsed ({}s) — requesting shutdown", secs);
+            let _ = shutdown_tx_timer.send(true);
+        });
+    }
 
     // Blockhash cache
     let blockhash_cache = BlockhashCache::new();
@@ -241,6 +254,11 @@ async fn main() -> Result<()> {
 
     info!("All components initialized, starting detector loop");
 
+    // Stats collector — emits JSON on shutdown for post-run analysis.
+    let stats = Arc::new(StatsCollector::new());
+    let stats_path = std::env::var("CEXDEX_STATS_PATH")
+        .unwrap_or_else(|_| format!("/tmp/cexdex-run-{}", now_ms()));
+
     run_detector_loop(
         detector,
         simulator,
@@ -253,8 +271,29 @@ async fn main() -> Result<()> {
         config,
         change_rx,
         shutdown_rx,
+        stats.clone(),
     )
     .await?;
+
+    // Snapshot final inventory for summary (from in-memory tracker).
+    let final_ratio = inventory.ratio();
+    let sol_final = inventory.sol_lamports_available();
+    let usdc_final = inventory.usdc_atoms_available();
+
+    match stats.finalize_to_disk(&stats_path, final_ratio, sol_final, usdc_final) {
+        Ok(summary) => {
+            info!(
+                "=== RUN SUMMARY === duration={}s detections={} profitable={} rejected={} submitted={} | wrote {}.{{records.jsonl,summary.json}}",
+                summary.duration_secs,
+                summary.total_detections,
+                summary.sim_profitable,
+                summary.sim_rejected,
+                summary.submitted,
+                stats_path,
+            );
+        }
+        Err(e) => warn!("Failed to write stats: {}", e),
+    }
 
     let _ = shutdown_tx.send(true);
     Ok(())
@@ -307,6 +346,7 @@ async fn fetch_initial_balances(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn run_detector_loop(
     detector: Detector,
     simulator: CexDexSimulator,
@@ -319,6 +359,7 @@ async fn run_detector_loop(
     config: CexDexConfig,
     change_rx: crossbeam_channel::Receiver<solana_mev_bot::mempool::PoolStateChange>,
     mut shutdown_rx: watch::Receiver<bool>,
+    stats: Arc<StatsCollector>,
 ) -> Result<()> {
     let rt = tokio::runtime::Handle::current();
     let mut opportunities: u64 = 0;
@@ -328,18 +369,11 @@ async fn run_detector_loop(
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() { break; }
             }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                // periodic detection tick — also catches CEX-side updates
-            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
         }
 
-        // Drain Geyser change signals (non-blocking).
-        // The detector reads pool state directly from the shared cache;
-        // these signals are informational for now.
         while change_rx.try_recv().is_ok() {}
 
-        // Refresh the inventory's SOL price from the latest CEX snapshot so
-        // the ratio gate uses current pricing.
         if let Some(snap) = store.get_cex("SOLUSDC") {
             inventory.set_sol_price_usd(snap.mid());
         }
@@ -349,16 +383,55 @@ async fn run_detector_loop(
             None => continue,
         };
 
+        // Snapshot the inventory + CEX state at detection time for stats.
+        let inv_ratio_snap = inventory.ratio();
+        let inv_sol_snap = inventory.sol_lamports_available();
+        let inv_usdc_snap = inventory.usdc_atoms_available();
+        let cex_snap = store.get_cex("SOLUSDC");
+        let (cex_bid, cex_ask) = cex_snap
+            .map(|s| (s.best_bid_usd, s.best_ask_usd))
+            .unwrap_or((0.0, 0.0));
+        let detected_profit = route.expected_profit_usd;
+        let detected_direction = route.direction.label().to_string();
+        let detected_pool = route.pool_address.to_string();
+        let detected_dex = format!("{:?}", route.dex_type);
+        let detected_input = route.input_amount;
+        let detected_input_mint = route.input_mint.to_string();
+        let detected_output = route.expected_output;
+        let detected_output_mint = route.output_mint.to_string();
+
         let sim_result = simulator.simulate(&route);
-        let (route, tip_lamports, min_final_output, net_profit_usd) = match sim_result {
+        let (route, tip_lamports, min_final_output, net_profit_usd, will_submit) = match sim_result {
             SimulationResult::Profitable {
                 route,
                 tip_lamports,
                 min_final_output,
                 net_profit_usd,
-            } => (route, tip_lamports, min_final_output, net_profit_usd),
+            } => (route, tip_lamports, min_final_output, net_profit_usd, !config.dry_run),
             SimulationResult::Unprofitable { reason } => {
                 tracing::debug!("sim unprofitable: {}", reason);
+                stats.record(OpportunityRecord {
+                    ts_ms: now_ms(),
+                    pool: detected_pool,
+                    dex: detected_dex,
+                    direction: detected_direction,
+                    input_amount: detected_input,
+                    input_mint: detected_input_mint,
+                    expected_output: detected_output,
+                    output_mint: detected_output_mint,
+                    cex_bid,
+                    cex_ask,
+                    cex_mid: (cex_bid + cex_ask) / 2.0,
+                    detected_profit_usd: detected_profit,
+                    sim_net_profit_usd: None,
+                    sim_tip_lamports: None,
+                    sim_min_final_output: None,
+                    sim_reject_reason: Some(reason),
+                    inventory_ratio: inv_ratio_snap,
+                    inv_sol_available: inv_sol_snap,
+                    inv_usdc_available: inv_usdc_snap,
+                    submitted: false,
+                });
                 continue;
             }
         };
@@ -375,6 +448,30 @@ async fn run_detector_loop(
             tip_lamports,
             net_profit_usd,
         );
+
+        // Record the profitable opportunity (submitted=false if dry_run).
+        stats.record(OpportunityRecord {
+            ts_ms: now_ms(),
+            pool: route.pool_address.to_string(),
+            dex: format!("{:?}", route.dex_type),
+            direction: route.direction.label().to_string(),
+            input_amount: route.input_amount,
+            input_mint: route.input_mint.to_string(),
+            expected_output: route.expected_output,
+            output_mint: route.output_mint.to_string(),
+            cex_bid,
+            cex_ask,
+            cex_mid: (cex_bid + cex_ask) / 2.0,
+            detected_profit_usd: detected_profit,
+            sim_net_profit_usd: Some(net_profit_usd),
+            sim_tip_lamports: Some(tip_lamports),
+            sim_min_final_output: Some(min_final_output),
+            sim_reject_reason: None,
+            inventory_ratio: inv_ratio_snap,
+            inv_sol_available: inv_sol_snap,
+            inv_usdc_available: inv_usdc_snap,
+            submitted: will_submit,
+        });
 
         if config.dry_run {
             info!("DRY_RUN — not submitting");

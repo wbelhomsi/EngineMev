@@ -11,6 +11,7 @@ pub mod detector;
 pub mod simulator;
 pub mod bundle;
 pub mod geyser;
+pub mod stats;
 
 pub use config::CexDexConfig;
 pub use inventory::Inventory;

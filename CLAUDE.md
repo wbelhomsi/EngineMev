@@ -62,12 +62,28 @@ Subscribe by **DEX program owner** — NOT by individual vault accounts or Token
 
 ```
 src/
-├── main.rs              # Pipeline orchestration: Geyser → Router → Bundle → Relay
+├── main.rs              # Main engine entry: Geyser → Router → Bundle → Relay
+├── bin/
+│   └── cexdex.rs        # CEX-DEX arb binary (Binance SOL/USDC, Model A inventory-based)
 ├── lib.rs               # Re-exports modules for integration tests
 ├── addresses.rs         # Centralized const Pubkey for all program IDs, mints (compile-time, zero runtime cost)
 ├── config.rs            # Env config, relay endpoints, redact_url()
 ├── sanctum.rs           # Sanctum bootstrap: virtual pools, LST indices, rates, update_virtual_pool
 ├── rpc_helpers.rs       # load_keypair, load_alt, simulate_bundle_tx, send_public_tx
+├── feed/                # CEX price feeds
+│   ├── mod.rs           # PriceSnapshot (best_bid/ask + local receive time)
+│   └── binance.rs       # Binance bookTicker WS with auto-reconnect
+├── cexdex/              # CEX-DEX arbitrage module
+│   ├── mod.rs           # Re-exports CexDexConfig, Inventory, PriceStore, ArbDirection, CexDexRoute
+│   ├── config.rs        # CEXDEX_* env var parsing
+│   ├── units.rs         # Decimal conversions (SOL lamports, USDC atoms, bps)
+│   ├── price_store.rs   # Shared CEX snapshots + pool StateCache
+│   ├── inventory.rs     # Balance tracking, ratio gates, reservation lifecycle
+│   ├── route.rs         # CexDexRoute + ArbDirection
+│   ├── detector.rs      # Divergence detection, trade sizing (pool-depth-bounded)
+│   ├── simulator.rs     # CEX-priced profit sim, tip calculation, min_final_output
+│   ├── bundle.rs        # Adapter: CexDexRoute → ArbRoute → BundleBuilder
+│   └── geyser.rs        # Narrow Geyser wrapper for cexdex binary
 ├── mempool/
 │   ├── mod.rs           # Exports GeyserStream, PoolStateChange
 │   ├── stream.rs        # LaserStream gRPC subscription, data-size routing,
