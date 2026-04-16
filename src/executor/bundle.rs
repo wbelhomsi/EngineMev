@@ -124,11 +124,10 @@ impl BundleBuilder {
                                             p
                                         }
                                         None => {
-                                            tracing::warn!(
-                                                "Mint program unknown for {}, defaulting to SPL Token",
+                                            return Err(anyhow::anyhow!(
+                                                "Mint program unknown for {} — cannot build ATA (would use wrong token program)",
                                                 mint
-                                            );
-                                            token_program
+                                            ));
                                         }
                                     }
                                 }
