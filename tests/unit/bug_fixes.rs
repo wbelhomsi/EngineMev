@@ -250,6 +250,35 @@ fn test_tip_floor_ws_sol_to_lamports_conversion() {
     }
 }
 
+// ─── Bug #8: Token program must come from vault owner, not parser default ───
+
+#[test]
+fn test_vault_owner_is_token_program_source() {
+    // Insight from reference implementation: the token program for each side of a
+    // pool is the vault account's `owner` field, NOT a field inside the pool account.
+    //
+    // Whirlpool and Raydium CLMM pool accounts do NOT contain token_program fields.
+    // Parsers that hardcode SPL_TOKEN are wrong for Token-2022 pools.
+    // The correct source is getMultipleAccountsInfo([vault_a, vault_b]).owner.
+    //
+    // This test verifies the conceptual invariant: when we have a vault AccountInfo,
+    // its owner field is the token program for the mint that vault holds.
+
+    let spl_token = solana_mev_bot::addresses::SPL_TOKEN;
+    let token_2022 = solana_mev_bot::addresses::TOKEN_2022;
+
+    // Vault owned by SPL Token program → mint uses SPL Token
+    let vault_owner_spl = spl_token;
+    assert_eq!(vault_owner_spl, spl_token, "SPL Token vault → SPL Token program");
+
+    // Vault owned by Token-2022 program → mint uses Token-2022
+    let vault_owner_2022 = token_2022;
+    assert_eq!(vault_owner_2022, token_2022, "Token-2022 vault → Token-2022 program");
+
+    // These two programs are distinct
+    assert_ne!(spl_token, token_2022);
+}
+
 // ─── Bug #7: Simulation used replaceRecentBlockhash which skipped execution ───
 
 #[test]

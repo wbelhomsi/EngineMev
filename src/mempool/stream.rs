@@ -331,12 +331,27 @@ impl GeyserStream {
 
                 // Update cache with parsed pool state
                 let pool_mints = (pool_state.token_a_mint, pool_state.token_b_mint);
-                // Cache mint programs from pool extra (parser-known, no RPC needed)
-                if let Some(prog) = pool_state.extra.token_program_a {
-                    self.state_cache.set_mint_program(pool_state.token_a_mint, prog);
-                }
-                if let Some(prog) = pool_state.extra.token_program_b {
-                    self.state_cache.set_mint_program(pool_state.token_b_mint, prog);
+                // DLMM and Raydium CP parsers read actual token programs from pool data.
+                // Other parsers (Orca, Raydium CLMM, Raydium AMM) hardcode SPL Token which
+                // is wrong for Token-2022 pools — skip caching from those to let the RPC
+                // fetch provide the authoritative value.
+                let parser_knows_programs = matches!(
+                    pool_state.dex_type,
+                    crate::router::pool::DexType::MeteoraDlmm
+                    | crate::router::pool::DexType::RaydiumCp
+                    | crate::router::pool::DexType::RaydiumAmm // AMM v4 is always SPL Token (predates Token-2022)
+                );
+                if parser_knows_programs {
+                    if let Some(prog) = pool_state.extra.token_program_a {
+                        if self.state_cache.get_mint_program(&pool_state.token_a_mint).is_none() {
+                            self.state_cache.set_mint_program(pool_state.token_a_mint, prog);
+                        }
+                    }
+                    if let Some(prog) = pool_state.extra.token_program_b {
+                        if self.state_cache.get_mint_program(&pool_state.token_b_mint).is_none() {
+                            self.state_cache.set_mint_program(pool_state.token_b_mint, prog);
+                        }
+                    }
                 }
                 self.state_cache.upsert(pool_address, pool_state);
 
@@ -359,9 +374,33 @@ impl GeyserStream {
                     }
                 }
 
-                // For Category B (Raydium AMM/CP): trigger async vault balance fetch
+                // Vault fetch strategy:
+                // - Raydium AMM/CP: MUST fetch vaults (reserves not in pool state)
+                // - Orca/CLMM/DAMM v2/DLMM: MAY fetch vaults once to get token programs
+                //   (vault.owner is the token program — SPL Token or Token-2022)
+                //   Only fetch if either mint's token program isn't already cached.
+                let (vault_a, vault_b) = match vault_info {
+                    Some(v) => v,
+                    None => {
+                        // Try to pull vaults from pool extra (Orca/CLMM/DAMM v2/DLMM)
+                        if let Some(p) = self.state_cache.get_any(&pool_address) {
+                            let a_known = self.state_cache.get_mint_program(&p.token_a_mint).is_some();
+                            let b_known = self.state_cache.get_mint_program(&p.token_b_mint).is_some();
+                            if a_known && b_known {
+                                (Pubkey::default(), Pubkey::default()) // skip fetch
+                            } else if let (Some(va), Some(vb)) = (p.extra.vault_a, p.extra.vault_b) {
+                                (va, vb)
+                            } else {
+                                (Pubkey::default(), Pubkey::default())
+                            }
+                        } else {
+                            (Pubkey::default(), Pubkey::default())
+                        }
+                    }
+                };
+
                 // Throttled: skip if we fetched this pool within VAULT_FETCH_COOLDOWN
-                if let Some((vault_a, vault_b)) = vault_info {
+                if vault_a != Pubkey::default() && vault_b != Pubkey::default() {
                     let should_fetch = self.vault_last_fetch
                         .get(&pool_address)
                         .map(|t| t.value().elapsed() >= VAULT_FETCH_COOLDOWN)
@@ -642,6 +681,7 @@ async fn fetch_vault_balances_for_pool(
     vault_b: Pubkey,
 ) -> anyhow::Result<()> {
     use base64::{engine::general_purpose, Engine as _};
+    use std::str::FromStr;
 
     let payload = serde_json::json!({
         "jsonrpc": "2.0",
@@ -669,8 +709,10 @@ async fn fetch_vault_balances_for_pool(
         .ok_or_else(|| anyhow::anyhow!("Invalid getMultipleAccounts response"))?;
 
     let mut balances = [0u64; 2];
+    let mut vault_owners: [Option<Pubkey>; 2] = [None, None];
     for (i, value) in values.iter().enumerate().take(2) {
         if value.is_null() { continue; }
+        // Parse balance from dataSlice (8 bytes at offset 64 of token account = amount)
         if let Some(b64) = value.get("data").and_then(|d| d.as_array()).and_then(|a| a.first()).and_then(|v| v.as_str()) {
             if let Ok(data) = general_purpose::STANDARD.decode(b64) {
                 if data.len() >= 8 {
@@ -678,12 +720,34 @@ async fn fetch_vault_balances_for_pool(
                 }
             }
         }
+        // The vault account's owner IS the token program (SPL Token or Token-2022)
+        if let Some(owner_str) = value.get("owner").and_then(|v| v.as_str()) {
+            if let Ok(owner) = Pubkey::from_str(owner_str) {
+                vault_owners[i] = Some(owner);
+            }
+        }
     }
 
-    // Update pool reserves in cache
+    // Update pool: reserves only for Raydium AMM/CP (other DEXes derive reserves
+    // from sqrt_price/bins). Token programs (vault owners) always cached.
     if let Some(mut pool) = cache.get_any(&pool_address) {
-        pool.token_a_reserve = balances[0];
-        pool.token_b_reserve = balances[1];
+        let updates_reserves = matches!(
+            pool.dex_type,
+            crate::router::pool::DexType::RaydiumAmm | crate::router::pool::DexType::RaydiumCp
+        );
+        if updates_reserves {
+            pool.token_a_reserve = balances[0];
+            pool.token_b_reserve = balances[1];
+        }
+        // Vault owner = token program for that mint. Authoritative source.
+        if let Some(owner) = vault_owners[0] {
+            cache.set_mint_program(pool.token_a_mint, owner);
+            pool.extra.token_program_a = Some(owner);
+        }
+        if let Some(owner) = vault_owners[1] {
+            cache.set_mint_program(pool.token_b_mint, owner);
+            pool.extra.token_program_b = Some(owner);
+        }
         cache.upsert(pool_address, pool);
     }
 
