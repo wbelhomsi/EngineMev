@@ -100,7 +100,39 @@ impl BundleBuilder {
                         let prog = if mint == wsol {
                             token_program
                         } else {
-                            self.state_cache.get_mint_program(&mint).unwrap_or(token_program)
+                            match self.state_cache.get_mint_program(&mint) {
+                                Some(p) => p,
+                                None => {
+                                    // Mint program not cached — check pool extra for hints.
+                                    // If a hop involves this mint, the pool's parser may have
+                                    // stored the token program in PoolExtra.
+                                    let pool_prog = route.hops.iter()
+                                        .find_map(|h| {
+                                            let pool = self.state_cache.get_any(&h.pool_address)?;
+                                            if pool.token_a_mint == mint {
+                                                pool.extra.token_program_a
+                                            } else if pool.token_b_mint == mint {
+                                                pool.extra.token_program_b
+                                            } else {
+                                                None
+                                            }
+                                        });
+                                    match pool_prog {
+                                        Some(p) => {
+                                            // Cache it for next time
+                                            self.state_cache.set_mint_program(mint, p);
+                                            p
+                                        }
+                                        None => {
+                                            tracing::warn!(
+                                                "Mint program unknown for {}, defaulting to SPL Token",
+                                                mint
+                                            );
+                                            token_program
+                                        }
+                                    }
+                                }
+                            }
                         };
                         ata_mints.push((mint, prog));
                     }
@@ -436,9 +468,17 @@ impl BundleBuilder {
                 self.state_cache.get_mint_program(&output_mint).unwrap_or(addresses::SPL_TOKEN)
             };
             let output_ata = derive_ata_with_program(&signer_pubkey, &output_mint, &output_token_program);
-            let output_token_index = remaining_accounts.iter()
+            let output_token_index = match remaining_accounts.iter()
                 .position(|a| a.pubkey == output_ata)
-                .unwrap_or(0) as u8;
+            {
+                Some(idx) => idx as u8,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "Output ATA {} (mint={}, prog={}) not found in remaining_accounts for hop {}",
+                        output_ata, output_mint, output_token_program, i
+                    ));
+                }
+            };
 
             // amount_in byte offset in instruction data:
             // Raydium AMM V4: 1-byte discriminator, then amount_in at offset 1

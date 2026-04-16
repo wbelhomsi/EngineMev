@@ -331,6 +331,13 @@ impl GeyserStream {
 
                 // Update cache with parsed pool state
                 let pool_mints = (pool_state.token_a_mint, pool_state.token_b_mint);
+                // Cache mint programs from pool extra (parser-known, no RPC needed)
+                if let Some(prog) = pool_state.extra.token_program_a {
+                    self.state_cache.set_mint_program(pool_state.token_a_mint, prog);
+                }
+                if let Some(prog) = pool_state.extra.token_program_b {
+                    self.state_cache.set_mint_program(pool_state.token_b_mint, prog);
+                }
                 self.state_cache.upsert(pool_address, pool_state);
 
                 // Fetch token program for uncached mints (fire-and-forget).
