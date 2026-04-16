@@ -98,11 +98,26 @@ pub fn build_meteora_dlmm_swap_ix(
     // Pools needing the bitmap but not having it will fail, but that's expected
     // (they can't be swapped without it). The bitmap_checked cache in stream.rs
     // tracks which pools have been checked.
-    let bitmap_extension = extra.bitmap_extension.unwrap_or(dlmm_program);
+    // Bitmap extension PDA: always derive and pass it. If the account doesn't
+    // exist on-chain, the swap will fail (expected — those pools can't be arbed).
+    // This is cheaper than checking existence at discovery time, and most active
+    // pools have the bitmap extension deployed.
+    let bitmap_extension = extra.bitmap_extension.unwrap_or_else(|| {
+        Pubkey::find_program_address(
+            &[b"bitmap", pool.address.as_ref()],
+            &dlmm_program,
+        ).0
+    });
+    let bitmap_is_real = true; // Always treat as real — derive PDA if not cached
 
     let mut accounts = vec![
         AccountMeta::new(pool.address, false),              // 0: lb_pair
-        AccountMeta::new(bitmap_extension, false),          // 1: bin_array_bitmap_extension
+        // bitmap_extension: writable only if it's a real account, read-only if it's the "None" marker
+        if bitmap_is_real {
+            AccountMeta::new(bitmap_extension, false)
+        } else {
+            AccountMeta::new_readonly(bitmap_extension, false)
+        },                                                  // 1: bin_array_bitmap_extension
         AccountMeta::new(vault_a, false),                   // 2: reserve_x
         AccountMeta::new(vault_b, false),                   // 3: reserve_y
         AccountMeta::new(user_input_ata, false),            // 4: user_token_in
@@ -110,7 +125,7 @@ pub fn build_meteora_dlmm_swap_ix(
         AccountMeta::new_readonly(pool.token_a_mint, false),// 6: token_x_mint
         AccountMeta::new_readonly(pool.token_b_mint, false),// 7: token_y_mint
         AccountMeta::new(oracle, false),                    // 8: oracle
-        AccountMeta::new(dlmm_program, false),               // 9: host_fee_in (None — pass program ID for Option, must be writable per IDL)
+        AccountMeta::new_readonly(dlmm_program, false),       // 9: host_fee_in (None — pass program ID as marker)
         AccountMeta::new(*signer, true),                    // 10: user (signer)
         AccountMeta::new_readonly(prog_a, false),             // 11: token_x_program
         AccountMeta::new_readonly(prog_b, false),            // 12: token_y_program
