@@ -223,12 +223,13 @@ async fn main() -> Result<()> {
         }
     }
 
-    let mut relays: Vec<Arc<dyn Relay>> = Vec::new();
-    relays.push(Arc::new(JitoRelay::new(&bot_config_relays)));
-    relays.push(Arc::new(AstralaneRelay::new(
-        &bot_config_relays,
-        shutdown_rx.clone(),
-    )));
+    let relays: Vec<Arc<dyn Relay>> = vec![
+        Arc::new(JitoRelay::new(&bot_config_relays)),
+        Arc::new(AstralaneRelay::new(
+            &bot_config_relays,
+            shutdown_rx.clone(),
+        )),
+    ];
 
     // No ALTs for the MVP — single-leg CEX-DEX tx fits comfortably in a
     // legacy transaction.
