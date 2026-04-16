@@ -1,9 +1,11 @@
 pub mod addresses;
+pub mod cexdex;
 pub mod config;
 pub mod executor;
+pub mod feed;
 pub mod mempool;
+pub mod metrics;
 pub mod router;
 pub mod rpc_helpers;
 pub mod sanctum;
-pub mod metrics;
 pub mod state;
