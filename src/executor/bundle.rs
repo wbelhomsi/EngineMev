@@ -337,9 +337,13 @@ impl BundleBuilder {
             }
             DexType::SanctumInfinity => {
                 let src_idx = self.state_cache.get_lst_index(&hop.input_mint)
-                    .ok_or_else(|| anyhow::anyhow!("LST index not found for {}", hop.input_mint))?;
+                    .ok_or_else(|| anyhow::anyhow!("LST index not found for src_mint {}", hop.input_mint))?;
                 let dst_idx = self.state_cache.get_lst_index(&hop.output_mint)
-                    .ok_or_else(|| anyhow::anyhow!("LST index not found for {}", hop.output_mint))?;
+                    .ok_or_else(|| anyhow::anyhow!("LST index not found for dst_mint {}", hop.output_mint))?;
+                tracing::debug!(
+                    "Sanctum swap: src_mint={} idx={}, dst_mint={} idx={}",
+                    hop.input_mint, src_idx, hop.output_mint, dst_idx
+                );
                 build_sanctum_swap_ix(
                     &self.searcher_keypair.pubkey(),
                     &hop.input_mint,

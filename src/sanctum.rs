@@ -103,8 +103,8 @@ pub async fn bootstrap_lst_indices(
     let data = general_purpose::STANDARD.decode(b64)?;
     info!("LstStateList: {} bytes", data.len());
 
-    // Parse as array of 80-byte entries, skip 16-byte header
-    let header_size = 16;
+    // Anchor discriminator (8 bytes) + Borsh Vec length prefix (4 bytes) = 12 bytes
+    let header_size = 12;
     if data.len() < header_size { return Ok(()); }
     let entry_data = &data[header_size..];
     let entry_size = 80;

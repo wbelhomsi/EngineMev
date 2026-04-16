@@ -205,10 +205,12 @@ impl ProfitSimulator {
             };
         }
 
-        // Step 9: min_final_output = input + slippage-adjusted profit
-        // This is what arb-guard enforces on-chain. More aggressive than just
-        // input_amount (break-even), but accounts for 25% slippage.
-        let min_final_output = route.input_amount + slippage_adjusted_profit;
+        // Step 9: min_final_output = input_amount (break-even protection).
+        // The slippage tolerance only affects tipping math — not the on-chain guard.
+        // Setting min_final_output to break-even allows the tx to land even when
+        // actual output is lower than estimated (but still profitable).
+        // arb-guard ensures we never lose money; we just keep less profit.
+        let min_final_output = route.input_amount;
 
         // Step 10: Reconstruct route with fresh estimates and fresh hop outputs
         let mut fresh_route = route.clone();

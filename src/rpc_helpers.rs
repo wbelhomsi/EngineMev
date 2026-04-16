@@ -72,20 +72,58 @@ pub async fn load_alt(
     })
 }
 
-/// Simulate a bundle's first transaction via RPC simulateTransaction.
+/// Simulate a V0 transaction via RPC simulateTransaction.
+/// Builds a proper versioned transaction matching what relays actually send.
 /// Logs the result (success/failure + program logs) for debugging.
-pub async fn simulate_bundle_tx(
+pub async fn simulate_v0_tx(
     client: &reqwest::Client,
     rpc_url: &str,
-    bundle_txs: &[Vec<u8>],
+    instructions: &[solana_sdk::instruction::Instruction],
+    signer: &solana_sdk::signature::Keypair,
+    recent_blockhash: solana_sdk::hash::Hash,
+    alts: &[&solana_message::AddressLookupTableAccount],
+    context: &str,
 ) {
     use base64::{engine::general_purpose, Engine as _};
+    use solana_sdk::signer::Signer;
 
-    if bundle_txs.is_empty() {
-        return;
-    }
+    // Build V0 versioned tx (same as relays do)
+    let alt_vec: Vec<solana_message::AddressLookupTableAccount> =
+        alts.iter().map(|a| (*a).clone()).collect();
 
-    let tx_b64 = general_purpose::STANDARD.encode(&bundle_txs[0]);
+    let tx = match solana_sdk::message::v0::Message::try_compile(
+        &signer.pubkey(),
+        instructions,
+        &alt_vec,
+        recent_blockhash,
+    ) {
+        Ok(v0_msg) => {
+            match solana_sdk::transaction::VersionedTransaction::try_new(
+                solana_sdk::message::VersionedMessage::V0(v0_msg),
+                &[signer],
+            ) {
+                Ok(tx) => tx,
+                Err(e) => {
+                    warn!("SIM BUILD FAILED [{}]: V0 sign error: {}", context, e);
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            warn!("SIM BUILD FAILED [{}]: V0 compile error: {}", context, e);
+            return;
+        }
+    };
+
+    let bytes = match bincode::serialize(&tx) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("SIM BUILD FAILED [{}]: serialize error: {}", context, e);
+            return;
+        }
+    };
+
+    let tx_b64 = general_purpose::STANDARD.encode(&bytes);
 
     let payload = serde_json::json!({
         "jsonrpc": "2.0",
@@ -114,6 +152,7 @@ pub async fn simulate_bundle_tx(
                 Ok(json) => {
                     let result = &json["result"]["value"];
                     let err = &result["err"];
+                    let units = result["unitsConsumed"].as_u64().unwrap_or(0);
                     let logs = result["logs"]
                         .as_array()
                         .map(|a| a.iter()
@@ -123,20 +162,20 @@ pub async fn simulate_bundle_tx(
                         .unwrap_or_default();
 
                     if err.is_null() {
-                        info!("SIM SUCCESS | logs:\n  {}", logs);
+                        info!("SIM OK [{}] | CU={} | logs:\n  {}", context, units, logs);
                     } else {
-                        warn!("SIM FAILED | err={} | logs:\n  {}", err, logs);
+                        warn!("SIM FAIL [{}] | err={} | CU={} | logs:\n  {}", context, err, units, logs);
                         crate::metrics::counters::inc_simulation_errors();
                     }
                 }
                 Err(e) => {
-                    warn!("Simulation response parse error: {}", e);
+                    warn!("SIM parse error [{}]: {}", context, e);
                     crate::metrics::counters::inc_simulation_errors();
                 }
             }
         }
         Err(e) => {
-            warn!("Simulation request failed: {}", crate::config::redact_url(&e.to_string()));
+            warn!("SIM request failed [{}]: {}", context, crate::config::redact_url(&e.to_string()));
             crate::metrics::counters::inc_simulation_errors();
         }
     }

@@ -428,7 +428,7 @@ async fn main() -> Result<()> {
                                     net_profit_lamports: gross,
                                     tip_lamports: tip,
                                     final_profit_lamports: net,
-                                    min_final_output: best_route.input_amount + adj_profit,
+                                    min_final_output: best_route.input_amount,
                                 }
                             }
                         }
@@ -515,27 +515,31 @@ async fn main() -> Result<()> {
                         };
 
                         // Build base instructions (no tips — each relay adds its own).
-                        // min_final_output from simulator = input + (profit * 0.75).
-                        // arb-guard's execute_arb_v2 enforces this on-chain.
+                        // min_final_output = input_amount (break-even).
+                        // arb-guard enforces this on-chain; slippage only affects tipping.
                         let build_start = std::time::Instant::now();
                         match bundle_builder.build_arb_instructions(&route, min_final_output) {
                             Ok(instructions) => {
                                 solana_mev_bot::metrics::counters::record_bundle_build_duration_us(
                                     build_start.elapsed().as_micros() as u64);
-                                // Optional: simulate before submission
+                                // Optional: simulate V0 tx before submission
                                 if simulate_bundles {
                                     let http = http_client.clone();
                                     let rpc_url = config.rpc_url.clone();
                                     let ixs = instructions.clone();
-                                    let signer_pub = bundle_builder.signer_pubkey();
-                                    let _bh = blockhash;
+                                    let signer = relay_dispatcher.signer();
+                                    let sim_alts = alts_for_public.clone();
+                                    let bh = blockhash;
+                                    let ctx = format!(
+                                        "pool={} tip={} net={} slot={}",
+                                        pool_address, tip_lamports, final_profit_lamports, change.slot
+                                    );
                                     rt.spawn(async move {
-                                        // Build temp tx for simulation (no tip needed)
-                                        let tx = solana_sdk::transaction::Transaction::new_with_payer(
-                                            &ixs, Some(&signer_pub),
-                                        );
-                                        let bytes = bincode::serialize(&tx).unwrap_or_default();
-                                        rpc_helpers::simulate_bundle_tx(&http, &rpc_url, &[bytes]).await;
+                                        let alt_refs: Vec<&solana_message::AddressLookupTableAccount> =
+                                            sim_alts.iter().map(|a| a.as_ref()).collect();
+                                        rpc_helpers::simulate_v0_tx(
+                                            &http, &rpc_url, &ixs, &signer, bh, &alt_refs, &ctx,
+                                        ).await;
                                     });
                                 }
                                 // One-shot public send for on-chain verification
