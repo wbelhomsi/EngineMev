@@ -3,7 +3,6 @@ use solana_message::AddressLookupTableAccount;
 use solana_sdk::{
     hash::Hash,
     instruction::Instruction,
-    pubkey::Pubkey,
     signature::Keypair,
 };
 use std::time::Instant;
@@ -12,19 +11,7 @@ use super::RelayResult;
 use super::common::{self, RateLimiter};
 use crate::config::BotConfig;
 
-/// ZeroSlot uses the same 8 Jito tip accounts.
-const JITO_TIP_ACCOUNTS: &[&str] = &[
-    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
-    "HFqU5x63VTqvQss8hp11i4bPKELzFLDELBGnNYpzHCDf",
-    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
-    "ADaUMid9yfUytqMBgopwjb2DTLSLzzWw1pa8U5j7cUi2",
-    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
-    "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
-    "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
-    "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
-];
-
-/// ZeroSlot relay — Jito-compatible sendBundle, no auth, uses Jito tip accounts.
+/// ZeroSlot relay — Jito-compatible sendBundle, no auth, uses centralized Jito tip accounts.
 pub struct ZeroSlotRelay {
     endpoint: Option<String>,
     http_client: reqwest::Client,
@@ -43,15 +30,6 @@ impl ZeroSlotRelay {
             http_client,
             rate_limiter: RateLimiter::new(min_interval),
         }
-    }
-
-    fn next_tip_account(&self) -> Pubkey {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos() as usize;
-        let idx = nanos % JITO_TIP_ACCOUNTS.len();
-        JITO_TIP_ACCOUNTS[idx].parse().unwrap()
     }
 }
 
@@ -88,7 +66,7 @@ impl super::Relay for ZeroSlotRelay {
         }
 
         let start = Instant::now();
-        let tip_account = self.next_tip_account();
+        let tip_account = common::random_jito_tip_account();
 
         let serialized = match common::build_signed_bundle_tx(
             "zeroslot", base_instructions, tip_lamports, &tip_account, signer, recent_blockhash, alts,
