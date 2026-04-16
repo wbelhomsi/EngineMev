@@ -93,22 +93,15 @@ pub fn build_meteora_dlmm_swap_ix(
     // remaining_accounts_info: empty Vec (Borsh: 4 bytes of 0)
     data.extend_from_slice(&0u32.to_le_bytes());
 
-    // Bitmap extension — use cached value if available (confirmed on-chain).
-    // If not cached, pass the DLMM program ID as Anchor's "None" marker.
-    // Pools needing the bitmap but not having it will fail, but that's expected
-    // (they can't be swapped without it). The bitmap_checked cache in stream.rs
-    // tracks which pools have been checked.
-    // Bitmap extension PDA: always derive and pass it. If the account doesn't
-    // exist on-chain, the swap will fail (expected — those pools can't be arbed).
-    // This is cheaper than checking existence at discovery time, and most active
-    // pools have the bitmap extension deployed.
-    let bitmap_extension = extra.bitmap_extension.unwrap_or_else(|| {
-        Pubkey::find_program_address(
-            &[b"bitmap", pool.address.as_ref()],
-            &dlmm_program,
-        ).0
-    });
-    let bitmap_is_real = true; // Always treat as real — derive PDA if not cached
+    // Bitmap extension: only pass the real PDA if stream confirmed it exists on-chain
+    // (cached in extra.bitmap_extension). Otherwise pass the DLMM program ID as the
+    // Anchor Option<Account> "None" marker. Pools that NEED the bitmap but don't have
+    // one initialized will fail with BitmapExtensionAccountIsNotProvided — that's
+    // expected for those pools; they can't be swapped without it.
+    let (bitmap_extension, bitmap_is_real) = match extra.bitmap_extension {
+        Some(pda) => (pda, true),
+        None => (dlmm_program, false),
+    };
 
     let mut accounts = vec![
         AccountMeta::new(pool.address, false),              // 0: lb_pair
