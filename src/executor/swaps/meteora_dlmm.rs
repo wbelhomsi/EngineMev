@@ -63,21 +63,32 @@ pub fn build_meteora_dlmm_swap_ix(
     // for single-bin arbs. To properly support it, we'd need to check on-chain existence at
     // pool discovery time and store in PoolExtra.
 
-    // Bin array PDAs: compute the current bin array index and get a few in the swap direction
-    let bin_array_index = if active_id >= 0 || active_id % 70 == 0 {
-        active_id / 70
+    // Bin array PDAs: compute the current bin array index and get a few in the swap direction.
+    // Formula from DLMM SDK: floor(active_id / 70) with correct handling of negative values.
+    const MAX_BIN_PER_ARRAY: i32 = 70;
+    let bin_array_index = if active_id >= 0 || active_id % MAX_BIN_PER_ARRAY == 0 {
+        active_id / MAX_BIN_PER_ARRAY
     } else {
-        active_id / 70 - 1
+        active_id / MAX_BIN_PER_ARRAY - 1
     };
 
-    // Get 3 bin arrays in swap direction
-    let bin_offsets: [i32; 3] = if a_to_b {
-        [0, -1, -2] // X->Y, price goes down, bins decrease
-    } else {
-        [0, 1, 2]   // Y->X, price goes up, bins increase
-    };
+    // Bitmap overflow check: the internal bitmap covers bin array indices [-512, 511].
+    // If ANY bin array we'd need is outside that range, we MUST provide a real
+    // bin_array_bitmap_extension. If we don't have it, skip this route.
+    const BIN_ARRAY_BITMAP_SIZE: i32 = 512;
+    let offsets_to_check: [i32; 3] = if a_to_b { [0, -1, -2] } else { [0, 1, 2] };
+    let needs_bitmap_extension = offsets_to_check.iter()
+        .any(|&o| {
+            let idx = bin_array_index + o;
+            idx > BIN_ARRAY_BITMAP_SIZE - 1 || idx < -BIN_ARRAY_BITMAP_SIZE
+        });
 
-    let bin_arrays: Vec<Pubkey> = bin_offsets.iter().map(|&o| {
+    // If bitmap extension is needed but we haven't confirmed it exists on-chain, skip.
+    if needs_bitmap_extension && extra.bitmap_extension.is_none() {
+        return None;
+    }
+
+    let bin_arrays: Vec<Pubkey> = offsets_to_check.iter().map(|&o| {
         let idx = (bin_array_index + o) as i64;
         Pubkey::find_program_address(
             &[b"bin_array", pool.address.as_ref(), &idx.to_le_bytes()],
