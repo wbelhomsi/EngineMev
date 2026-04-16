@@ -1,5 +1,6 @@
 mod pool_sanctum;
 mod cexdex_units;
+mod cexdex_price_store;
 mod config_lst;
 mod calculator_lst;
 mod bundle_sanctum;
