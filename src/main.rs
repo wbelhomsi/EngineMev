@@ -152,15 +152,15 @@ async fn main() -> Result<()> {
         })
     };
 
-    // Initialize dynamic tip floor cache (polls Jito REST API)
+    // Initialize dynamic tip floor cache (Jito WebSocket stream, REST fallback)
     let tip_floor_cache = state::TipFloorCache::new();
     if let Err(e) = state::tip_floor::fetch_and_update(&http_client, &tip_floor_cache).await {
-        warn!("Initial tip floor fetch failed (will retry in background): {}", e);
+        warn!("Initial tip floor REST fetch failed (WS stream will take over): {}", e);
     } else if let Some(floor) = tip_floor_cache.get_floor_lamports() {
         info!("Tip floor fetched: {} lamports (ema p50)", floor);
     }
 
-    // Task: Tip floor refresh (async, 5s interval)
+    // Task: Tip floor stream (WebSocket with REST fallback)
     let _tip_floor_handle = {
         let client = http_client.clone();
         let cache = tip_floor_cache.clone();

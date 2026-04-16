@@ -1,10 +1,10 @@
-//! Dynamic Jito tip floor cache.
+//! Dynamic Jito tip floor via WebSocket stream.
 //!
-//! Polls the Jito bundles REST API tip_floor endpoint every few seconds
-//! and caches the result. The simulator uses this as a dynamic minimum
-//! tip instead of a static env-var floor.
+//! Connects to `wss://bundles.jito.wtf/api/v1/bundles/tip_stream` and receives
+//! real-time tip floor updates pushed by Jito. Falls back to REST polling if
+//! the WebSocket connection fails.
 //!
-//! Jito tip floor API returns percentile-based tip amounts:
+//! Jito tip stream pushes JSON messages:
 //! `[{ "time": "...", "landed_tips_25th_percentile": 1000, "landed_tips_50th_percentile": 10000,
 //!    "landed_tips_75th_percentile": 100000, "landed_tips_95th_percentile": 1000000,
 //!    "landed_tips_99th_percentile": 10000000, "ema_landed_tips_50th_percentile": 12000 }]`
@@ -13,14 +13,20 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-/// Jito tip floor REST endpoint (public, no auth required).
-const TIP_FLOOR_URL: &str = "https://bundles-api-rest.jito.wtf/api/v1/bundles/tip_floor";
+/// Jito tip stream WebSocket endpoint.
+const TIP_STREAM_WS_URL: &str = "wss://bundles.jito.wtf/api/v1/bundles/tip_stream";
+
+/// Jito tip floor REST endpoint (fallback).
+const TIP_FLOOR_REST_URL: &str = "https://bundles-api-rest.jito.wtf/api/v1/bundles/tip_floor";
 
 /// How long before the cached value is considered stale.
 const STALE_THRESHOLD: Duration = Duration::from_secs(30);
 
-/// Polling interval for tip floor refresh.
-const POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Delay before reconnecting after a WebSocket disconnect.
+const WS_RECONNECT_DELAY: Duration = Duration::from_secs(2);
+
+/// If no WS message received within this duration, reconnect.
+const WS_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
 pub struct TipFloorInfo {
@@ -92,21 +98,10 @@ impl TipFloorCache {
     }
 }
 
-/// Fetch tip floor from Jito REST API and update the cache.
-pub async fn fetch_and_update(
-    client: &reqwest::Client,
-    cache: &TipFloorCache,
-) -> anyhow::Result<()> {
-    let resp = client
-        .get(TIP_FLOOR_URL)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await?
-        .json::<serde_json::Value>()
-        .await?;
-
-    // Response is an array with one element
-    let entry = resp
+/// Parse a tip floor JSON message (array with one entry) and update the cache.
+/// Used by both WS stream and REST fallback.
+pub fn parse_and_update(json: &serde_json::Value, cache: &TipFloorCache) -> anyhow::Result<()> {
+    let entry = json
         .as_array()
         .and_then(|arr| arr.first())
         .ok_or_else(|| anyhow::anyhow!("Empty tip_floor response"))?;
@@ -114,7 +109,7 @@ pub async fn fetch_and_update(
     let p50 = entry
         .get("landed_tips_50th_percentile")
         .and_then(parse_tip_value)
-        .unwrap_or(10_000); // 0.00001 SOL fallback
+        .unwrap_or(10_000);
 
     let p75 = entry
         .get("landed_tips_75th_percentile")
@@ -124,7 +119,7 @@ pub async fn fetch_and_update(
     let ema_p50 = entry
         .get("ema_landed_tips_50th_percentile")
         .and_then(parse_tip_value)
-        .unwrap_or(p50); // Fall back to raw p50
+        .unwrap_or(p50);
 
     cache.update(TipFloorInfo {
         p50_lamports: p50,
@@ -141,6 +136,22 @@ pub async fn fetch_and_update(
     Ok(())
 }
 
+/// Fetch tip floor from Jito REST API and update the cache.
+pub async fn fetch_and_update(
+    client: &reqwest::Client,
+    cache: &TipFloorCache,
+) -> anyhow::Result<()> {
+    let resp = client
+        .get(TIP_FLOOR_REST_URL)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await?
+        .json::<serde_json::Value>()
+        .await?;
+
+    parse_and_update(&resp, cache)
+}
+
 /// Parse tip value from JSON — Jito returns either a number or a float.
 fn parse_tip_value(v: &serde_json::Value) -> Option<u64> {
     if let Some(n) = v.as_u64() {
@@ -152,41 +163,107 @@ fn parse_tip_value(v: &serde_json::Value) -> Option<u64> {
     }
 }
 
-/// Background loop that polls the Jito tip floor API.
+/// Background loop that connects to Jito tip stream WebSocket.
+/// Falls back to REST polling if WS connection fails.
 pub async fn run_tip_floor_loop(
     client: reqwest::Client,
     cache: TipFloorCache,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
-    let mut consecutive_failures: u32 = 0;
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
 
     loop {
-        tokio::select! {
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() { break; }
-            }
-            _ = tokio::time::sleep(POLL_INTERVAL) => {
-                match fetch_and_update(&client, &cache).await {
-                    Ok(()) => {
-                        if consecutive_failures > 0 {
-                            info!("Tip floor fetch recovered after {} failures", consecutive_failures);
+        // Check shutdown before each connection attempt
+        if *shutdown_rx.borrow() {
+            break;
+        }
+
+        info!("Connecting to Jito tip stream WebSocket...");
+
+        let ws_result = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio_tungstenite::connect_async(TIP_STREAM_WS_URL),
+        )
+        .await;
+
+        match ws_result {
+            Ok(Ok((ws_stream, _response))) => {
+                info!("Jito tip stream WebSocket connected");
+                let (_write, mut read) = ws_stream.split();
+
+                loop {
+                    tokio::select! {
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() {
+                                info!("Tip floor WS loop shutting down");
+                                return;
+                            }
                         }
-                        consecutive_failures = 0;
-                    }
-                    Err(e) => {
-                        consecutive_failures += 1;
-                        if consecutive_failures >= 5 {
-                            warn!("Tip floor fetch failed {}x: {}", consecutive_failures, e);
-                        } else {
-                            debug!("Tip floor fetch failed ({}x): {}", consecutive_failures, e);
+                        msg = tokio::time::timeout(WS_TIMEOUT, read.next()) => {
+                            match msg {
+                                Ok(Some(Ok(Message::Text(text)))) => {
+                                    match serde_json::from_str::<serde_json::Value>(&text) {
+                                        Ok(json) => {
+                                            if let Err(e) = parse_and_update(&json, &cache) {
+                                                debug!("Failed to parse tip stream message: {}", e);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            debug!("Invalid JSON from tip stream: {}", e);
+                                        }
+                                    }
+                                }
+                                Ok(Some(Ok(Message::Ping(_)))) => {
+                                    // tungstenite handles pong automatically
+                                }
+                                Ok(Some(Ok(Message::Close(_)))) => {
+                                    warn!("Jito tip stream WebSocket closed by server");
+                                    break;
+                                }
+                                Ok(Some(Err(e))) => {
+                                    warn!("Jito tip stream WebSocket error: {}", e);
+                                    break;
+                                }
+                                Ok(None) => {
+                                    warn!("Jito tip stream WebSocket ended");
+                                    break;
+                                }
+                                Err(_) => {
+                                    warn!("Jito tip stream no message in {}s, reconnecting", WS_TIMEOUT.as_secs());
+                                    break;
+                                }
+                                _ => {} // Binary, Frame — ignore
+                            }
                         }
                     }
                 }
             }
+            Ok(Err(e)) => {
+                warn!("Jito tip stream WS connect failed: {}, falling back to REST", e);
+                // One-shot REST fallback before retry
+                if let Err(rest_err) = fetch_and_update(&client, &cache).await {
+                    debug!("REST fallback also failed: {}", rest_err);
+                }
+            }
+            Err(_) => {
+                warn!("Jito tip stream WS connect timed out, falling back to REST");
+                if let Err(rest_err) = fetch_and_update(&client, &cache).await {
+                    debug!("REST fallback also failed: {}", rest_err);
+                }
+            }
+        }
+
+        // Wait before reconnecting (check shutdown)
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() { break; }
+            }
+            _ = tokio::time::sleep(WS_RECONNECT_DELAY) => {}
         }
     }
 
-    info!("Tip floor refresh loop exited");
+    info!("Tip floor stream loop exited");
 }
 
 #[cfg(test)]
@@ -220,7 +297,7 @@ mod tests {
             p50_lamports: 10_000,
             p75_lamports: 100_000,
             ema_p50_lamports: 12_000,
-            fetched_at: Instant::now() - Duration::from_secs(60), // stale
+            fetched_at: Instant::now() - Duration::from_secs(60),
         });
         assert!(cache.get_floor_lamports().is_none());
     }
@@ -241,6 +318,31 @@ mod tests {
     fn test_parse_tip_value_null() {
         let v = serde_json::json!(null);
         assert_eq!(parse_tip_value(&v), None);
+    }
+
+    #[test]
+    fn test_parse_and_update_from_json() {
+        let cache = TipFloorCache::new();
+        let json = serde_json::json!([{
+            "time": "2024-01-01T00:00:00Z",
+            "landed_tips_25th_percentile": 1000,
+            "landed_tips_50th_percentile": 10000,
+            "landed_tips_75th_percentile": 100000,
+            "landed_tips_95th_percentile": 1000000,
+            "landed_tips_99th_percentile": 10000000,
+            "ema_landed_tips_50th_percentile": 12000
+        }]);
+
+        parse_and_update(&json, &cache).unwrap();
+        assert_eq!(cache.get_floor_lamports(), Some(12_000));
+        assert_eq!(cache.get_competitive_floor_lamports(), Some(100_000));
+    }
+
+    #[test]
+    fn test_parse_and_update_empty_array() {
+        let cache = TipFloorCache::new();
+        let json = serde_json::json!([]);
+        assert!(parse_and_update(&json, &cache).is_err());
     }
 
     #[tokio::test]
@@ -264,7 +366,6 @@ mod tests {
         let client = reqwest::Client::new();
         let cache = TipFloorCache::new();
 
-        // We need to override the URL for testing — use a helper
         let resp = client
             .get(&server.url())
             .timeout(Duration::from_secs(5))
@@ -275,22 +376,7 @@ mod tests {
             .await
             .unwrap();
 
-        let entry = resp.as_array().unwrap().first().unwrap();
-        let p50 = entry.get("landed_tips_50th_percentile").and_then(parse_tip_value).unwrap();
-        let p75 = entry.get("landed_tips_75th_percentile").and_then(parse_tip_value).unwrap();
-        let ema = entry.get("ema_landed_tips_50th_percentile").and_then(parse_tip_value).unwrap();
-
-        assert_eq!(p50, 10_000);
-        assert_eq!(p75, 100_000);
-        assert_eq!(ema, 12_000);
-
-        cache.update(TipFloorInfo {
-            p50_lamports: p50,
-            p75_lamports: p75,
-            ema_p50_lamports: ema,
-            fetched_at: Instant::now(),
-        });
-
+        parse_and_update(&resp, &cache).unwrap();
         assert_eq!(cache.get_floor_lamports(), Some(12_000));
         assert_eq!(cache.get_competitive_floor_lamports(), Some(100_000));
         mock.assert_async().await;
