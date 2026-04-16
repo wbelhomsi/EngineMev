@@ -1,0 +1,165 @@
+//! CEX-DEX configuration loaded from environment variables.
+//!
+//! All env vars prefixed `CEXDEX_` to avoid collision with the main engine.
+
+use anyhow::Result;
+use solana_sdk::pubkey::Pubkey;
+use std::str::FromStr;
+use std::time::Duration;
+
+use crate::router::pool::DexType;
+
+#[derive(Debug, Clone)]
+pub struct CexDexConfig {
+    // Wallet (separate from main engine)
+    pub searcher_keypair_path: String,
+    pub searcher_private_key: Option<String>,
+
+    // Solana
+    pub rpc_url: String,
+    pub geyser_grpc_url: String,
+    pub geyser_auth_token: String,
+
+    // Binance
+    pub binance_ws_url: String,
+    pub cex_staleness_ms: u64,
+
+    // Pools to monitor (DexType + Pubkey pairs)
+    pub pools: Vec<(DexType, Pubkey)>,
+
+    // Strategy
+    pub min_spread_bps: u64,
+    pub min_profit_usd: f64,
+    pub max_trade_size_sol: f64,
+
+    // Inventory gates
+    pub hard_cap_ratio: f64,
+    pub preferred_low: f64,
+    pub preferred_high: f64,
+    pub skewed_profit_multiplier: f64,
+
+    // Slippage
+    pub slippage_tolerance: f64,
+
+    // Safety
+    pub dry_run: bool,
+    pub pool_state_ttl: Duration,
+
+    // Relays (reuses main engine env vars)
+    pub jito_block_engine_url: String,
+    pub astralane_relay_url: Option<String>,
+    pub astralane_api_key: Option<String>,
+
+    // Arb-guard program (optional — single-leg may not need it)
+    pub arb_guard_program_id: Option<Pubkey>,
+
+    // Metrics
+    pub metrics_port: Option<u16>,
+}
+
+impl CexDexConfig {
+    pub fn from_env() -> Result<Self> {
+        dotenv::dotenv().ok();
+
+        let searcher_keypair_path = std::env::var("CEXDEX_SEARCHER_KEYPAIR")
+            .unwrap_or_else(|_| "cexdex-searcher.json".to_string());
+        let searcher_private_key = std::env::var("CEXDEX_SEARCHER_PRIVATE_KEY").ok();
+
+        let rpc_url = std::env::var("RPC_URL")
+            .unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string());
+        let geyser_grpc_url = std::env::var("GEYSER_GRPC_URL")
+            .unwrap_or_else(|_| "http://localhost:10000".to_string());
+        let geyser_auth_token = std::env::var("GEYSER_AUTH_TOKEN").unwrap_or_default();
+
+        let binance_ws_url = std::env::var("CEXDEX_BINANCE_WS_URL")
+            .unwrap_or_else(|_| "wss://stream.binance.com:9443/ws".to_string());
+        let cex_staleness_ms: u64 = std::env::var("CEXDEX_CEX_STALENESS_MS")
+            .unwrap_or_else(|_| "500".to_string())
+            .parse()?;
+
+        // Format: "RaydiumCp:<pubkey>,Orca:<pubkey>,..."
+        let pools_raw = std::env::var("CEXDEX_POOLS").unwrap_or_default();
+        let mut pools: Vec<(DexType, Pubkey)> = Vec::new();
+        for entry in pools_raw.split(',').filter(|s| !s.is_empty()) {
+            let (dex_str, pk_str) = entry.split_once(':')
+                .ok_or_else(|| anyhow::anyhow!("Invalid CEXDEX_POOLS entry: {}", entry))?;
+            let dex_type = match dex_str.trim() {
+                "RaydiumAmm" => DexType::RaydiumAmm,
+                "RaydiumCp" => DexType::RaydiumCp,
+                "RaydiumClmm" => DexType::RaydiumClmm,
+                "Orca" | "OrcaWhirlpool" => DexType::OrcaWhirlpool,
+                "MeteoraDlmm" => DexType::MeteoraDlmm,
+                "MeteoraDammV2" => DexType::MeteoraDammV2,
+                other => anyhow::bail!("Unsupported DexType for CEX-DEX: {}", other),
+            };
+            let pubkey = Pubkey::from_str(pk_str.trim())
+                .map_err(|e| anyhow::anyhow!("Invalid pubkey '{}': {}", pk_str, e))?;
+            pools.push((dex_type, pubkey));
+        }
+
+        let min_spread_bps: u64 = std::env::var("CEXDEX_MIN_SPREAD_BPS")
+            .unwrap_or_else(|_| "15".to_string()).parse()?;
+        let min_profit_usd: f64 = std::env::var("CEXDEX_MIN_PROFIT_USD")
+            .unwrap_or_else(|_| "0.10".to_string()).parse()?;
+        let max_trade_size_sol: f64 = std::env::var("CEXDEX_MAX_TRADE_SIZE_SOL")
+            .unwrap_or_else(|_| "10.0".to_string()).parse()?;
+
+        let hard_cap_ratio: f64 = std::env::var("CEXDEX_HARD_CAP_RATIO")
+            .unwrap_or_else(|_| "0.80".to_string()).parse()?;
+        let preferred_low: f64 = std::env::var("CEXDEX_PREFERRED_LOW")
+            .unwrap_or_else(|_| "0.40".to_string()).parse()?;
+        let preferred_high: f64 = std::env::var("CEXDEX_PREFERRED_HIGH")
+            .unwrap_or_else(|_| "0.60".to_string()).parse()?;
+        let skewed_profit_multiplier: f64 = std::env::var("CEXDEX_SKEWED_PROFIT_MULTIPLIER")
+            .unwrap_or_else(|_| "2.0".to_string()).parse()?;
+
+        let slippage_tolerance: f64 = std::env::var("CEXDEX_SLIPPAGE_TOLERANCE")
+            .unwrap_or_else(|_| "0.25".to_string()).parse()?;
+
+        let dry_run = std::env::var("CEXDEX_DRY_RUN")
+            .unwrap_or_else(|_| "true".to_string()).parse()?;
+
+        let pool_state_ttl = Duration::from_secs(
+            std::env::var("CEXDEX_POOL_TTL_SECS")
+                .unwrap_or_else(|_| "5".to_string()).parse()?,
+        );
+
+        let jito_block_engine_url = std::env::var("JITO_BLOCK_ENGINE_URL")
+            .unwrap_or_else(|_| "https://mainnet.block-engine.jito.wtf".to_string());
+        let astralane_relay_url = std::env::var("ASTRALANE_RELAY_URL").ok();
+        let astralane_api_key = std::env::var("ASTRALANE_API_KEY").ok();
+
+        let arb_guard_program_id = std::env::var("ARB_GUARD_PROGRAM_ID")
+            .ok()
+            .and_then(|s| Pubkey::from_str(&s).ok());
+
+        let metrics_port = std::env::var("CEXDEX_METRICS_PORT").ok()
+            .and_then(|s| s.parse().ok());
+
+        Ok(Self {
+            searcher_keypair_path,
+            searcher_private_key,
+            rpc_url,
+            geyser_grpc_url,
+            geyser_auth_token,
+            binance_ws_url,
+            cex_staleness_ms,
+            pools,
+            min_spread_bps,
+            min_profit_usd,
+            max_trade_size_sol,
+            hard_cap_ratio,
+            preferred_low,
+            preferred_high,
+            skewed_profit_multiplier,
+            slippage_tolerance,
+            dry_run,
+            pool_state_ttl,
+            jito_block_engine_url,
+            astralane_relay_url,
+            astralane_api_key,
+            arb_guard_program_id,
+            metrics_port,
+        })
+    }
+}

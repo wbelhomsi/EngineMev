@@ -62,12 +62,28 @@ Subscribe by **DEX program owner** — NOT by individual vault accounts or Token
 
 ```
 src/
-├── main.rs              # Pipeline orchestration: Geyser → Router → Bundle → Relay
+├── main.rs              # Main engine entry: Geyser → Router → Bundle → Relay
+├── bin/
+│   └── cexdex.rs        # CEX-DEX arb binary (Binance SOL/USDC, Model A inventory-based)
 ├── lib.rs               # Re-exports modules for integration tests
 ├── addresses.rs         # Centralized const Pubkey for all program IDs, mints (compile-time, zero runtime cost)
 ├── config.rs            # Env config, relay endpoints, redact_url()
 ├── sanctum.rs           # Sanctum bootstrap: virtual pools, LST indices, rates, update_virtual_pool
 ├── rpc_helpers.rs       # load_keypair, load_alt, simulate_bundle_tx, send_public_tx
+├── feed/                # CEX price feeds
+│   ├── mod.rs           # PriceSnapshot (best_bid/ask + local receive time)
+│   └── binance.rs       # Binance bookTicker WS with auto-reconnect
+├── cexdex/              # CEX-DEX arbitrage module
+│   ├── mod.rs           # Re-exports CexDexConfig, Inventory, PriceStore, ArbDirection, CexDexRoute
+│   ├── config.rs        # CEXDEX_* env var parsing
+│   ├── units.rs         # Decimal conversions (SOL lamports, USDC atoms, bps)
+│   ├── price_store.rs   # Shared CEX snapshots + pool StateCache
+│   ├── inventory.rs     # Balance tracking, ratio gates, reservation lifecycle
+│   ├── route.rs         # CexDexRoute + ArbDirection
+│   ├── detector.rs      # Divergence detection, trade sizing (pool-depth-bounded)
+│   ├── simulator.rs     # CEX-priced profit sim, tip calculation, min_final_output
+│   ├── bundle.rs        # Adapter: CexDexRoute → ArbRoute → BundleBuilder
+│   └── geyser.rs        # Narrow Geyser wrapper for cexdex binary
 ├── mempool/
 │   ├── mod.rs           # Exports GeyserStream, PoolStateChange
 │   ├── stream.rs        # LaserStream gRPC subscription, data-size routing,
@@ -169,6 +185,28 @@ make ci                                       # lint + test + coverage
 cargo test --features e2e --test e2e          # 4 e2e tests
 cargo test --features e2e_surfpool --test e2e_surfpool  # Surfpool E2E (needs RPC_URL + surfpool)
 ```
+
+### CEX-DEX Binary
+
+Separate binary for Binance SOL/USDC CEX-DEX arbitrage (Model A, inventory-based).
+Uses a separate wallet for clean P&L isolation.
+
+```bash
+# First time: generate a separate searcher keypair
+solana-keygen new -o cexdex-searcher.json
+
+# Fund it with SOL + USDC (manual top-up)
+
+# Set CEXDEX_POOLS to the specific pool addresses to monitor in .env
+
+# Run in dry-run first
+CEXDEX_DRY_RUN=true cargo run --release --bin cexdex
+
+# Go live
+CEXDEX_DRY_RUN=false cargo run --release --bin cexdex
+```
+
+See `docs/superpowers/specs/2026-04-16-cex-dex-arb-design.md` for the full design.
 
 ## Critical Rules for Development
 

@@ -1,4 +1,6 @@
 mod pool_sanctum;
+mod cexdex_units;
+mod cexdex_price_store;
 mod config_lst;
 mod calculator_lst;
 mod bundle_sanctum;
@@ -28,3 +30,6 @@ mod staleness;
 mod confirmation;
 mod tip_floor;
 mod bug_fixes;
+mod cexdex_inventory;
+mod cexdex_detector;
+mod cexdex_simulator;
