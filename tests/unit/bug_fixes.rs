@@ -121,32 +121,102 @@ fn test_sanctum_lst_state_list_header_is_12_bytes() {
     assert_ne!(old_header, header_size, "Header should be 12, not 16");
 }
 
-// ─── Bug #3: DLMM bitmap extension passed as program ID (None marker) ───
+// ─── Bug #3: DLMM bitmap extension must only be passed when confirmed on-chain ───
 
 #[test]
-fn test_dlmm_bitmap_extension_pda_is_derived() {
-    // The bitmap extension PDA should be derived from ["bitmap", pool_address]
-    // when not cached in PoolExtra. It should NOT be the program ID.
+fn test_dlmm_bitmap_extension_is_program_id_when_none() {
+    // Deriving the bitmap PDA always (without checking existence) causes error 3007
+    // (AccountOwnedByWrongProgram) because uninitialized PDAs exist as System-owned
+    // empty accounts. When extra.bitmap_extension is None, we MUST pass the DLMM
+    // program ID as the Anchor Option<Account> "None" marker.
     let dlmm_program = solana_mev_bot::addresses::METEORA_DLMM;
-    let pool_address = Pubkey::new_unique();
 
-    let (bitmap_pda, _bump) = Pubkey::find_program_address(
-        &[b"bitmap", pool_address.as_ref()],
-        &dlmm_program,
-    );
+    // When bitmap_extension is None in PoolExtra, the swap IX builder should use
+    // the program ID as the None marker (not derive a PDA).
+    let extra_no_bitmap = PoolExtra::default();
+    let (bitmap, is_real) = match extra_no_bitmap.bitmap_extension {
+        Some(pda) => (pda, true),
+        None => (dlmm_program, false),
+    };
+    assert_eq!(bitmap, dlmm_program, "None bitmap → program ID marker");
+    assert!(!is_real, "None bitmap → readonly");
 
-    // The PDA should NOT equal the program ID
-    assert_ne!(
-        bitmap_pda, dlmm_program,
-        "Bitmap PDA should be derived, not the program ID"
-    );
+    // When bitmap_extension is Some(pda), it should be used as-is (writable)
+    let real_pda = Pubkey::new_unique();
+    let extra_with_bitmap = PoolExtra {
+        bitmap_extension: Some(real_pda),
+        ..Default::default()
+    };
+    let (bitmap2, is_real2) = match extra_with_bitmap.bitmap_extension {
+        Some(pda) => (pda, true),
+        None => (dlmm_program, false),
+    };
+    assert_eq!(bitmap2, real_pda, "Real bitmap → actual PDA");
+    assert!(is_real2, "Real bitmap → writable");
+}
 
-    // The PDA should be deterministic
-    let (bitmap_pda2, _) = Pubkey::find_program_address(
-        &[b"bitmap", pool_address.as_ref()],
-        &dlmm_program,
-    );
-    assert_eq!(bitmap_pda, bitmap_pda2);
+// ─── Bug #9: DLMM bitmap overflow check — skip routes that need unavailable bitmap ───
+
+#[test]
+fn test_dlmm_bitmap_overflow_check() {
+    // The DLMM internal bitmap covers bin_array_index range [-512, 511].
+    // If any bin array we'd need falls outside that range, bitmap_extension
+    // is REQUIRED. If we don't have it, we must skip the route.
+    const MAX_BIN_PER_ARRAY: i32 = 70;
+    const BIN_ARRAY_BITMAP_SIZE: i32 = 512;
+
+    // Test: active_id within normal range, a_to_b (offsets [0, -1, -2])
+    let active_id_normal: i32 = 100;
+    let bin_idx_normal = if active_id_normal >= 0 || active_id_normal % MAX_BIN_PER_ARRAY == 0 {
+        active_id_normal / MAX_BIN_PER_ARRAY
+    } else {
+        active_id_normal / MAX_BIN_PER_ARRAY - 1
+    };
+    let offsets_a_to_b: [i32; 3] = [0, -1, -2];
+    let needs_bitmap_normal = offsets_a_to_b.iter()
+        .any(|&o| {
+            let idx = bin_idx_normal + o;
+            idx > BIN_ARRAY_BITMAP_SIZE - 1 || idx < -BIN_ARRAY_BITMAP_SIZE
+        });
+    assert!(!needs_bitmap_normal, "active_id=100 should NOT need bitmap extension");
+
+    // Test: active_id at extreme positive (requires bitmap)
+    let active_id_high: i32 = 40_000; // bin_idx = 571 > 511
+    let bin_idx_high = active_id_high / MAX_BIN_PER_ARRAY;
+    assert_eq!(bin_idx_high, 571);
+    let needs_bitmap_high = offsets_a_to_b.iter()
+        .any(|&o| {
+            let idx = bin_idx_high + o;
+            idx > BIN_ARRAY_BITMAP_SIZE - 1 || idx < -BIN_ARRAY_BITMAP_SIZE
+        });
+    assert!(needs_bitmap_high, "active_id=40000 SHOULD need bitmap extension");
+
+    // Test: active_id at extreme negative (requires bitmap)
+    let active_id_low: i32 = -40_000; // bin_idx = -572 < -512
+    let bin_idx_low = if active_id_low >= 0 || active_id_low % MAX_BIN_PER_ARRAY == 0 {
+        active_id_low / MAX_BIN_PER_ARRAY
+    } else {
+        active_id_low / MAX_BIN_PER_ARRAY - 1
+    };
+    assert_eq!(bin_idx_low, -572);
+    let offsets_b_to_a: [i32; 3] = [0, 1, 2];
+    let needs_bitmap_low = offsets_b_to_a.iter()
+        .any(|&o| {
+            let idx = bin_idx_low + o;
+            idx > BIN_ARRAY_BITMAP_SIZE - 1 || idx < -BIN_ARRAY_BITMAP_SIZE
+        });
+    assert!(needs_bitmap_low, "active_id=-40000 SHOULD need bitmap extension");
+
+    // Test: boundary case — bin_idx = 511 is fine, 512 needs bitmap
+    let at_boundary: i32 = 511 * 70; // bin_idx = 511
+    let bin_idx_boundary = at_boundary / MAX_BIN_PER_ARRAY;
+    assert_eq!(bin_idx_boundary, 511);
+    let needs_at_511 = [0, 1, 2].iter()
+        .any(|&o| {
+            let idx = bin_idx_boundary + o;
+            idx > BIN_ARRAY_BITMAP_SIZE - 1 || idx < -BIN_ARRAY_BITMAP_SIZE
+        });
+    assert!(needs_at_511, "bin_idx=511 with b_to_a offsets reaches 513 → needs bitmap");
 }
 
 // ─── Bug #4: Mint program cache should be populated from parser pool extra ───
@@ -277,6 +347,154 @@ fn test_vault_owner_is_token_program_source() {
 
     // These two programs are distinct
     assert_ne!(spl_token, token_2022);
+}
+
+// ─── Bug #10: Bundle builder must error on unknown mint program, not default ───
+
+#[test]
+fn test_bundle_builder_errors_on_unknown_mint_program() {
+    use solana_sdk::signature::Keypair;
+    use solana_mev_bot::executor::BundleBuilder;
+    use solana_mev_bot::addresses;
+
+    let cache = StateCache::new(Duration::from_secs(60));
+    let wsol = addresses::WSOL;
+    let unknown_token = Pubkey::new_unique(); // deliberately not cached
+
+    // Pre-populate wSOL (standard) but NOT the unknown token
+    cache.set_mint_program(wsol, addresses::SPL_TOKEN);
+
+    // Pool with the unknown mint, no pool extra info
+    let pool_addr = Pubkey::new_unique();
+    cache.upsert(pool_addr, PoolState {
+        address: pool_addr,
+        dex_type: DexType::OrcaWhirlpool,
+        token_a_mint: wsol,
+        token_b_mint: unknown_token,
+        token_a_reserve: 1_000_000,
+        token_b_reserve: 1_000_000,
+        fee_bps: 30,
+        current_tick: Some(0),
+        sqrt_price_x64: Some(1 << 64),
+        liquidity: Some(1_000_000),
+        last_slot: 100,
+        extra: PoolExtra {
+            vault_a: Some(Pubkey::new_unique()),
+            vault_b: Some(Pubkey::new_unique()),
+            // Deliberately no token_program_a/b set
+            ..Default::default()
+        },
+        best_bid_price: None, best_ask_price: None,
+    });
+
+    let signer = Keypair::new();
+    let arb_guard = Pubkey::new_unique();
+    let builder = BundleBuilder::new(
+        signer.insecure_clone(),
+        cache.clone(),
+        Some(arb_guard),
+    );
+
+    let route = ArbRoute {
+        hops: vec![
+            RouteHop {
+                pool_address: pool_addr, dex_type: DexType::OrcaWhirlpool,
+                input_mint: wsol, output_mint: unknown_token,
+                estimated_output: 1_000,
+            },
+            RouteHop {
+                pool_address: pool_addr, dex_type: DexType::OrcaWhirlpool,
+                input_mint: unknown_token, output_mint: wsol,
+                estimated_output: 1_050,
+            },
+        ],
+        base_mint: wsol,
+        input_amount: 1_000,
+        estimated_profit: 50,
+        estimated_profit_lamports: 50,
+    };
+
+    // Must error (not silently default to SPL Token for unknown_token)
+    let result = builder.build_arb_instructions(&route, 1_000);
+    assert!(result.is_err(), "Should error when mint program is unknown");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Mint program unknown"),
+        "Error should mention unknown mint program, got: {}", err_msg
+    );
+}
+
+// ─── Bug #11: Vault fetch must parse owner field for token program resolution ───
+
+#[test]
+fn test_vault_fetch_response_parses_owner_as_token_program() {
+    // Verify that the getMultipleAccounts response parsing correctly extracts
+    // the `owner` field (which is the vault's token program for SPL Token accounts).
+    //
+    // Response shape for a token account:
+    // {
+    //   "result": { "value": [
+    //     { "data": ["base64data", "base64"], "owner": "TokenkegQfeZyi...", ... }
+    //   ]}
+    // }
+
+    use std::str::FromStr;
+    let response = serde_json::json!({
+        "result": {
+            "value": [
+                {
+                    "data": ["AAAAAAAAAAA=", "base64"], // 8 bytes of zeros (0 balance)
+                    "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" // SPL Token
+                },
+                {
+                    "data": ["AAAAAAAAAAA=", "base64"],
+                    "owner": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" // Token-2022
+                }
+            ]
+        }
+    });
+
+    let values = response.get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_array())
+        .unwrap();
+
+    let owner_0 = values[0].get("owner").and_then(|v| v.as_str()).unwrap();
+    let owner_1 = values[1].get("owner").and_then(|v| v.as_str()).unwrap();
+
+    let prog_0 = Pubkey::from_str(owner_0).unwrap();
+    let prog_1 = Pubkey::from_str(owner_1).unwrap();
+
+    assert_eq!(prog_0, solana_mev_bot::addresses::SPL_TOKEN);
+    assert_eq!(prog_1, solana_mev_bot::addresses::TOKEN_2022);
+}
+
+// ─── Bug #12: Stream must not overwrite cached mint program with parser default ───
+
+#[test]
+fn test_stream_does_not_overwrite_authoritative_mint_program() {
+    // If the RPC fetch cached mint → Token-2022, the next Geyser event (from a
+    // parser that hardcodes SPL Token) must NOT overwrite it.
+    let cache = StateCache::new(Duration::from_secs(60));
+    let token_2022 = solana_mev_bot::addresses::TOKEN_2022;
+    let spl_token = solana_mev_bot::addresses::SPL_TOKEN;
+    let mint = Pubkey::new_unique();
+
+    // RPC fetch sets the authoritative value
+    cache.set_mint_program(mint, token_2022);
+    assert_eq!(cache.get_mint_program(&mint), Some(token_2022));
+
+    // Simulate stream.rs logic: only set if not already cached
+    let parser_default = spl_token;
+    if cache.get_mint_program(&mint).is_none() {
+        cache.set_mint_program(mint, parser_default);
+    }
+
+    // The authoritative Token-2022 value should remain
+    assert_eq!(
+        cache.get_mint_program(&mint), Some(token_2022),
+        "Parser default must not overwrite RPC-fetched value"
+    );
 }
 
 // ─── Bug #7: Simulation used replaceRecentBlockhash which skipped execution ───
