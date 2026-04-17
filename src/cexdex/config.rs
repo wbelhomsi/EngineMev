@@ -47,6 +47,16 @@ pub struct CexDexConfig {
     // Fraction of slippage-adjusted profit offered as tip (separate from main engine's TIP_FRACTION)
     pub tip_fraction: f64,
 
+    /// Nonce accounts for multi-relay non-equivocation. Parsed from
+    /// CEXDEX_SEARCHER_NONCE_ACCOUNTS (comma-separated pubkeys).
+    /// Empty vec = nonce-less mode (backward-compat, Jito-only).
+    pub nonce_accounts: Vec<Pubkey>,
+
+    /// Per-relay tip fractions. Key = relay name (e.g. "jito", "astralane").
+    /// Falls back to `tip_fraction` (CEXDEX_TIP_FRACTION) if a specific
+    /// relay's env var isn't set.
+    pub tip_fractions: std::collections::HashMap<String, f64>,
+
     // Safety
     pub dry_run: bool,
     pub pool_state_ttl: Duration,
@@ -148,6 +158,40 @@ impl CexDexConfig {
             tip_fraction
         );
 
+        // Nonce accounts (optional for backward-compat — empty vec = nonce-less mode).
+        let nonce_accounts: Vec<Pubkey> = std::env::var("CEXDEX_SEARCHER_NONCE_ACCOUNTS")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| Pubkey::from_str(s.trim()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("Invalid CEXDEX_SEARCHER_NONCE_ACCOUNTS pubkey: {}", e))?;
+
+        // Per-relay tip fractions. Uses tip_fraction (parsed above) as the default.
+        let mut tip_fractions: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        for (relay_name, env_key) in [
+            ("jito", "CEXDEX_TIP_FRACTION_JITO"),
+            ("astralane", "CEXDEX_TIP_FRACTION_ASTRALANE"),
+            ("nozomi", "CEXDEX_TIP_FRACTION_NOZOMI"),
+            ("bloxroute", "CEXDEX_TIP_FRACTION_BLOXROUTE"),
+            ("zeroslot", "CEXDEX_TIP_FRACTION_ZEROSLOT"),
+        ] {
+            let f: f64 = std::env::var(env_key).ok()
+                .map(|s| s.parse::<f64>())
+                .transpose()?
+                .unwrap_or(tip_fraction);
+            anyhow::ensure!(
+                f > 0.0 && f < 1.0,
+                "{} must be between 0 and 1 (exclusive), got {}",
+                env_key, f,
+            );
+            tip_fractions.insert(relay_name.to_string(), f);
+        }
+        anyhow::ensure!(
+            !tip_fractions.is_empty(),
+            "tip_fractions map must have at least one entry — aborting to avoid divide-by-zero"
+        );
+
         let dry_run = std::env::var("CEXDEX_DRY_RUN")
             .unwrap_or_else(|_| "true".to_string()).parse()?;
 
@@ -189,6 +233,8 @@ impl CexDexConfig {
             skewed_profit_multiplier,
             slippage_tolerance,
             tip_fraction,
+            nonce_accounts,
+            tip_fractions,
             dry_run,
             pool_state_ttl,
             jito_block_engine_url,
