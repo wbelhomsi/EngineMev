@@ -6,6 +6,7 @@ Cargo.lock
 .env
 *.json
 !.env.example
+!monitoring/**/*.json
 
 # Keys — NEVER commit
 searcher.json

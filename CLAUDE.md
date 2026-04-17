@@ -214,6 +214,28 @@ CEXDEX_DRY_RUN=false cargo run --release --bin cexdex
 
 See `docs/superpowers/specs/2026-04-16-cex-dex-arb-design.md` for the full design.
 
+### CEX-DEX Multi-Relay Fan-Out (2026-04-17)
+
+Safe fan-out to Jito + Astralane using durable Solana nonce accounts.
+Every cexdex-submitted tx carries `advance_nonce_account(N, authority)` as
+instruction #0 with the nonce's current hash in the `recent_blockhash`
+slot. All relay copies of the same opportunity share the same nonce → only
+one can land (the first to reach consensus advances the nonce; others
+fail the nonce check atomically).
+
+- Nonce pool: 3 accounts configured via `CEXDEX_SEARCHER_NONCE_ACCOUNTS`
+- Round-robin selection by oldest `last_used` (config-order tiebreaker)
+- Hash cache maintained by Geyser (extends the narrow-subscription filter
+  to include nonce pubkeys); zero-RPC on hot path
+- Startup RPC bootstrap validates authority == searcher wallet for each nonce
+- Per-relay tip via `CEXDEX_TIP_FRACTION_JITO`, `CEXDEX_TIP_FRACTION_ASTRALANE`
+- Simulator rejects if worst-case net (highest tip fraction) is unprofitable
+- Metrics: `cexdex_nonce_collision_total`, `cexdex_nonce_in_flight`,
+  `cexdex_bundles_attempted_total{relay}`, `cexdex_bundles_confirmed_total{relay}`,
+  `cexdex_tip_paid_usd_micros_total{relay}`
+
+See `docs/superpowers/specs/2026-04-17-cexdex-nonce-fanout-design.md`.
+
 ## Critical Rules for Development
 
 1. **ALWAYS web-search to verify any external API, SDK, or crate is current before using it.** We lost a full session building on the dead Jito mempool API. Training data goes stale.
