@@ -78,41 +78,53 @@ struct NonceState {
 impl NoncePool {
     pub fn new(nonces: Vec<Pubkey>) -> Self;
 
-    /// Round-robin by last_used. If the oldest is still in_flight,
-    /// return it anyway AND increment cexdex_nonce_collision_total.
+    /// Round-robin by last_used. On tie (e.g. all uninitialized at startup),
+    /// picks in config (`Vec`) order. If the oldest is still in_flight,
+    /// returns it anyway AND increments cexdex_nonce_collision_total.
     /// Returns None if cached_hash is still Hash::default() for all
     /// nonces (pre-Geyser warmup — detector should skip).
     pub fn checkout(&self) -> Option<(Pubkey, Hash)>;
 
-    /// Called from the confirmation tracker's on_landed / on_dropped.
+    /// Called from the confirmation tracker on Landed / Failed / Timeout.
     pub fn mark_settled(&self, pubkey: Pubkey);
 
     /// Called from the Geyser nonce-parser callback.
     pub fn update_cached_hash(&self, pubkey: Pubkey, hash: Hash);
+
+    /// True if `pubkey` is one of the managed nonce accounts.
+    /// Used by the Geyser parser to short-circuit pool-parser dispatch.
+    pub fn contains(&self, pubkey: &Pubkey) -> bool;
 }
 ```
 
-**Selection rule:** `min_by(state.last_used)`. Collision (in_flight at selection time) still returns the pubkey — the caller's tx will fail at nonce check if the prior bundle already landed, or queue behind it if it hasn't. Collision is logged via a counter; it is not an error.
+**Selection rule:** `min_by(state.last_used)`; on tie, config order. Collision (in_flight at selection time) still returns the pubkey — the caller's tx will fail at nonce check if the prior bundle already landed, or queue behind it if it hasn't. Collision is logged via a counter; it is not an error.
 
 **Concurrency:** `DashMap` write-lock per entry; detector loop is single-threaded so contention is effectively zero.
 
 ### 2. Nonce account parser (`src/mempool/parsers/nonce.rs`, new, ~60 lines)
 
-Solana nonce account layout (80 bytes, System Program-owned):
+Solana nonce account layout (80 bytes, System Program-owned, bincode-encoded `Versions<State>`):
 
 | Offset | Length | Field |
 |--------|--------|-------|
-| 0 | 4 | version (u32, 0) |
-| 4 | 4 | state (u32, 1=Initialized) |
-| 8 | 32 | authority (Pubkey) |
-| 40 | 32 | nonce (Hash) |
-| 72 | 8 | fee_calculator.lamports_per_signature (u64) |
+| 0 | 4 | Versions tag (u32, 0=Legacy, 1=Current — Data layout identical) |
+| 4 | 4 | State tag (u32, 0=Uninitialized, 1=Initialized) |
+| 8 | 32 | Data.authority (Pubkey) |
+| 40 | 32 | Data.durable_nonce (Hash) |
+| 72 | 8 | Data.fee_calculator.lamports_per_signature (u64) |
+
+Verified empirically against a live initialized nonce account on 2026-04-17:
+```
+00 00 00 01   01 00 00 00   <32-byte pubkey>   <32-byte hash>   88 13 00 00 00 00 00 00
+ Versions=1    State=1       authority          durable_nonce    fee=5000 lamports/sig
+```
 
 ```rust
 pub fn parse_nonce(data: &[u8]) -> Option<(Pubkey, Hash)> {
     if data.len() < 72 { return None; }
+    // Accept both Versions::Legacy (0) and Versions::Current (1) — same Data layout.
     let state = u32::from_le_bytes(data[4..8].try_into().ok()?);
-    if state != 1 { return None; }  // not initialized
+    if state != 1 { return None; }  // not Initialized
     let authority = Pubkey::new_from_array(data[8..40].try_into().ok()?);
     let hash = Hash::new_from_array(data[40..72].try_into().ok()?);
     Some((authority, hash))
@@ -143,7 +155,9 @@ if account.data.len() == 80
 }
 ```
 
-**Startup bootstrap:** before the detector loop starts, fetch each nonce's current state once via `getAccountInfo` to pre-populate the cache. This removes a ~1-2 slot window where `checkout()` would return `None`.
+**Startup bootstrap:** before the detector loop starts, fetch each nonce's current state once via `getAccountInfo`. This serves two purposes:
+1. Pre-populate the cache (removes a ~1-2 slot window where `checkout()` would return `None`).
+2. **Validate authority.** Each fetched nonce must parse successfully AND have `authority == searcher_pubkey`. If any mismatches, exit with a clear error at startup (no silent silent-fail at dispatch time). Prevents a misconfigured `CEXDEX_SEARCHER_NONCE_ACCOUNTS` from producing txs that always fail at the nonce check.
 
 ### 4. Bundle builder with nonce (`src/executor/relays/common.rs`)
 
@@ -176,6 +190,8 @@ CEXDEX_TIP_FRACTION_ASTRALANE=0.10
 ```
 
 **Config:** `CexDexConfig.tip_fractions: HashMap<String, f64>`, populated at startup with one entry per configured relay name, defaulting to `default_tip_fraction` if the per-relay var is absent.
+
+**Validation at startup:** `tip_fractions` must be non-empty (at least one relay configured). Every value must satisfy `0.0 < f < 1.0` (same guard as the existing `CEXDEX_TIP_FRACTION` validation). `default_tip_fraction` must also satisfy the same bounds. Exit with a clear error if any check fails — avoids a later divide-by-zero in the worst-case gate.
 
 **Simulator change:** currently returns `SimulationResult::Profitable { tip_lamports, ... }`. New: returns `adjusted_profit_sol` and `min_final_output`; tip is computed per-relay at dispatch time.
 
@@ -220,10 +236,13 @@ Remove the `// Single-relay only ... until nonce-based fix` comment; replace wit
 
 Existing `spawn_confirmation_tracker` already accepts an `OnLandedCallback`. Extend to:
 - Accept a `NoncePool` handle and a `nonce_pubkey`
-- On `Landed` OR `Failed` OR `Dropped`: call `pool.mark_settled(nonce_pubkey)`
-- On `Landed`: additionally call the existing `on_landed` closure (realized PNL crediting) AND `inc_cexdex_bundles_confirmed(relay_name)`
+- Build a `HashMap<bundle_id, relay_name>` during Phase 1 (bundle-ID collection) from each `RelayResult` delivered on `relay_rx`
+- On `ConfirmationStatus::Landed`: call `pool.mark_settled(nonce_pubkey)`, the existing `on_landed` closure (realized PNL crediting), and `inc_cexdex_bundles_confirmed(relay_name)` using the ID→name map
+- On `ConfirmationStatus::Failed`: call `pool.mark_settled(nonce_pubkey)`, increment `bundles_dropped_total`
+- On timeout (deadline reached, no Landed/Failed seen): call `pool.mark_settled(nonce_pubkey)`, increment `bundles_dropped_total`
+- On `RpcError` exhaustion (max retries): call `pool.mark_settled(nonce_pubkey)` (nonce MUST always be released to avoid a leak; worst case we release early, but the tx is still guarded by the actual on-chain nonce state)
 
-To emit the `relay_name` label, the tracker needs to know which relay's bundle landed. The existing `relay_rx` channel already carries `RelayResult { relay_name, bundle_id, ... }` — we can correlate which bundle's ID `getBundleStatuses` reports as landed, and label the metric accordingly.
+The `relay_name` label comes from the ID→relay map populated during Phase 1. If for some reason the landed bundle_id isn't in the map (shouldn't happen — we only accept IDs we submitted), use `relay="unknown"` as a fallback.
 
 ## Metrics
 
@@ -234,6 +253,9 @@ To emit the `relay_name` label, the tracker needs to know which relay's bundle l
 - `cexdex_bundles_attempted_total{relay}` (labelled) — replaces unlabelled counter
 - `cexdex_bundles_confirmed_total{relay}` (labelled) — only for the relay that landed
 - `cexdex_tip_paid_usd_total{relay}` (labelled) — cumulative tip USD per relay
+
+**New `cexdex_detector_skip_total` reason label:**
+- `nonce_pool_empty` — `checkout()` returned `None` (bootstrap window, no cached_hash yet)
 
 **Grafana dashboard additions** (appended to `monitoring/provisioning/dashboards/cexdex-pnl.json`):
 1. **Nonce health row** (h=6 w=24 at y=36): in-flight gauge + collision rate + refresh rate
