@@ -166,18 +166,29 @@ pub fn inc_cexdex_sim_rejected(reason: &str) {
 }
 
 /// Every bundle we handed off to the relay dispatcher. NOT a land count.
-pub fn inc_cexdex_bundles_attempted() {
-    counter!("cexdex_bundles_attempted_total").increment(1);
+pub fn inc_cexdex_bundles_attempted(relay: &str) {
+    counter!("cexdex_bundles_attempted_total", "relay" => relay.to_string()).increment(1);
 }
 
-/// Bundles confirmed on-chain via getBundleStatuses.
-pub fn inc_cexdex_bundles_confirmed() {
-    counter!("cexdex_bundles_confirmed_total").increment(1);
+/// Bundle for this relay confirmed on-chain. Should fire at most once per
+/// opportunity (only the relay whose tx landed — the others' txs fail the
+/// nonce check and never count as confirmed).
+pub fn inc_cexdex_bundles_confirmed(relay: &str) {
+    counter!("cexdex_bundles_confirmed_total", "relay" => relay.to_string()).increment(1);
 }
 
-/// Bundles that never landed (timed out or rejected by Jito).
-pub fn inc_cexdex_bundles_dropped() {
-    counter!("cexdex_bundles_dropped_total").increment(1);
+/// Bundle for this relay never landed (timed out or rejected).
+pub fn inc_cexdex_bundles_dropped(relay: &str) {
+    counter!("cexdex_bundles_dropped_total", "relay" => relay.to_string()).increment(1);
+}
+
+/// Cumulative USD paid as tips to this relay for confirmed bundles.
+/// Paired with `cexdex_bundles_confirmed_total{relay}` gives cost-per-landing.
+pub fn add_cexdex_tip_paid_usd(relay: &str, usd: f64) {
+    if usd > 0.0 {
+        counter!("cexdex_tip_paid_usd_micros_total", "relay" => relay.to_string())
+            .increment((usd * 1_000_000.0) as u64);
+    }
 }
 
 /// Sum of simulator net_profit_usd for every dispatched bundle. "Money we'd

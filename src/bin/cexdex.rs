@@ -735,7 +735,7 @@ async fn run_detector_loop(
                 nonce_info,
             );
 
-            solana_mev_bot::metrics::counters::inc_cexdex_bundles_attempted();
+            solana_mev_bot::metrics::counters::inc_cexdex_bundles_attempted(relay_name);
 
             // Per-relay confirmation tracker.
             // on_landed: fires only on confirmed landing — credits realized PNL.
@@ -746,9 +746,13 @@ async fn run_detector_loop(
             //   nonce release).
             let inv_cb = inventory.clone();
             let net = net_profit_usd;
+            let relay_name_owned = relay_name.clone();
+            let tip_usd_for_credit = tip_usd;
             let on_landed: solana_mev_bot::executor::confirmation::OnLandedCallback =
                 Box::new(move || {
                     inv_cb.add_realized_pnl_usd(net);
+                    solana_mev_bot::metrics::counters::inc_cexdex_bundles_confirmed(&relay_name_owned);
+                    solana_mev_bot::metrics::counters::add_cexdex_tip_paid_usd(&relay_name_owned, tip_usd_for_credit);
                 });
 
             let pool_for_settle = nonce_pool.clone();
