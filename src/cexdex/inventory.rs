@@ -23,6 +23,13 @@ struct InventoryInner {
     usdc_reserved_atoms: AtomicU64,
     sol_price_usd_scaled: AtomicU64, // price * 1e6 for u64 storage
 
+    /// Inventory value in USD at startup, captured once the first CEX price is known.
+    /// Stored as usd * 1_000_000 for atomic u64 storage. Zero means "not yet captured".
+    initial_value_usd_scaled: AtomicU64,
+    /// Cumulative realized P&L (summed net_profit_usd of each dispatched bundle).
+    /// Stored as usd * 1_000_000. Monotonically non-decreasing, so u64 is fine.
+    realized_pnl_usd_scaled: AtomicU64,
+
     hard_cap: f64,
     preferred_low: f64,
     preferred_high: f64,
@@ -43,6 +50,8 @@ impl Inventory {
                 sol_reserved_lamports: AtomicU64::new(0),
                 usdc_reserved_atoms: AtomicU64::new(0),
                 sol_price_usd_scaled: AtomicU64::new(0),
+                initial_value_usd_scaled: AtomicU64::new(0),
+                realized_pnl_usd_scaled: AtomicU64::new(0),
                 hard_cap,
                 preferred_low,
                 preferred_high,
@@ -155,5 +164,67 @@ impl Inventory {
                 self.inner.sol_reserved_lamports.fetch_sub(input_amount, Ordering::SeqCst);
             }
         }
+    }
+
+    // ── P&L tracking ─────────────────────────────────────────────────────────
+
+    /// Current mark-to-market inventory value in USD (on-chain balance, not
+    /// including reservations since those haven't left the wallet yet).
+    /// Returns 0.0 if no SOL price is set.
+    pub fn current_value_usd(&self) -> f64 {
+        let price = self.sol_price_usd();
+        if price <= 0.0 {
+            return 0.0;
+        }
+        let sol_usd =
+            lamports_to_sol(self.inner.sol_on_chain_lamports.load(Ordering::SeqCst)) * price;
+        let usdc_usd = atoms_to_usdc(self.inner.usdc_on_chain_atoms.load(Ordering::SeqCst));
+        sol_usd + usdc_usd
+    }
+
+    /// Capture the initial inventory USD value. Called once when the first CEX
+    /// price is known. No-op on subsequent calls.
+    pub fn capture_initial_value_usd_if_unset(&self) {
+        if self.inner.initial_value_usd_scaled.load(Ordering::SeqCst) > 0 {
+            return;
+        }
+        let val = self.current_value_usd();
+        if val > 0.0 {
+            let scaled = (val * 1_000_000.0) as u64;
+            // Only one writer — if another thread beat us, keep theirs.
+            let _ = self.inner.initial_value_usd_scaled.compare_exchange(
+                0, scaled, Ordering::SeqCst, Ordering::SeqCst,
+            );
+        }
+    }
+
+    pub fn initial_value_usd(&self) -> f64 {
+        self.inner.initial_value_usd_scaled.load(Ordering::SeqCst) as f64 / 1_000_000.0
+    }
+
+    /// Add to the cumulative realized P&L (in USD). Negative deltas clamp to
+    /// zero change (P&L counter is monotonic — a losing trade would still
+    /// reflect in unrealized via inventory drift, not realized).
+    pub fn add_realized_pnl_usd(&self, delta_usd: f64) {
+        if delta_usd <= 0.0 {
+            return;
+        }
+        let scaled_delta = (delta_usd * 1_000_000.0) as u64;
+        self.inner.realized_pnl_usd_scaled.fetch_add(scaled_delta, Ordering::SeqCst);
+    }
+
+    pub fn realized_pnl_usd(&self) -> f64 {
+        self.inner.realized_pnl_usd_scaled.load(Ordering::SeqCst) as f64 / 1_000_000.0
+    }
+
+    /// Unrealized P&L = current inventory value - initial inventory value - realized P&L.
+    /// Captures inventory drift from SOL price movement, not from arb profit.
+    /// Returns 0 if initial value hasn't been captured yet.
+    pub fn unrealized_pnl_usd(&self) -> f64 {
+        let initial = self.initial_value_usd();
+        if initial <= 0.0 {
+            return 0.0;
+        }
+        self.current_value_usd() - initial - self.realized_pnl_usd()
     }
 }

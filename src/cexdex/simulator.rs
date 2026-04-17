@@ -137,6 +137,18 @@ impl CexDexSimulator {
         let tip_usd = lamports_to_sol(tip_lamports) * sol_price;
         let net_profit_usd = adj_profit_usd - tip_usd - tx_fee_usd;
 
+        // Hard floor: net profit MUST be strictly positive, regardless of config.
+        // Protects against misconfig (e.g. min_profit_usd set to 0) ever approving
+        // a break-even or losing trade. Prefer to fail than send a losing tx.
+        if net_profit_usd <= 0.0 {
+            return SimulationResult::Unprofitable {
+                reason: format!(
+                    "non-positive net profit: net={:.6} usd (gross={:.6}, tip={:.6}, fee={:.6})",
+                    net_profit_usd, gross_profit_usd, tip_usd, tx_fee_usd,
+                ),
+            };
+        }
+
         if net_profit_usd < self.config.min_profit_usd {
             return SimulationResult::Unprofitable {
                 reason: format!(

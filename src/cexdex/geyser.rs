@@ -10,11 +10,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use crossbeam_channel::Sender;
+use solana_sdk::pubkey::Pubkey;
 use tokio::sync::watch;
 use tracing::info;
 
 use crate::config::{BotConfig, RelayEndpoints};
-use crate::mempool::{GeyserStream, PoolStateChange};
+use crate::mempool::{GeyserStream, PoolStateChange, SubscriptionMode};
 use crate::cexdex::price_store::PriceStore;
 
 /// Build a `BotConfig` suitable for the cexdex Geyser subscription.
@@ -72,22 +73,29 @@ pub fn narrow_bot_config(
 /// (the cexdex `StateCache`) and a `PoolStateChange` signal is sent on
 /// `change_tx` so the detector loop knows which pool to re-evaluate.
 ///
+/// `monitored_pools` narrows the LaserStream subscription to exactly those
+/// account pubkeys — cexdex does not need the wide DEX-program-owner
+/// subscription that the main engine uses for lazy pool discovery.
+///
 /// Returns a `JoinHandle` for the spawned task.  The task exits when
 /// `shutdown_rx` fires or the stream encounters a fatal error.
 pub async fn start_geyser(
     config: BotConfig,
     store: PriceStore,
     http_client: reqwest::Client,
+    monitored_pools: Vec<Pubkey>,
     change_tx: Sender<PoolStateChange>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Result<tokio::task::JoinHandle<()>> {
     let pool_count = store.pools.len();
     info!(
-        "Starting narrow Geyser (cexdex), {} pools already in cache",
-        pool_count
+        "Starting narrow Geyser (cexdex), {} pools already in cache, {} monitored accounts",
+        pool_count,
+        monitored_pools.len()
     );
 
-    let stream = GeyserStream::new(Arc::new(config), store.pools.clone(), http_client);
+    let stream = GeyserStream::new(Arc::new(config), store.pools.clone(), http_client)
+        .with_subscription_mode(SubscriptionMode::SpecificAccounts(monitored_pools));
 
     let handle = tokio::spawn(async move {
         if let Err(e) = stream.start(change_tx, shutdown_rx).await {

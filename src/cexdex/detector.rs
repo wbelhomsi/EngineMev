@@ -1,8 +1,11 @@
 //! Divergence detector: compares CEX prices vs on-chain pool prices and
 //! constructs a CexDexRoute for the best opportunity.
 
+use dashmap::DashMap;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Instant;
 
 use crate::addresses;
 use crate::cexdex::inventory::Inventory;
@@ -23,10 +26,23 @@ pub struct DetectorConfig {
     pub min_profit_usd: f64,
     /// Hard cap on trade size in SOL (both directions).
     pub max_trade_size_sol: f64,
+    /// Maximum fraction of TOTAL portfolio (SOL + USDC in SOL-equivalent) to
+    /// spend in a single trade. Prevents draining an entire side of the book
+    /// when the available-side balance is well below `max_trade_size_sol`.
+    /// 0.20 = at most 20% of total inventory per trade.
+    pub max_position_fraction: f64,
     /// Maximum age of the CEX price snapshot before we refuse to act.
     pub cex_staleness_ms: u64,
     /// Fraction of gross profit to discount for slippage (0.25 = 25%).
     pub slippage_tolerance: f64,
+    /// Per-(pool, direction) dedup window. Same (pool, direction) cannot emit
+    /// another route within this window. Prevents the Geyser-tick-driven
+    /// detector from firing the same opportunity 5-10× per second.
+    pub dedup_window_ms: u64,
+    /// Global submit cooldown. After any route is marked dispatched, NO new
+    /// routes (regardless of pool/direction) can be emitted for this window.
+    /// Belt-and-suspenders against multi-pool dup firing in the same burst.
+    pub global_submit_cooldown_ms: u64,
 }
 
 /// Core divergence detector.
@@ -40,6 +56,10 @@ pub struct Detector {
     /// Monitored pools: (dex_type, pool_address).
     pools: Vec<(crate::router::pool::DexType, Pubkey)>,
     config: DetectorConfig,
+    /// Last dispatch timestamp per (pool, direction). Used for dedup_window_ms.
+    last_emit: Arc<DashMap<(Pubkey, ArbDirection), Instant>>,
+    /// Last global dispatch timestamp. Used for global_submit_cooldown_ms.
+    last_global_emit: Arc<std::sync::RwLock<Option<Instant>>>,
 }
 
 fn usdc_mint() -> Pubkey {
@@ -53,7 +73,27 @@ impl Detector {
         pools: Vec<(crate::router::pool::DexType, Pubkey)>,
         config: DetectorConfig,
     ) -> Self {
-        Self { store, inventory, pools, config }
+        Self {
+            store,
+            inventory,
+            pools,
+            config,
+            last_emit: Arc::new(DashMap::new()),
+            last_global_emit: Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
+    /// Call after a route returned from `check_all()` has been dispatched.
+    /// Updates both the per-(pool, direction) and global cooldown timestamps.
+    /// Subsequent `check_all()` calls will skip this (pool, direction) until
+    /// `dedup_window_ms` has passed, and will skip ALL routes until
+    /// `global_submit_cooldown_ms` has passed.
+    pub fn mark_dispatched(&self, pool: Pubkey, direction: ArbDirection) {
+        let now = Instant::now();
+        self.last_emit.insert((pool, direction), now);
+        if let Ok(mut w) = self.last_global_emit.write() {
+            *w = Some(now);
+        }
     }
 
     /// Check all monitored pools against the current CEX price.
@@ -64,6 +104,19 @@ impl Detector {
     /// - Inventory hard cap blocks all directions
     /// - Adjusted profit is below `min_profit_usd`
     pub fn check_all(&self) -> Option<CexDexRoute> {
+        // Gate 0a: global submit cooldown — skip everything if we dispatched
+        // anything recently. Prevents a burst of Geyser events from each
+        // producing a separate submission.
+        if self.config.global_submit_cooldown_ms > 0 {
+            if let Ok(last) = self.last_global_emit.read() {
+                if let Some(t) = *last {
+                    if t.elapsed() < std::time::Duration::from_millis(self.config.global_submit_cooldown_ms) {
+                        return None;
+                    }
+                }
+            }
+        }
+
         // Gate 1: reject stale CEX data
         if self.store.is_stale("SOLUSDC", self.config.cex_staleness_ms) {
             return None;
@@ -79,6 +132,15 @@ impl Detector {
             };
 
             for direction in [ArbDirection::BuyOnDex, ArbDirection::SellOnDex] {
+                // Gate 1.5: per-(pool, direction) dedup window.
+                if self.config.dedup_window_ms > 0 {
+                    if let Some(t) = self.last_emit.get(&(pool_addr, direction)) {
+                        if t.elapsed() < std::time::Duration::from_millis(self.config.dedup_window_ms) {
+                            continue;
+                        }
+                    }
+                }
+
                 // Gate 2: inventory hard cap
                 if !self.inventory.allows_direction(direction) {
                     continue;
@@ -167,7 +229,9 @@ impl Detector {
             return None;
         }
 
-        // Size the trade: bounded by available inventory, pool liquidity cap, and max_trade_size_sol.
+        // Size the trade: bounded by (1) available-side inventory, (2) pool
+        // liquidity cap, (3) max_trade_size_sol, (4) max_position_fraction of
+        // TOTAL portfolio.
         //
         // Pool liquidity cap: limit to 1% of the input-side reserve to avoid excessive
         // price impact that would erase the arb edge. At ~2.7% edge, even 1% of pool
@@ -181,18 +245,35 @@ impl Detector {
             let sol_cap = pool_sol * 0.01;
             sol_from_usdc_cap.min(sol_cap)
         };
+        // Position-fraction cap: max_position_fraction of TOTAL portfolio value
+        // in SOL-equivalent. Prevents draining an entire side (e.g. spending
+        // 100% of USDC in one BuyOnDex trade).
+        let position_fraction_cap_sol = {
+            let sol_on_chain =
+                lamports_to_sol(self.inventory.sol_lamports_available());
+            let usdc_on_chain =
+                atoms_to_usdc(self.inventory.usdc_atoms_available());
+            let total_sol_equiv = sol_on_chain + usdc_on_chain / reference_price;
+            total_sol_equiv * self.config.max_position_fraction
+        };
         let trade_sol = match direction {
             ArbDirection::BuyOnDex => {
                 // We spend USDC to buy SOL — size in SOL equivalent
                 let usdc_available = self.inventory.usdc_atoms_available();
                 let usdc_cap = atoms_to_usdc(usdc_available);
                 let sol_from_usdc = usdc_cap / reference_price;
-                sol_from_usdc.min(max_sol).min(pool_liquidity_cap_sol)
+                sol_from_usdc
+                    .min(max_sol)
+                    .min(pool_liquidity_cap_sol)
+                    .min(position_fraction_cap_sol)
             }
             ArbDirection::SellOnDex => {
                 // We spend SOL to get USDC
                 let sol_available = lamports_to_sol(self.inventory.sol_lamports_available());
-                sol_available.min(max_sol).min(pool_liquidity_cap_sol)
+                sol_available
+                    .min(max_sol)
+                    .min(pool_liquidity_cap_sol)
+                    .min(position_fraction_cap_sol)
             }
         };
 

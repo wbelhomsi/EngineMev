@@ -50,10 +50,26 @@ const MAX_CONCURRENT_RPC: usize = 10;
 /// Minimum interval between vault fetches for the same pool.
 const VAULT_FETCH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How `GeyserStream` builds its account subscription filter.
+///
+/// - `WideByOwner` (default, main engine): subscribes to all accounts owned by
+///   the DEX programs in `BotConfig::monitored_programs()`. Used for lazy pool
+///   discovery and LST stake pool updates — produces thousands of events/sec.
+/// - `SpecificAccounts(pools)`: subscribes only to the given pool account
+///   pubkeys. Used by the cexdex binary which monitors a fixed, small pool set
+///   and would otherwise waste bandwidth + RPC on unrelated pools.
+#[derive(Debug, Clone, Default)]
+pub enum SubscriptionMode {
+    #[default]
+    WideByOwner,
+    SpecificAccounts(Vec<Pubkey>),
+}
+
 pub struct GeyserStream {
     config: Arc<BotConfig>,
     state_cache: StateCache,
     http_client: reqwest::Client,
+    subscription_mode: SubscriptionMode,
     /// Semaphore to cap concurrent RPC calls.
     rpc_semaphore: Arc<tokio::sync::Semaphore>,
     /// Tracks DLMM pools whose bitmap has been checked (found or not).
@@ -75,12 +91,19 @@ impl GeyserStream {
             config,
             state_cache,
             http_client,
+            subscription_mode: SubscriptionMode::default(),
             rpc_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_RPC)),
             bitmap_checked: Arc::new(DashMap::new()),
             vault_last_fetch: Arc::new(DashMap::new()),
             bin_arrays_checked: Arc::new(DashMap::new()),
             tick_arrays_checked: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Override the subscription mode. Default is `WideByOwner` (main engine).
+    pub fn with_subscription_mode(mut self, mode: SubscriptionMode) -> Self {
+        self.subscription_mode = mode;
+        self
     }
 
     /// Start streaming pool state changes via LaserStream gRPC.
@@ -93,43 +116,62 @@ impl GeyserStream {
         tx_sender: Sender<PoolStateChange>,
         mut shutdown_rx: watch::Receiver<bool>,
     ) -> Result<()> {
-        let programs = self.config.monitored_programs();
-        info!(
-            "Starting LaserStream Geyser stream, monitoring {} DEX programs",
-            programs.len()
-        );
-
-        // Build subscription: watch all accounts owned by target DEX programs.
-        // When a swap happens, the pool's token vault accounts get updated.
+        // Build subscription: either wide (by DEX program owner) for the main
+        // engine, or narrow (specific account pubkeys) for cexdex.
         let mut accounts_filter: HashMap<String, SubscribeRequestFilterAccounts> = HashMap::new();
 
-        for (i, program_id) in programs.iter().enumerate() {
-            accounts_filter.insert(
-                format!("dex_{}", i),
-                SubscribeRequestFilterAccounts {
-                    account: vec![],
-                    owner: vec![program_id.to_string()],
-                    filters: vec![],
-                    nonempty_txn_signature: None,
-                },
-            );
-        }
+        match &self.subscription_mode {
+            SubscriptionMode::WideByOwner => {
+                let programs = self.config.monitored_programs();
+                info!(
+                    "Starting LaserStream Geyser stream (wide), monitoring {} DEX programs",
+                    programs.len()
+                );
+                for (i, program_id) in programs.iter().enumerate() {
+                    accounts_filter.insert(
+                        format!("dex_{}", i),
+                        SubscribeRequestFilterAccounts {
+                            account: vec![],
+                            owner: vec![program_id.to_string()],
+                            filters: vec![],
+                            nonempty_txn_signature: None,
+                        },
+                    );
+                }
 
-        // Subscribe to stake pool state accounts for real-time LST rate updates
-        let stake_pool_accounts = vec![
-            crate::config::jito_stake_pool().to_string(),
-            crate::config::blaze_stake_pool().to_string(),
-            crate::config::marinade_state().to_string(),
-        ];
-        accounts_filter.insert(
-            "lst_stake_pools".to_string(),
-            SubscribeRequestFilterAccounts {
-                account: stake_pool_accounts,
-                owner: vec![],
-                filters: vec![],
-                nonempty_txn_signature: None,
-            },
-        );
+                // Stake pool state accounts for real-time LST rate updates —
+                // only relevant when the main engine's LST arb is enabled.
+                let stake_pool_accounts = vec![
+                    crate::config::jito_stake_pool().to_string(),
+                    crate::config::blaze_stake_pool().to_string(),
+                    crate::config::marinade_state().to_string(),
+                ];
+                accounts_filter.insert(
+                    "lst_stake_pools".to_string(),
+                    SubscribeRequestFilterAccounts {
+                        account: stake_pool_accounts,
+                        owner: vec![],
+                        filters: vec![],
+                        nonempty_txn_signature: None,
+                    },
+                );
+            }
+            SubscriptionMode::SpecificAccounts(pools) => {
+                info!(
+                    "Starting LaserStream Geyser stream (narrow), monitoring {} specific pool accounts",
+                    pools.len()
+                );
+                accounts_filter.insert(
+                    "narrow_pools".to_string(),
+                    SubscribeRequestFilterAccounts {
+                        account: pools.iter().map(|p| p.to_string()).collect(),
+                        owner: vec![],
+                        filters: vec![],
+                        nonempty_txn_signature: None,
+                    },
+                );
+            }
+        }
 
         let subscribe_request = SubscribeRequest {
             accounts: accounts_filter,

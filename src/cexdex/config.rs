@@ -31,6 +31,9 @@ pub struct CexDexConfig {
     pub min_spread_bps: u64,
     pub min_profit_usd: f64,
     pub max_trade_size_sol: f64,
+    pub max_position_fraction: f64,
+    pub dedup_window_ms: u64,
+    pub global_submit_cooldown_ms: u64,
 
     // Inventory gates
     pub hard_cap_ratio: f64,
@@ -40,6 +43,9 @@ pub struct CexDexConfig {
 
     // Slippage
     pub slippage_tolerance: f64,
+
+    // Fraction of slippage-adjusted profit offered as tip (separate from main engine's TIP_FRACTION)
+    pub tip_fraction: f64,
 
     // Safety
     pub dry_run: bool,
@@ -101,8 +107,26 @@ impl CexDexConfig {
             .unwrap_or_else(|_| "15".to_string()).parse()?;
         let min_profit_usd: f64 = std::env::var("CEXDEX_MIN_PROFIT_USD")
             .unwrap_or_else(|_| "0.10".to_string()).parse()?;
+        anyhow::ensure!(
+            min_profit_usd > 0.0,
+            "CEXDEX_MIN_PROFIT_USD must be strictly positive (got {}) — never submit a non-profitable bundle",
+            min_profit_usd
+        );
         let max_trade_size_sol: f64 = std::env::var("CEXDEX_MAX_TRADE_SIZE_SOL")
             .unwrap_or_else(|_| "10.0".to_string()).parse()?;
+
+        let max_position_fraction: f64 = std::env::var("CEXDEX_MAX_POSITION_FRACTION")
+            .unwrap_or_else(|_| "0.20".to_string()).parse()?;
+        anyhow::ensure!(
+            max_position_fraction > 0.0 && max_position_fraction <= 1.0,
+            "CEXDEX_MAX_POSITION_FRACTION must be in (0, 1], got {}",
+            max_position_fraction
+        );
+
+        let dedup_window_ms: u64 = std::env::var("CEXDEX_DEDUP_WINDOW_MS")
+            .unwrap_or_else(|_| "500".to_string()).parse()?;
+        let global_submit_cooldown_ms: u64 = std::env::var("CEXDEX_GLOBAL_SUBMIT_COOLDOWN_MS")
+            .unwrap_or_else(|_| "1500".to_string()).parse()?;
 
         let hard_cap_ratio: f64 = std::env::var("CEXDEX_HARD_CAP_RATIO")
             .unwrap_or_else(|_| "0.80".to_string()).parse()?;
@@ -115,6 +139,14 @@ impl CexDexConfig {
 
         let slippage_tolerance: f64 = std::env::var("CEXDEX_SLIPPAGE_TOLERANCE")
             .unwrap_or_else(|_| "0.25".to_string()).parse()?;
+
+        let tip_fraction: f64 = std::env::var("CEXDEX_TIP_FRACTION")
+            .unwrap_or_else(|_| "0.50".to_string()).parse()?;
+        anyhow::ensure!(
+            tip_fraction > 0.0 && tip_fraction < 1.0,
+            "CEXDEX_TIP_FRACTION must be between 0 and 1 (exclusive), got {}",
+            tip_fraction
+        );
 
         let dry_run = std::env::var("CEXDEX_DRY_RUN")
             .unwrap_or_else(|_| "true".to_string()).parse()?;
@@ -148,11 +180,15 @@ impl CexDexConfig {
             min_spread_bps,
             min_profit_usd,
             max_trade_size_sol,
+            max_position_fraction,
+            dedup_window_ms,
+            global_submit_cooldown_ms,
             hard_cap_ratio,
             preferred_low,
             preferred_high,
             skewed_profit_multiplier,
             slippage_tolerance,
+            tip_fraction,
             dry_run,
             pool_state_ttl,
             jito_block_engine_url,

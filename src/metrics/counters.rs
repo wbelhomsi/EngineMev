@@ -114,6 +114,40 @@ pub fn set_blockhash_age_ms(age_ms: u64) {
     gauge!("blockhash_age_ms").set(age_ms as f64);
 }
 
+// ── CEX-DEX P&L ──────────────────────────────────────────────────────────
+//
+// Exposed for the cexdex binary. The main engine ignores these.
+//
+// realized: cumulative arb profit (sum of net_profit_usd per dispatched bundle,
+//           monotonically non-decreasing).
+// unrealized: mark-to-market inventory drift = current_value - initial_value - realized.
+// inventory_value: current MTM value of SOL+USDC balance.
+// initial_inventory_value: snapshot at startup once SOL price is known.
+
+pub fn set_cexdex_realized_pnl_usd(usd: f64) {
+    gauge!("cexdex_realized_pnl_usd").set(usd);
+}
+
+pub fn set_cexdex_unrealized_pnl_usd(usd: f64) {
+    gauge!("cexdex_unrealized_pnl_usd").set(usd);
+}
+
+pub fn set_cexdex_inventory_value_usd(usd: f64) {
+    gauge!("cexdex_inventory_value_usd").set(usd);
+}
+
+pub fn set_cexdex_initial_inventory_value_usd(usd: f64) {
+    gauge!("cexdex_initial_inventory_value_usd").set(usd);
+}
+
+pub fn set_cexdex_inventory_ratio(ratio: f64) {
+    gauge!("cexdex_inventory_ratio").set(ratio);
+}
+
+pub fn set_cexdex_sol_price_usd(usd: f64) {
+    gauge!("cexdex_sol_price_usd").set(usd);
+}
+
 // ── Histograms ────────────────────────────────────────────────────────────
 
 pub fn record_route_calc_duration_us(us: u64) {

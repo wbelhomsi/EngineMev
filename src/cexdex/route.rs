@@ -8,7 +8,7 @@ use solana_sdk::pubkey::Pubkey;
 
 use crate::router::pool::DexType;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArbDirection {
     /// DEX is cheap: we buy SOL on-chain with USDC.
     BuyOnDex,

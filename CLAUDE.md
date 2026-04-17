@@ -36,12 +36,18 @@ This is NOT same-block backrunning. We observe state changes post-block and subm
 
 ### Geyser Subscription Strategy
 
-Subscribe by **DEX program owner** — NOT by individual vault accounts or Token Program.
+Two modes via `SubscriptionMode` (in `mempool::stream`):
+
+**Main engine — `WideByOwner` (default)**: subscribe by DEX program owner across all 9 DEXes + LST stake pool accounts. Required for lazy pool discovery.
 - Geyser streams pool state account updates when swaps happen
 - Per-DEX parsers extract reserves/pricing from pool-specific layouts
 - Category A (Orca, CLMM, DLMM, DAMM v2): reserves derived from pool state directly
 - Category B (Raydium AMM v4, CP): lazy vault balance fetch via `getMultipleAccounts` per swap event
 - Zero-bootstrap: all pools discovered lazily via Geyser (no getProgramAccounts at startup)
+
+**CEX-DEX binary — `SpecificAccounts(pools)`**: subscribe only to the configured `CEXDEX_POOLS` pubkeys. The cexdex binary monitors a fixed, small pool set (typically 4–8 SOL/USDC pools); the wide owner-based subscription would stream every pool change across 9 mainnet DEX programs and fire unnecessary RPC fetches. Narrow mode eliminates that overhead.
+
+NEVER subscribe to Token Program via Geyser — would receive every token transfer on Solana (millions/sec).
 
 ## Key Technical Decisions
 
@@ -298,6 +304,23 @@ Binance SOL/USDC bookTicker WS + narrow Geyser → divergence detector → CEX-p
 
 **First 1h dry-run (2026-04-16):** 25 detections, 15 profitable, $0.25 gross total. Wallet was 100% SOL so only SellOnDex tested. Only 1 of 4 configured pools hit the 5 bps threshold. See `docs/CEXDEX-RUN-2026-04-16.md` for full analysis and recommended parameter changes.
 
+**Safety gates (in `src/cexdex/simulator.rs`):**
+1. Gross profit > 0
+2. Net profit (after tip + fee) strictly positive — HARD FLOOR regardless of `CEXDEX_MIN_PROFIT_USD` config
+3. Net profit >= `CEXDEX_MIN_PROFIT_USD` threshold
+4. Belt-and-suspenders re-check in `src/bin/cexdex.rs` right before `dispatcher.dispatch(...)`
+5. `CEXDEX_MIN_PROFIT_USD` must be strictly positive at config load
+
+**Prometheus gauges for cexdex** (`CEXDEX_METRICS_PORT=9091`):
+- `cexdex_realized_pnl_usd` — cumulative arb profit at dispatch time (monotonic)
+- `cexdex_unrealized_pnl_usd` — inventory MTM drift = current - initial - realized
+- `cexdex_inventory_value_usd` — current SOL+USDC MTM value
+- `cexdex_initial_inventory_value_usd` — captured at first CEX price tick
+- `cexdex_inventory_ratio` — SOL share of portfolio (0=all USDC, 1=all SOL)
+- `cexdex_sol_price_usd` — Binance bid/ask midpoint
+
+Grafana dashboard: `monitoring/provisioning/dashboards/cexdex-pnl.json` (auto-provisioned).
+
 **Before going live:** balance wallet to 50/50, add detector time-dedup, expand pool list, run 4+ hours across volatility windows.
 
 Design spec: `docs/superpowers/specs/2026-04-16-cex-dex-arb-design.md` · Implementation plan: `docs/superpowers/plans/2026-04-16-cex-dex-arb.md`
@@ -378,7 +401,8 @@ See `.env.example`. Key ones:
 - `SEARCHER_KEYPAIR` — Path to signer keypair JSON
 - `DRY_RUN=true` — Log opportunities without submitting (default)
 - `MIN_PROFIT_LAMPORTS` — Minimum net profit to submit (default 100000 = 0.0001 SOL)
-- `TIP_FRACTION` — Fraction of slippage-adjusted profit given as tip (default 0.50)
+- `TIP_FRACTION` — Main engine: fraction of slippage-adjusted profit given as tip (default 0.50)
+- `CEXDEX_TIP_FRACTION` — CEX-DEX binary: separate tip fraction (default 0.50, recommend 0.30 for thin edges)
 - `SLIPPAGE_TOLERANCE` — Discount on estimated profit before tipping (default 0.25 = 25%)
 - `LST_ARB_ENABLED` — Enable LST rate arb (default true)
 - `LST_MIN_SPREAD_BPS` — Minimum spread for LST arb (default 5)

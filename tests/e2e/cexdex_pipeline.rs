@@ -57,8 +57,11 @@ fn detector_config() -> DetectorConfig {
         min_spread_bps: 15,
         min_profit_usd: 0.10,
         max_trade_size_sol: 5.0,
+        max_position_fraction: 1.0,
         cex_staleness_ms: 500,
         slippage_tolerance: 0.25,
+        dedup_window_ms: 0,
+        global_submit_cooldown_ms: 0,
     }
 }
 

@@ -11,7 +11,7 @@ use solana_mev_bot::cexdex::stats::{now_ms, OpportunityRecord, StatsCollector};
 use solana_mev_bot::cexdex::{CexDexConfig, Inventory, PriceStore};
 use solana_mev_bot::config::{BotConfig, RelayEndpoints};
 use solana_mev_bot::executor::relays::{
-    astralane::AstralaneRelay, jito::JitoRelay, Relay,
+    jito::JitoRelay, Relay,
 };
 use solana_mev_bot::executor::{BundleBuilder, RelayDispatcher};
 use solana_mev_bot::feed::binance::run_solusdc_loop;
@@ -63,15 +63,12 @@ async fn main() -> Result<()> {
         .build()?;
 
     // Load searcher wallet.
-    // Note: `rpc_helpers::load_keypair` checks SEARCHER_PRIVATE_KEY (base58) first,
-    // then falls back to the JSON file at the given path. The cexdex config
-    // exposes `CEXDEX_SEARCHER_PRIVATE_KEY`, but the helper only reads
-    // SEARCHER_PRIVATE_KEY. If the cexdex-specific env var is set, mirror it
-    // into SEARCHER_PRIVATE_KEY for this process so the helper picks it up.
+    // `rpc_helpers::load_keypair` reads SEARCHER_PRIVATE_KEY (base58) first, then
+    // falls back to the JSON file. If CEXDEX_SEARCHER_PRIVATE_KEY is set, it must
+    // override SEARCHER_PRIVATE_KEY for this process — the cexdex binary is
+    // documented to use a separate wallet for clean P&L isolation.
     if let Some(pk) = &config.searcher_private_key {
-        if std::env::var("SEARCHER_PRIVATE_KEY").is_err() {
-            std::env::set_var("SEARCHER_PRIVATE_KEY", pk);
-        }
+        std::env::set_var("SEARCHER_PRIVATE_KEY", pk);
     }
     let searcher_keypair = rpc_helpers::load_keypair(&config.searcher_keypair_path)?;
     let searcher_pubkey = searcher_keypair.pubkey();
@@ -154,10 +151,13 @@ async fn main() -> Result<()> {
     );
     let (change_tx, change_rx) =
         bounded::<solana_mev_bot::mempool::PoolStateChange>(1024);
+    let monitored_pool_pubkeys: Vec<solana_sdk::pubkey::Pubkey> =
+        config.pools.iter().map(|(_, pk)| *pk).collect();
     let _geyser_handle = start_geyser(
         bot_config_geyser,
         store.clone(),
         http_client.clone(),
+        monitored_pool_pubkeys,
         change_tx,
         shutdown_rx.clone(),
     )
@@ -168,8 +168,11 @@ async fn main() -> Result<()> {
         min_spread_bps: config.min_spread_bps,
         min_profit_usd: config.min_profit_usd,
         max_trade_size_sol: config.max_trade_size_sol,
+        max_position_fraction: config.max_position_fraction,
         cex_staleness_ms: config.cex_staleness_ms,
         slippage_tolerance: config.slippage_tolerance,
+        dedup_window_ms: config.dedup_window_ms,
+        global_submit_cooldown_ms: config.global_submit_cooldown_ms,
     };
     let detector = Detector::new(
         store.clone(),
@@ -183,7 +186,7 @@ async fn main() -> Result<()> {
         slippage_tolerance: config.slippage_tolerance,
         tx_fee_lamports: 5_000,
         min_tip_lamports: 1_000,
-        tip_fraction: 0.50,
+        tip_fraction: config.tip_fraction,
     };
     let simulator = CexDexSimulator::new(store.clone(), sim_config);
 
@@ -213,7 +216,7 @@ async fn main() -> Result<()> {
             astralane: config.astralane_relay_url.clone(),
             zeroslot: None,
         },
-        tip_fraction: 0.50,
+        tip_fraction: config.tip_fraction,
         min_profit_lamports: 0,
         min_tip_lamports: 1_000,
         max_hops: 1,
@@ -236,12 +239,22 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Single-relay only (Jito) for CEX-DEX arb until the nonce-based
+    // non-equivocation fix is implemented.
+    //
+    // Why: fanning out to multiple relays (Jito + Astralane) produces DIFFERENT
+    // signed txs per relay because each relay requires its OWN tip account
+    // (Jito won't accept Astralane tips and vice versa). Different instructions
+    // → different tx signatures → Solana's signature-uniqueness invariant
+    // doesn't prevent both from landing. For DEX↔DEX arb this is safe because
+    // the second landing's arb-guard check fails due to pool state changes; for
+    // CEX↔DEX single-leg there's no such natural safeguard, and a double-fill
+    // is a real risk. Seen in prod on 2026-04-17 (slot 413825986).
+    //
+    // TODO: implement nonce-based non-equivocation (durable nonce account or
+    // dedicated on-chain marker) to re-enable relay fan-out safely.
     let relays: Vec<Arc<dyn Relay>> = vec![
         Arc::new(JitoRelay::new(&bot_config_relays)),
-        Arc::new(AstralaneRelay::new(
-            &bot_config_relays,
-            shutdown_rx.clone(),
-        )),
     ];
 
     // No ALTs for the MVP — single-leg CEX-DEX tx fits comfortably in a
@@ -253,6 +266,68 @@ async fn main() -> Result<()> {
     dispatcher.warmup().await;
 
     info!("All components initialized, starting detector loop");
+
+    // On-chain balance refresher: polls the wallet every 30s and updates the
+    // inventory tracker. Without this, inventory is frozen at startup values
+    // because commit() is only called by a bundle confirmation tracker (not
+    // yet implemented — MVP uses optimistic release). This keeps the ratio
+    // and MTM gauges truthful even between confirmations.
+    let _balance_handle = {
+        let inv = inventory.clone();
+        let client = http_client.clone();
+        let rpc = config.rpc_url.clone();
+        let wallet = searcher_pubkey;
+        let mut rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            tick.tick().await; // immediate fire is redundant — initial balance already set
+            loop {
+                tokio::select! {
+                    _ = rx.changed() => { if *rx.borrow() { break; } }
+                    _ = tick.tick() => {
+                        match fetch_initial_balances(&client, &rpc, &wallet).await {
+                            Ok((sol, usdc)) => inv.set_on_chain(sol, usdc),
+                            Err(e) => tracing::warn!("balance refresh failed: {}", e),
+                        }
+                    }
+                }
+            }
+        })
+    };
+
+    // P&L gauge updater: samples inventory every second and pushes
+    // realized/unrealized/MTM to Prometheus.
+    let _pnl_handle = {
+        let inv = inventory.clone();
+        let store = store.clone();
+        let mut rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            tick.tick().await; // skip the immediate-first tick
+            loop {
+                tokio::select! {
+                    _ = rx.changed() => {
+                        if *rx.borrow() { break; }
+                    }
+                    _ = tick.tick() => {
+                        if let Some(snap) = store.get_cex("SOLUSDC") {
+                            let price = (snap.best_bid_usd + snap.best_ask_usd) / 2.0;
+                            if price > 0.0 {
+                                inv.set_sol_price_usd(price);
+                                inv.capture_initial_value_usd_if_unset();
+                                solana_mev_bot::metrics::counters::set_cexdex_sol_price_usd(price);
+                            }
+                        }
+                        solana_mev_bot::metrics::counters::set_cexdex_realized_pnl_usd(inv.realized_pnl_usd());
+                        solana_mev_bot::metrics::counters::set_cexdex_unrealized_pnl_usd(inv.unrealized_pnl_usd());
+                        solana_mev_bot::metrics::counters::set_cexdex_inventory_value_usd(inv.current_value_usd());
+                        solana_mev_bot::metrics::counters::set_cexdex_initial_inventory_value_usd(inv.initial_value_usd());
+                        solana_mev_bot::metrics::counters::set_cexdex_inventory_ratio(inv.ratio());
+                    }
+                }
+            }
+        })
+    };
 
     // Stats collector — emits JSON on shutdown for post-run analysis.
     let stats = Arc::new(StatsCollector::new());
@@ -272,6 +347,8 @@ async fn main() -> Result<()> {
         change_rx,
         shutdown_rx,
         stats.clone(),
+        http_client.clone(),
+        searcher_pubkey,
     )
     .await?;
 
@@ -360,6 +437,8 @@ async fn run_detector_loop(
     change_rx: crossbeam_channel::Receiver<solana_mev_bot::mempool::PoolStateChange>,
     mut shutdown_rx: watch::Receiver<bool>,
     stats: Arc<StatsCollector>,
+    http_client: reqwest::Client,
+    searcher_pubkey: solana_sdk::pubkey::Pubkey,
 ) -> Result<()> {
     let rt = tokio::runtime::Handle::current();
     let mut opportunities: u64 = 0;
@@ -499,11 +578,65 @@ async fn run_detector_loop(
             }
         };
 
+        // Belt-and-suspenders: re-verify net profit is strictly positive right
+        // before dispatch. The simulator already gates on this, but checking at
+        // the submission boundary gives us a clean audit trail: nothing flows to
+        // the relay fan-out unless profit > 0 after tip + fee is accounted for.
+        //
+        // CU fees (~200_000 * 5_000 microlamports ≈ 1_000 lamports) are negligible
+        // compared to the 5_000 lamport base tx fee already in sim_config, so we
+        // don't double-count them here.
+        let tip_sol = tip_lamports as f64 / 1e9;
+        let sol_price = (cex_bid + cex_ask) / 2.0;
+        let tip_usd_check = tip_sol * sol_price;
+        if net_profit_usd <= 0.0 || net_profit_usd <= tip_usd_check * 0.01 {
+            warn!(
+                "ABORT submit: net_profit=${:.6} would not cover tip=${:.6} with margin — simulator bug?",
+                net_profit_usd, tip_usd_check,
+            );
+            continue;
+        }
+
+        info!(
+            "SUBMIT: net=${:.4}, tip={} lamports (${:.4}), margin=${:.4}",
+            net_profit_usd, tip_lamports, tip_usd_check, net_profit_usd,
+        );
+
         // Reserve inventory so concurrent detections don't double-spend.
         inventory.reserve(route.direction, route.input_amount, route.expected_output);
 
         // Submit via multi-relay fan-out.
         let _relay_rx = dispatcher.dispatch(&instructions, tip_lamports, blockhash, &rt);
+
+        // Mark this (pool, direction) + global as just-dispatched. Gates the
+        // detector from firing again on the same opportunity until the
+        // cooldowns expire — prevents the Geyser-tick burst from producing
+        // multiple back-to-back submissions against the same pool.
+        detector.mark_dispatched(route.pool_address, route.direction);
+
+        // Realized P&L: count this bundle's net profit at dispatch time. This
+        // is optimistic — in the absence of a bundle confirmation tracker for
+        // cexdex, dispatch is our best proxy for "closed trade." Inventory
+        // drift in `unrealized_pnl_usd` will absorb any variance between the
+        // sim estimate and actual landed profit once confirmation is wired.
+        inventory.add_realized_pnl_usd(net_profit_usd);
+
+        // Fast on-chain balance refresh ~3s after dispatch. Gives the Grafana
+        // `inventory_ratio` + MTM gauges a timely update when a bundle lands
+        // without waiting for the 30s periodic poll. No-op if the bundle
+        // didn't land — we just re-read the unchanged balance.
+        {
+            let inv = inventory.clone();
+            let client = http_client.clone();
+            let rpc = config.rpc_url.clone();
+            let wallet = searcher_pubkey;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                if let Ok((sol, usdc)) = fetch_initial_balances(&client, &rpc, &wallet).await {
+                    inv.set_on_chain(sol, usdc);
+                }
+            });
+        }
 
         // MVP: optimistic release after a fixed delay. A proper confirmation
         // tracker (polling getBundleStatuses / getSignatureStatuses) is a

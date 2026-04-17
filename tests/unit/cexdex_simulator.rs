@@ -126,3 +126,40 @@ fn test_unprofitable_when_profit_below_threshold() {
         _ => panic!("expected unprofitable"),
     }
 }
+
+/// Hard floor: even if min_profit_usd is misconfigured to 0, the simulator MUST
+/// reject any route whose net profit is non-positive after tip + fee.
+#[test]
+fn test_hard_floor_rejects_non_positive_net_even_with_zero_threshold() {
+    let store = PriceStore::new();
+    // Tiny spread: gross profit will be minuscule, min_tip floor (1000 lamports)
+    // plus tx_fee (5000 lamports) will push net to zero or below.
+    let pool = insert_cp_pool(&store, 100_000_000_000, 18_500_900_000, 30);
+    store.update_cex("SOLUSDC", PriceSnapshot {
+        best_bid_usd: 185.0,
+        best_ask_usd: 185.02,
+        received_at: Instant::now(),
+    });
+    let route = mk_route_buy(pool, 1_000_000);
+
+    // Deliberately set min_profit_usd = 0.0 to simulate misconfig.
+    let mut cfg = mk_config();
+    cfg.min_profit_usd = 0.0;
+    let sim = CexDexSimulator::new(store, cfg);
+
+    match sim.simulate(&route) {
+        SimulationResult::Unprofitable { reason } => {
+            assert!(
+                reason.contains("non-positive") || reason.contains("not profitable"),
+                "expected hard-floor rejection, got: {}", reason,
+            );
+        }
+        SimulationResult::Profitable { net_profit_usd, .. } => {
+            assert!(
+                net_profit_usd > 0.0,
+                "CRITICAL: simulator approved non-positive net profit: {}",
+                net_profit_usd,
+            );
+        }
+    }
+}
