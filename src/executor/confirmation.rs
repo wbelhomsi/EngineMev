@@ -22,11 +22,27 @@ const POLL_INTERVAL: Duration = Duration::from_millis(3000);
 /// Maximum number of RPC errors before giving up (avoids hammering rate-limited endpoint).
 const MAX_RPC_ERRORS: u32 = 2;
 
+/// Optional callback invoked when a bundle is confirmed landed on-chain.
+/// Passed to `spawn_confirmation_tracker` — use it to attribute realized P&L,
+/// commit inventory state, etc. Called at most once per bundle. Not invoked
+/// on `Dropped` or `Failed` (tx-level failure).
+pub type OnLandedCallback = Box<dyn FnOnce() + Send + 'static>;
+
 /// Spawn a background task that tracks whether a bundle landed on-chain.
 ///
 /// Collects bundle IDs from the relay result channel, then polls
 /// `getBundleStatuses` (Jito) until one confirms or the timeout expires.
 /// On drop, checks who won the slot to learn from competitors.
+///
+/// If `on_landed` is Some, it is invoked exactly once when the bundle is
+/// confirmed on-chain with no tx-level error. Used by the cexdex binary to
+/// credit realized P&L only on confirmed landings.
+///
+/// If `on_settle` is Some, it is invoked exactly once on EVERY terminal state:
+/// Landed, Failed, Timeout, or RpcError exhaustion. Used by cexdex to release
+/// the nonce pool slot regardless of outcome, preventing nonce leaks when
+/// bundles don't land. In the Landed branch, `on_landed` fires first, then
+/// `on_settle`.
 ///
 /// This function is non-blocking -- it spawns a tokio task and returns immediately.
 pub fn spawn_confirmation_tracker(
@@ -38,8 +54,15 @@ pub fn spawn_confirmation_tracker(
     rpc_url: String,
     pool_address: String,
     trigger_slot: u64,
+    on_landed: Option<OnLandedCallback>,
+    // Fires on EVERY terminal state: Landed, Failed, Timeout, or RpcError
+    // exhaustion. Used by cexdex to release the nonce pool slot regardless
+    // of outcome (prevents nonce leaks when bundles don't land).
+    on_settle: Option<OnLandedCallback>,
 ) {
     tokio::spawn(async move {
+        let mut on_landed = on_landed;
+        let mut on_settle = on_settle;
         // Phase 1: Collect bundle IDs from relay results (with short timeout).
         // Relays typically respond within 1-5 seconds.
         let mut bundle_ids: Vec<String> = Vec::new();
@@ -109,6 +132,9 @@ pub fn spawn_confirmation_tracker(
                 check_competitor(
                     &http_client, &rpc_url, &pool_address, trigger_slot, tip_lamports,
                 ).await;
+                if let Some(cb) = on_settle.take() {
+                    cb();
+                }
                 return;
             }
 
@@ -121,6 +147,12 @@ pub fn spawn_confirmation_tracker(
                     counters::inc_bundles_confirmed();
                     counters::add_confirmed_profit_lamports(estimated_profit_lamports);
                     counters::add_confirmed_tips_paid_lamports(tip_lamports);
+                    if let Some(cb) = on_landed.take() {
+                        cb();
+                    }
+                    if let Some(cb) = on_settle.take() {
+                        cb();
+                    }
                     return;
                 }
                 ConfirmationStatus::Failed => {
@@ -133,6 +165,9 @@ pub fn spawn_confirmation_tracker(
                     check_competitor(
                         &http_client, &rpc_url, &pool_address, trigger_slot, tip_lamports,
                     ).await;
+                    if let Some(cb) = on_settle.take() {
+                        cb();
+                    }
                     return;
                 }
                 ConfirmationStatus::Pending => {
@@ -146,6 +181,9 @@ pub fn spawn_confirmation_tracker(
                             rpc_errors
                         );
                         counters::inc_bundles_dropped();
+                        if let Some(cb) = on_settle.take() {
+                            cb();
+                        }
                         return;
                     }
                     // Backoff: double the wait on RPC error
@@ -538,6 +576,8 @@ mod tests {
             "http://localhost:0".to_string(),
             "TestPool111111111111111111111111111111111".to_string(),
             0,
+            None,
+            None,
         );
         // Give the spawned task a moment to complete
         tokio::time::sleep(Duration::from_millis(200)).await;

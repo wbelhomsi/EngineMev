@@ -594,6 +594,7 @@ async fn main() -> Result<()> {
                                         pool_address.to_string(),
                                         change.slot,
                                         None,
+                                        None,
                                     );
                                 }
                             }

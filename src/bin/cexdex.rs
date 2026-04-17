@@ -737,20 +737,29 @@ async fn run_detector_loop(
 
             solana_mev_bot::metrics::counters::inc_cexdex_bundles_attempted();
 
-            // Per-relay confirmation tracker. On confirmed landing, credit realized
-            // PNL and mark the nonce settled. Task 10 will add on_settle for the
-            // non-land paths (timeout / failed).
+            // Per-relay confirmation tracker.
+            // on_landed: fires only on confirmed landing — credits realized PNL.
+            // on_settle: fires on ALL terminal states (Landed / Failed / Timeout /
+            //   RpcError exhaustion) — releases the nonce pool slot so it can be
+            //   reused by the next opportunity. Prevents nonce leaks on non-landing
+            //   bundles. In the Landed branch both fire in order (PNL first, then
+            //   nonce release).
             let inv_cb = inventory.clone();
             let net = net_profit_usd;
-            let pool_for_release = nonce_pool.clone();
-            let pk_for_release = nonce_pk_opt;
             let on_landed: solana_mev_bot::executor::confirmation::OnLandedCallback =
                 Box::new(move || {
                     inv_cb.add_realized_pnl_usd(net);
-                    if let Some(pk) = pk_for_release {
-                        pool_for_release.mark_settled(pk);
+                });
+
+            let pool_for_settle = nonce_pool.clone();
+            let pk_for_settle = nonce_pk_opt;
+            let on_settle: solana_mev_bot::executor::confirmation::OnLandedCallback =
+                Box::new(move || {
+                    if let Some(pk) = pk_for_settle {
+                        pool_for_settle.mark_settled(pk);
                     }
                 });
+
             let confirm_jito = format!(
                 "{}/api/v1/bundles",
                 config.jito_block_engine_url.trim_end_matches('/'),
@@ -767,6 +776,7 @@ async fn run_detector_loop(
                 route.pool_address.to_string(),
                 route.observed_slot,
                 Some(on_landed),
+                Some(on_settle),
             );
         }
 
