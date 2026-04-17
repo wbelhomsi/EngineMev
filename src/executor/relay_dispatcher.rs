@@ -79,6 +79,52 @@ impl RelayDispatcher {
         rx
     }
 
+    /// True if a relay with this name is configured.
+    pub fn has_relay(&self, name: &str) -> bool {
+        self.relays.iter().any(|r| r.is_configured() && r.name() == name)
+    }
+
+    /// Dispatch to a single named relay. Returns a Receiver yielding exactly
+    /// one RelayResult. Used by cexdex where each relay gets its own tip amount
+    /// and the same nonce so only one bundle can land per opportunity.
+    pub fn dispatch_single(
+        &self,
+        relay_name: &str,
+        base_instructions: &[Instruction],
+        tip_lamports: u64,
+        recent_blockhash: Hash,
+        rt: &tokio::runtime::Handle,
+        nonce: Option<crate::cexdex::NonceInfo>,
+    ) -> tokio::sync::mpsc::Receiver<super::relays::RelayResult> {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let relay_opt = self.relays.iter()
+            .find(|r| r.is_configured() && r.name() == relay_name)
+            .cloned();
+        if let Some(relay) = relay_opt {
+            let ixs = base_instructions.to_vec();
+            let signer = self.signer.clone();
+            let alts = self.alts.clone();
+            rt.spawn(async move {
+                let alt_refs: Vec<&AddressLookupTableAccount> =
+                    alts.iter().map(|a| a.as_ref()).collect();
+                let result = relay.submit(&ixs, tip_lamports, &signer, recent_blockhash, &alt_refs, nonce).await;
+                if result.success {
+                    info!(
+                        "Bundle accepted by {}: id={:?} latency={}us",
+                        result.relay_name, result.bundle_id, result.latency_us,
+                    );
+                } else if let Some(ref err) = result.error {
+                    warn!(
+                        "Bundle REJECTED by {}: {} (latency={}us)",
+                        result.relay_name, err, result.latency_us,
+                    );
+                }
+                let _ = tx.send(result).await;
+            });
+        }
+        rx
+    }
+
     /// Warm up connections — log which relays are configured.
     pub async fn warmup(&self) {
         for relay in &self.relays {

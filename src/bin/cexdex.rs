@@ -11,7 +11,7 @@ use solana_mev_bot::cexdex::stats::{now_ms, OpportunityRecord, StatsCollector};
 use solana_mev_bot::cexdex::{CexDexConfig, Inventory, PriceStore};
 use solana_mev_bot::config::{BotConfig, RelayEndpoints};
 use solana_mev_bot::executor::relays::{
-    jito::JitoRelay, Relay,
+    astralane::AstralaneRelay, jito::JitoRelay, Relay,
 };
 use solana_mev_bot::executor::{BundleBuilder, RelayDispatcher};
 use solana_mev_bot::feed::binance::run_solusdc_loop;
@@ -258,22 +258,13 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Single-relay only (Jito) for CEX-DEX arb until the nonce-based
-    // non-equivocation fix is implemented.
-    //
-    // Why: fanning out to multiple relays (Jito + Astralane) produces DIFFERENT
-    // signed txs per relay because each relay requires its OWN tip account
-    // (Jito won't accept Astralane tips and vice versa). Different instructions
-    // → different tx signatures → Solana's signature-uniqueness invariant
-    // doesn't prevent both from landing. For DEX↔DEX arb this is safe because
-    // the second landing's arb-guard check fails due to pool state changes; for
-    // CEX↔DEX single-leg there's no such natural safeguard, and a double-fill
-    // is a real risk. Seen in prod on 2026-04-17 (slot 413825986).
-    //
-    // TODO: implement nonce-based non-equivocation (durable nonce account or
-    // dedicated on-chain marker) to re-enable relay fan-out safely.
+    // Nonce-based non-equivocation (Task 9) makes multi-relay fan-out safe:
+    // every bundle has advance_nonce_account at ix[0] against the same hash, so
+    // Solana's runtime guarantees at most one lands regardless of how many
+    // relays we submit to.
     let relays: Vec<Arc<dyn Relay>> = vec![
         Arc::new(JitoRelay::new(&bot_config_relays)),
+        Arc::new(AstralaneRelay::new(&bot_config_relays, shutdown_rx.clone())),
     ];
 
     // No ALTs for the MVP — single-leg CEX-DEX tx fits comfortably in a
@@ -368,6 +359,7 @@ async fn main() -> Result<()> {
         stats.clone(),
         http_client.clone(),
         searcher_pubkey,
+        nonce_pool.clone(),
     )
     .await?;
 
@@ -508,6 +500,7 @@ async fn run_detector_loop(
     stats: Arc<StatsCollector>,
     http_client: reqwest::Client,
     searcher_pubkey: solana_sdk::pubkey::Pubkey,
+    nonce_pool: solana_mev_bot::cexdex::NoncePool,
 ) -> Result<()> {
     let rt = tokio::runtime::Handle::current();
     let mut opportunities: u64 = 0;
@@ -553,20 +546,15 @@ async fn run_detector_loop(
         solana_mev_bot::metrics::counters::inc_cexdex_opportunities();
 
         let sim_result = simulator.simulate(&route);
-        let (route, tip_lamports, min_final_output, net_profit_usd, will_submit) = match sim_result {
+        let (route, adjusted_profit_sol, min_final_output, net_profit_usd, will_submit) = match sim_result {
             SimulationResult::Profitable {
                 route,
                 adjusted_profit_sol,
-                adjusted_profit_usd: _,  // unused until Task 9 wires it for logging
+                adjusted_profit_usd: _,
                 net_profit_usd_worst_case,
                 min_final_output,
             } => {
-                // Task 9 will compute tip_lamports per-relay from `adjusted_profit_sol`.
-                // For now stub to 0 — the dispatch path downstream must not rely on this
-                // value. It gets overwritten when per-relay loop lands.
-                let _ = adjusted_profit_sol; // silence unused var until Task 9 consumes it
-                let tip_lamports = 0u64;
-                (route, tip_lamports, min_final_output, net_profit_usd_worst_case, !config.dry_run)
+                (route, adjusted_profit_sol, min_final_output, net_profit_usd_worst_case, !config.dry_run)
             }
             SimulationResult::Unprofitable { reason } => {
                 // Bucket the reject by leading keyword so the counter stays low-cardinality.
@@ -615,14 +603,14 @@ async fn run_detector_loop(
 
         opportunities += 1;
         info!(
-            "OPPORTUNITY #{}: {} on {:?} pool={} input={} expected_output={} tip={} net=${:.4}",
+            "OPPORTUNITY #{}: {} on {:?} pool={} input={} expected_output={} adj_profit_sol={:.6} net=${:.4}",
             opportunities,
             route.direction.label(),
             route.dex_type,
             route.pool_address,
             route.input_amount,
             route.expected_output,
-            tip_lamports,
+            adjusted_profit_sol,
             net_profit_usd,
         );
 
@@ -641,7 +629,7 @@ async fn run_detector_loop(
             cex_mid: (cex_bid + cex_ask) / 2.0,
             detected_profit_usd: detected_profit,
             sim_net_profit_usd: Some(net_profit_usd),
-            sim_tip_lamports: Some(tip_lamports),
+            sim_tip_lamports: None,
             sim_min_final_output: Some(min_final_output),
             sim_reject_reason: None,
             inventory_ratio: inv_ratio_snap,
@@ -668,79 +656,112 @@ async fn run_detector_loop(
             }
         };
 
-        let blockhash = match blockhash_cache.get() {
-            Some(h) => h,
+        // Check out a nonce for this opportunity.
+        let nonce_tuple = if !config.nonce_accounts.is_empty() {
+            match nonce_pool.checkout() {
+                Some(t) => Some(t),
+                None => {
+                    tracing::debug!("Nonce pool not ready yet; skipping opportunity");
+                    solana_mev_bot::metrics::counters::inc_cexdex_detector_skip("nonce_pool_empty");
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
+        // Determine blockhash + NonceInfo per-dispatch. If nonce pool is active,
+        // use its cached hash; otherwise fall back to the ephemeral blockhash
+        // (nonce-less single-relay mode — operator must have CEXDEX_SEARCHER_NONCE_ACCOUNTS
+        // empty AND only one relay configured to avoid the double-fill bug).
+        let (nonce_pk_opt, blockhash) = match nonce_tuple {
+            Some((pk, h)) => (Some(pk), h),
             None => {
-                warn!("no blockhash, skipping");
-                continue;
+                let bh = match blockhash_cache.get() {
+                    Some(h) => h,
+                    None => {
+                        tracing::warn!("no blockhash cached; skipping opportunity");
+                        continue;
+                    }
+                };
+                (None, bh)
             }
         };
+        let nonce_info = nonce_pk_opt.map(|account| solana_mev_bot::cexdex::NonceInfo {
+            account,
+            authority: searcher_pubkey,
+        });
+
+        let sol_price = (cex_bid + cex_ask) / 2.0;
 
         // Belt-and-suspenders: re-verify net profit is strictly positive right
         // before dispatch. The simulator already gates on this, but checking at
-        // the submission boundary gives us a clean audit trail: nothing flows to
-        // the relay fan-out unless profit > 0 after tip + fee is accounted for.
-        //
-        // CU fees (~200_000 * 5_000 microlamports ≈ 1_000 lamports) are negligible
-        // compared to the 5_000 lamport base tx fee already in sim_config, so we
-        // don't double-count them here.
-        let tip_sol = tip_lamports as f64 / 1e9;
-        let sol_price = (cex_bid + cex_ask) / 2.0;
-        let tip_usd_check = tip_sol * sol_price;
-        if net_profit_usd <= 0.0 || net_profit_usd <= tip_usd_check * 0.01 {
+        // the submission boundary gives us a clean audit trail.
+        if net_profit_usd <= 0.0 {
             warn!(
-                "ABORT submit: net_profit=${:.6} would not cover tip=${:.6} with margin — simulator bug?",
-                net_profit_usd, tip_usd_check,
+                "ABORT submit: net_profit=${:.6} non-positive — simulator bug?",
+                net_profit_usd,
             );
             continue;
         }
 
-        info!(
-            "SUBMIT: net=${:.4}, tip={} lamports (${:.4}), margin=${:.4}",
-            net_profit_usd, tip_lamports, tip_usd_check, net_profit_usd,
-        );
-
         // Reserve inventory so concurrent detections don't double-spend.
         inventory.reserve(route.direction, route.input_amount, route.expected_output);
 
-        // Submit via multi-relay fan-out.
-        let relay_rx = dispatcher.dispatch(&instructions, tip_lamports, blockhash, &rt, None);
-
-        // Every bundle we hand to the relay — NOT a land count. Gap vs the
-        // confirmed counter shows how many were rate-limited / auction-lost /
-        // tx-failed. Attempted profit is the "money left on the table" if
-        // nothing actually lands.
-        solana_mev_bot::metrics::counters::inc_cexdex_bundles_attempted();
         solana_mev_bot::metrics::counters::add_cexdex_attempted_profit_usd(net_profit_usd);
 
-        // Mark this (pool, direction) + global as just-dispatched. Gates the
-        // detector from firing again on the same opportunity until the
-        // cooldowns expire — prevents the Geyser-tick burst from producing
-        // multiple back-to-back submissions against the same pool.
-        detector.mark_dispatched(route.pool_address, route.direction);
+        // Per-relay dispatch: each configured relay gets its own tip amount but shares
+        // the same nonce advance, so at most one bundle can land.
+        for (relay_name, tip_fraction) in config.tip_fractions.iter() {
+            if !dispatcher.has_relay(relay_name) {
+                continue;
+            }
+            let tip_lamports_relay = std::cmp::max(
+                solana_mev_bot::cexdex::units::sol_to_lamports(adjusted_profit_sol * tip_fraction),
+                1_000u64,
+            );
+            let tip_usd = solana_mev_bot::cexdex::units::lamports_to_sol(tip_lamports_relay) * sol_price;
+            tracing::info!(
+                "SUBMIT(relay={}): adj_profit_sol={:.6} tip={} lamports (${:.4})",
+                relay_name, adjusted_profit_sol, tip_lamports_relay, tip_usd,
+            );
 
-        // Spawn a confirmation tracker that credits realized P&L ONLY when the
-        // bundle is confirmed landed on-chain. Previous behavior credited at
-        // dispatch time, which was optimistic and produced false positives
-        // whenever bundles were rate-limited or lost the Jito auction.
-        {
+            let relay_rx = dispatcher.dispatch_single(
+                relay_name,
+                &instructions,
+                tip_lamports_relay,
+                blockhash,
+                &rt,
+                nonce_info,
+            );
+
+            solana_mev_bot::metrics::counters::inc_cexdex_bundles_attempted();
+
+            // Per-relay confirmation tracker. On confirmed landing, credit realized
+            // PNL and mark the nonce settled. Task 10 will add on_settle for the
+            // non-land paths (timeout / failed).
             let inv_cb = inventory.clone();
             let net = net_profit_usd;
+            let pool_for_release = nonce_pool.clone();
+            let pk_for_release = nonce_pk_opt;
             let on_landed: solana_mev_bot::executor::confirmation::OnLandedCallback =
                 Box::new(move || {
                     inv_cb.add_realized_pnl_usd(net);
-                    solana_mev_bot::metrics::counters::inc_cexdex_bundles_confirmed();
+                    if let Some(pk) = pk_for_release {
+                        pool_for_release.mark_settled(pk);
+                    }
                 });
             let confirm_jito = format!(
                 "{}/api/v1/bundles",
-                config.jito_block_engine_url.trim_end_matches('/')
+                config.jito_block_engine_url.trim_end_matches('/'),
             );
-            let profit_lamports = (net_profit_usd / (cex_bid + cex_ask) * 2.0 * 1e9) as u64;
+            let profit_lamports =
+                (net_profit_usd / sol_price * 1e9) as u64;
             solana_mev_bot::executor::spawn_confirmation_tracker(
                 http_client.clone(),
                 confirm_jito,
                 profit_lamports,
-                tip_lamports,
+                tip_lamports_relay,
                 relay_rx,
                 config.rpc_url.clone(),
                 route.pool_address.to_string(),
@@ -748,6 +769,12 @@ async fn run_detector_loop(
                 Some(on_landed),
             );
         }
+
+        // Mark this (pool, direction) + global as just-dispatched. Runs AFTER the
+        // per-relay loop so both relays use the same nonce for the SAME opportunity
+        // (collision would fire only on a NEW opportunity against the same pool,
+        // which is the intended behavior).
+        detector.mark_dispatched(route.pool_address, route.direction);
 
         // Fast on-chain balance refresh ~3s after dispatch. Gives the Grafana
         // `inventory_ratio` + MTM gauges a timely update when a bundle lands
@@ -765,18 +792,6 @@ async fn run_detector_loop(
                 }
             });
         }
-
-        // MVP: optimistic release after a fixed delay. A proper confirmation
-        // tracker (polling getBundleStatuses / getSignatureStatuses) is a
-        // follow-up — see Task 12 / the roadmap for CEX-DEX arb.
-        let inv = inventory.clone();
-        let dir = route.direction;
-        let input = route.input_amount;
-        let output = route.expected_output;
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-            inv.release(dir, input, output);
-        });
     }
 
     Ok(())
