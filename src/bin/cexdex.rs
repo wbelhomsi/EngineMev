@@ -154,6 +154,17 @@ async fn main() -> Result<()> {
     let monitored_pool_pubkeys: Vec<solana_sdk::pubkey::Pubkey> =
         config.pools.iter().map(|(_, pk)| *pk).collect();
     let nonce_pool = solana_mev_bot::cexdex::NoncePool::new(config.nonce_accounts.clone());
+    if !config.nonce_accounts.is_empty() {
+        bootstrap_nonce_pool(&http_client, &config.rpc_url, &nonce_pool, &searcher_pubkey)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to bootstrap nonce pool: {}", e))?;
+        info!("Nonce pool bootstrapped: {} accounts", nonce_pool.len());
+    } else {
+        warn!(
+            "CEXDEX_SEARCHER_NONCE_ACCOUNTS empty — nonce-based multi-relay fan-out \
+             disabled; single-relay Jito submission only"
+        );
+    }
     let _geyser_handle = start_geyser(
         bot_config_geyser,
         store.clone(),
@@ -381,6 +392,57 @@ async fn main() -> Result<()> {
     }
 
     let _ = shutdown_tx.send(true);
+    Ok(())
+}
+
+/// Fetch each nonce account's state via RPC, verify authority, and
+/// populate NoncePool's cache. Hard-fails with a clear error if any nonce
+/// is unreachable, un-initialized, or has an authority other than
+/// `searcher_pubkey`. Removes the ~1-2 slot window where checkout()
+/// would return None waiting for the first Geyser delivery.
+async fn bootstrap_nonce_pool(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    pool: &solana_mev_bot::cexdex::NoncePool,
+    searcher_pubkey: &solana_sdk::pubkey::Pubkey,
+) -> anyhow::Result<()> {
+    use base64::{engine::general_purpose, Engine};
+
+    for nonce_pk in pool.pubkeys() {
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getAccountInfo",
+            "params": [nonce_pk.to_string(), {"encoding": "base64"}],
+        });
+        let resp: serde_json::Value =
+            client.post(rpc_url).json(&payload).send().await?.json().await?;
+        let value = resp.get("result").and_then(|r| r.get("value"));
+        let value = match value {
+            Some(v) if !v.is_null() => v,
+            _ => anyhow::bail!("Nonce {} not found on chain", nonce_pk),
+        };
+        let data_b64 = value
+            .get("data")
+            .and_then(|d| d.as_array())
+            .and_then(|a| a.first())
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Nonce {} missing data field", nonce_pk))?;
+        let data = general_purpose::STANDARD.decode(data_b64)?;
+        let (auth, hash) = solana_mev_bot::mempool::parsers::parse_nonce(&data)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Nonce {} is not initialized or wrong layout", nonce_pk)
+            })?;
+        anyhow::ensure!(
+            &auth == searcher_pubkey,
+            "Nonce {} authority mismatch: on-chain={} configured searcher={}",
+            nonce_pk,
+            auth,
+            searcher_pubkey,
+        );
+        pool.update_cached_hash(nonce_pk, hash);
+        tracing::info!("Bootstrapped nonce {} with hash {}", nonce_pk, hash);
+    }
     Ok(())
 }
 
