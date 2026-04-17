@@ -712,6 +712,13 @@ async fn run_detector_loop(
 
         // Per-relay dispatch: each configured relay gets its own tip amount but shares
         // the same nonce advance, so at most one bundle can land.
+
+        // Shared once-guard: only ONE of the N relay trackers for this opportunity
+        // actually calls mark_settled on the nonce. Prevents a "Tracker A settles →
+        // new opportunity picks up same nonce → Tracker B settles late and clears
+        // the newly-in-flight nonce" race.
+        let settled_once = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         for (relay_name, tip_fraction) in config.tip_fractions.iter() {
             if !dispatcher.has_relay(relay_name) {
                 continue;
@@ -757,10 +764,17 @@ async fn run_detector_loop(
 
             let pool_for_settle = nonce_pool.clone();
             let pk_for_settle = nonce_pk_opt;
+            let settled_once_c = settled_once.clone();
             let on_settle: solana_mev_bot::executor::confirmation::OnLandedCallback =
                 Box::new(move || {
-                    if let Some(pk) = pk_for_settle {
-                        pool_for_settle.mark_settled(pk);
+                    // Only the first tracker to settle releases the nonce. Subsequent
+                    // trackers for the same opportunity find the flag already set and
+                    // no-op. Prevents nonce state inconsistency if a second tracker
+                    // settles after a new opportunity has checked out the same nonce.
+                    if !settled_once_c.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        if let Some(pk) = pk_for_settle {
+                            pool_for_settle.mark_settled(pk);
+                        }
                     }
                 });
 
