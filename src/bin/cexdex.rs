@@ -181,12 +181,17 @@ async fn main() -> Result<()> {
         detector_config,
     );
 
+    let max_tip_fraction = config
+        .tip_fractions
+        .values()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
     let sim_config = CexDexSimulatorConfig {
         min_profit_usd: config.min_profit_usd,
         slippage_tolerance: config.slippage_tolerance,
         tx_fee_lamports: 5_000,
         min_tip_lamports: 1_000,
-        tip_fraction: config.tip_fraction,
+        max_tip_fraction,
     };
     let simulator = CexDexSimulator::new(store.clone(), sim_config);
 
@@ -486,10 +491,18 @@ async fn run_detector_loop(
         let (route, tip_lamports, min_final_output, net_profit_usd, will_submit) = match sim_result {
             SimulationResult::Profitable {
                 route,
-                tip_lamports,
+                adjusted_profit_sol,
+                adjusted_profit_usd: _,  // unused until Task 9 wires it for logging
+                net_profit_usd_worst_case,
                 min_final_output,
-                net_profit_usd,
-            } => (route, tip_lamports, min_final_output, net_profit_usd, !config.dry_run),
+            } => {
+                // Task 9 will compute tip_lamports per-relay from `adjusted_profit_sol`.
+                // For now stub to 0 — the dispatch path downstream must not rely on this
+                // value. It gets overwritten when per-relay loop lands.
+                let _ = adjusted_profit_sol; // silence unused var until Task 9 consumes it
+                let tip_lamports = 0u64;
+                (route, tip_lamports, min_final_output, net_profit_usd_worst_case, !config.dry_run)
+            }
             SimulationResult::Unprofitable { reason } => {
                 // Bucket the reject by leading keyword so the counter stays low-cardinality.
                 let bucket = if reason.starts_with("below threshold") {

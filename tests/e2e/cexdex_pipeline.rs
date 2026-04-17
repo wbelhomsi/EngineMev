@@ -71,7 +71,7 @@ fn sim_config() -> CexDexSimulatorConfig {
         slippage_tolerance: 0.25,
         tx_fee_lamports: 5_000,
         min_tip_lamports: 1_000,
-        tip_fraction: 0.50,
+        max_tip_fraction: 0.50,
     }
 }
 
@@ -166,9 +166,9 @@ fn test_cex_dex_pipeline_sell_on_dex() {
 
     let simulator = CexDexSimulator::new(store, sim_config());
     match simulator.simulate(&route) {
-        SimulationResult::Profitable { net_profit_usd, tip_lamports, .. } => {
-            assert!(net_profit_usd > 0.0, "net profit must be positive");
-            assert!(tip_lamports > 0, "tip must be non-zero");
+        SimulationResult::Profitable { net_profit_usd_worst_case, adjusted_profit_sol, .. } => {
+            assert!(net_profit_usd_worst_case > 0.0, "worst-case net profit must be positive");
+            assert!(adjusted_profit_sol > 0.0, "adjusted profit in SOL must be positive");
         }
         SimulationResult::Unprofitable { reason } => panic!("expected profitable: {}", reason),
     }
@@ -228,8 +228,8 @@ fn test_cex_dex_pipeline_rejects_when_state_moves() {
         SimulationResult::Unprofitable { .. } => {
             // Correct: stale state is detected and rejected.
         }
-        SimulationResult::Profitable { net_profit_usd, .. } => {
-            panic!("stale state should have been rejected, got net_profit_usd={net_profit_usd:.4}");
+        SimulationResult::Profitable { net_profit_usd_worst_case, .. } => {
+            panic!("stale state should have been rejected, got net_profit_usd_worst_case={net_profit_usd_worst_case:.4}");
         }
     }
 }

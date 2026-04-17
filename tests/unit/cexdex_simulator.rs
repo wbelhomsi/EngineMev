@@ -60,7 +60,7 @@ fn mk_config() -> CexDexSimulatorConfig {
         slippage_tolerance: 0.25,
         tx_fee_lamports: 5_000,
         min_tip_lamports: 1_000,
-        tip_fraction: 0.50,
+        max_tip_fraction: 0.50,
     }
 }
 
@@ -78,9 +78,14 @@ fn test_profitable_route_passes() {
     let sim = CexDexSimulator::new(store, mk_config());
     let result = sim.simulate(&route);
     match result {
-        SimulationResult::Profitable { net_profit_usd, tip_lamports, min_final_output, .. } => {
-            assert!(net_profit_usd > 0.10);
-            assert!(tip_lamports >= 1_000);
+        SimulationResult::Profitable {
+            net_profit_usd_worst_case,
+            adjusted_profit_sol: _,
+            adjusted_profit_usd: _,
+            min_final_output,
+            ..
+        } => {
+            assert!(net_profit_usd_worst_case > 0.10);
             assert!(min_final_output > 0);
         }
         SimulationResult::Unprofitable { reason } => {
@@ -154,12 +159,49 @@ fn test_hard_floor_rejects_non_positive_net_even_with_zero_threshold() {
                 "expected hard-floor rejection, got: {}", reason,
             );
         }
-        SimulationResult::Profitable { net_profit_usd, .. } => {
+        SimulationResult::Profitable { net_profit_usd_worst_case, .. } => {
             assert!(
-                net_profit_usd > 0.0,
-                "CRITICAL: simulator approved non-positive net profit: {}",
-                net_profit_usd,
+                net_profit_usd_worst_case > 0.0,
+                "CRITICAL: simulator approved non-positive worst-case net profit: {}",
+                net_profit_usd_worst_case,
             );
+        }
+    }
+}
+
+#[test]
+fn profitable_returns_adjusted_profit_sol_and_passes_worst_case_gate() {
+    let store = PriceStore::new();
+    let pool = insert_cp_pool(&store, 100_000_000_000, 18_000_000_000, 30);
+    store.update_cex("SOLUSDC", PriceSnapshot {
+        best_bid_usd: 185.0,
+        best_ask_usd: 185.02,
+        received_at: Instant::now(),
+    });
+    let route = mk_route_buy(pool, 100_000_000);
+
+    // Config with a max tip fraction of 0.40 — sim applies this as worst case.
+    let cfg = CexDexSimulatorConfig {
+        min_profit_usd: 0.05,
+        slippage_tolerance: 0.25,
+        tx_fee_lamports: 5_000,
+        min_tip_lamports: 1_000,
+        max_tip_fraction: 0.40,
+    };
+    let sim = CexDexSimulator::new(store, cfg);
+    match sim.simulate(&route) {
+        SimulationResult::Profitable {
+            adjusted_profit_sol,
+            net_profit_usd_worst_case,
+            min_final_output,
+            ..
+        } => {
+            assert!(adjusted_profit_sol > 0.0, "expected positive adjusted profit");
+            assert!(net_profit_usd_worst_case >= 0.05, "worst-case net must pass min_profit");
+            assert!(min_final_output > 0);
+        }
+        SimulationResult::Unprofitable { reason } => {
+            panic!("expected Profitable; got {}", reason);
         }
     }
 }

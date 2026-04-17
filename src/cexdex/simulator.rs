@@ -2,8 +2,11 @@
 //!
 //! Re-reads fresh pool state (no TTL — arb-guard gates on-chain), re-quotes at the
 //! route's input_amount using current pool reserves, prices the output via the
-//! current CEX mid, calculates tip and net profit in USD, and computes the
-//! on-chain `min_final_output` (conservative, slippage-tolerant).
+//! current CEX mid, and computes the worst-case net profit (using max_tip_fraction)
+//! and the on-chain `min_final_output` (conservative, slippage-tolerant).
+//!
+//! The simulator does NOT compute tip_lamports — that is deferred to dispatch time
+//! so each relay can use its own tip fraction (nonce fan-out, Task 9).
 
 use tracing::debug;
 
@@ -20,10 +23,13 @@ pub struct CexDexSimulatorConfig {
     pub slippage_tolerance: f64,
     /// Estimated on-chain transaction fee in lamports.
     pub tx_fee_lamports: u64,
-    /// Minimum tip in lamports (floor for competitiveness).
+    /// Minimum tip in lamports (floor for competitiveness). Used by the binary
+    /// at dispatch time when computing per-relay tip (Task 9).
     pub min_tip_lamports: u64,
-    /// Fraction of slippage-adjusted profit to offer as tip (0.50 = 50%).
-    pub tip_fraction: f64,
+    /// Highest per-relay tip fraction. The sim uses this to gate the worst case
+    /// (the relay paying the max tip) so any dispatch passing the gate is
+    /// profitable regardless of which relay lands first.
+    pub max_tip_fraction: f64,
 }
 
 /// Result of simulating a `CexDexRoute`.
@@ -31,13 +37,18 @@ pub struct CexDexSimulatorConfig {
 pub enum SimulationResult {
     /// Route passes all gates — proceed to bundle building.
     Profitable {
-        /// The route with `expected_output`, `expected_profit_usd`, and fresh CEX prices written back.
+        /// Route with fresh quote + CEX prices written back.
         route: CexDexRoute,
-        /// Net profit after tip and tx fees, in USD.
-        net_profit_usd: f64,
-        /// Tip in lamports to include in the bundle.
-        tip_lamports: u64,
-        /// Conservative minimum output enforced on-chain by arb-guard.
+        /// Slippage-adjusted gross profit in SOL. Caller computes per-relay
+        /// tip = adjusted_profit_sol * tip_fractions[relay].
+        adjusted_profit_sol: f64,
+        /// Slippage-adjusted gross profit in USD (convenience; used by stats/logging).
+        adjusted_profit_usd: f64,
+        /// Worst-case net after tip (using max_tip_fraction) and tx fee.
+        /// Sim rejected if this was below min_profit_usd — so every Profitable
+        /// return is profitable regardless of which relay lands first.
+        net_profit_usd_worst_case: f64,
+        /// On-chain arb-guard floor (minimum acceptable output).
         min_final_output: u64,
     },
     /// Route fails a gate — do not build a bundle.
@@ -121,7 +132,7 @@ impl CexDexSimulator {
         // Step 5: apply slippage discount.
         let adj_profit_usd = gross_profit_usd * (1.0 - self.config.slippage_tolerance);
 
-        // Step 6: compute tip in lamports.
+        // Step 6: compute worst-case tip using the highest per-relay fraction.
         let sol_price = (cex_bid + cex_ask) / 2.0;
         if sol_price <= 0.0 {
             return SimulationResult::Unprofitable {
@@ -129,31 +140,27 @@ impl CexDexSimulator {
             };
         }
         let adj_profit_sol = adj_profit_usd / sol_price;
-        let tip_sol = adj_profit_sol * self.config.tip_fraction;
-        let tip_lamports = sol_to_lamports(tip_sol).max(self.config.min_tip_lamports);
-
-        // Step 7: subtract tip and tx fees from adjusted profit.
+        let worst_case_tip_sol = adj_profit_sol * self.config.max_tip_fraction;
+        let worst_case_tip_usd = worst_case_tip_sol * sol_price;
         let tx_fee_usd = lamports_to_sol(self.config.tx_fee_lamports) * sol_price;
-        let tip_usd = lamports_to_sol(tip_lamports) * sol_price;
-        let net_profit_usd = adj_profit_usd - tip_usd - tx_fee_usd;
+        let net_profit_usd_worst_case = adj_profit_usd - worst_case_tip_usd - tx_fee_usd;
 
         // Hard floor: net profit MUST be strictly positive, regardless of config.
         // Protects against misconfig (e.g. min_profit_usd set to 0) ever approving
         // a break-even or losing trade. Prefer to fail than send a losing tx.
-        if net_profit_usd <= 0.0 {
+        if net_profit_usd_worst_case <= 0.0 {
             return SimulationResult::Unprofitable {
                 reason: format!(
-                    "non-positive net profit: net={:.6} usd (gross={:.6}, tip={:.6}, fee={:.6})",
-                    net_profit_usd, gross_profit_usd, tip_usd, tx_fee_usd,
+                    "non-positive worst-case net: {:.6} usd (gross={:.6}, worst_tip={:.6}, fee={:.6})",
+                    net_profit_usd_worst_case, gross_profit_usd, worst_case_tip_usd, tx_fee_usd,
                 ),
             };
         }
-
-        if net_profit_usd < self.config.min_profit_usd {
+        if net_profit_usd_worst_case < self.config.min_profit_usd {
             return SimulationResult::Unprofitable {
                 reason: format!(
-                    "below threshold: net={:.6} usd < min={:.4}",
-                    net_profit_usd, self.config.min_profit_usd,
+                    "below threshold: worst-case net {:.6} usd < min={:.4}",
+                    net_profit_usd_worst_case, self.config.min_profit_usd,
                 ),
             };
         }
@@ -185,16 +192,17 @@ impl CexDexSimulator {
             direction=route.direction.label(),
             gross_usd=gross_profit_usd,
             adj_usd=adj_profit_usd,
-            tip_lamports,
-            net_usd=net_profit_usd,
+            adj_sol=adj_profit_sol,
+            worst_case_net_usd=net_profit_usd_worst_case,
             min_final_output,
             "CexDex profitable"
         );
 
         SimulationResult::Profitable {
             route: fresh_route,
-            net_profit_usd,
-            tip_lamports,
+            adjusted_profit_sol: adj_profit_sol,
+            adjusted_profit_usd: adj_profit_usd,
+            net_profit_usd_worst_case,
             min_final_output,
         }
     }
