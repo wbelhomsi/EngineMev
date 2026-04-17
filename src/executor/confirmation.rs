@@ -90,6 +90,11 @@ pub fn spawn_confirmation_tracker(
 
         if bundle_ids.is_empty() {
             debug!("No accepted bundle IDs to track -- all relays rejected or failed");
+            // Release any nonce held by the caller even when we never had a bundle
+            // to track. Otherwise the nonce pool leaks slots on all-relay-rejection.
+            if let Some(cb) = on_settle.take() {
+                cb();
+            }
             return;
         }
 
@@ -581,6 +586,44 @@ mod tests {
         );
         // Give the spawned task a moment to complete
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test]
+    async fn test_tracker_no_bundle_ids_fires_on_settle() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        // Drop sender immediately → relay_rx yields nothing, bundle_ids stays empty
+        drop(tx);
+
+        let settled = Arc::new(AtomicBool::new(false));
+        let settled_c = settled.clone();
+        let on_settle: OnLandedCallback = Box::new(move || {
+            settled_c.store(true, Ordering::SeqCst);
+        });
+
+        let client = reqwest::Client::new();
+        spawn_confirmation_tracker(
+            client,
+            "http://localhost:0".to_string(),
+            100_000,
+            15_000,
+            rx,
+            "http://localhost:0".to_string(),
+            "TestPool111111111111111111111111111111111".to_string(),
+            0,
+            None,
+            Some(on_settle),
+        );
+
+        // Give the spawned task a moment to enter + exit the early return path.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert!(
+            settled.load(Ordering::SeqCst),
+            "on_settle must fire when no bundle IDs are collected, to release the nonce",
+        );
     }
 
     #[tokio::test]
