@@ -177,15 +177,21 @@ pub fn tps_from_env(var_name: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-/// Build a signed, serialized transaction as raw bytes.
+/// Builds a signed tx for a relay bundle: caller's base instructions +
+/// the relay's tip transfer, optionally prefixed by a durable-nonce advance.
 ///
-/// Appends a tip transfer instruction, tries V0 with ALT, falls back to legacy.
-/// Returns Ok(serialized_bytes) or Err(RelayResult).
+/// When `nonce` is `Some(info)`:
+///   - `advance_nonce_account(&info.account, &info.authority)` is prepended at ix[0]
+///   - `recent_blockhash` MUST be the nonce's current cached hash (caller's job)
+///   - The single `signer` signature satisfies both the fee-payer and nonce-
+///     authority roles because we require `info.authority == signer.pubkey()`
+///     by convention for cexdex; this precondition is NOT enforced here.
 ///
-/// After compilation, validates that the tip account is write-locked in the
-/// final message. This prevents Jito rejection ("Bundles must write lock at
-/// least one tip account") caused by V0 message compilation misclassifying
-/// the tip account or ALT resolution edge cases.
+/// When `nonce` is `None`: unchanged from pre-nonce behavior.
+///
+/// After compile, the builder verifies the tip account is write-locked in
+/// the final message. Jito rejects bundles where no tip account is writable;
+/// this guard catches any V0/ALT edge case that drops writability.
 ///
 /// Callers choose their own encoding (base58 or base64) via
 /// [`encode_base58`] or [`encode_base64`].
@@ -197,6 +203,7 @@ pub fn build_signed_bundle_tx(
     signer: &Keypair,
     recent_blockhash: Hash,
     alts: &[&AddressLookupTableAccount],
+    nonce: Option<crate::cexdex::NonceInfo>,
 ) -> Result<Vec<u8>, RelayResult> {
     // Guard: tip must be > 0 to be meaningful for Jito auction
     if tip_lamports == 0 {
@@ -206,7 +213,19 @@ pub fn build_signed_bundle_tx(
         ));
     }
 
-    let mut instructions = base_instructions.to_vec();
+    // Compose the final instruction list:
+    //   [optional nonce_advance] + base_instructions + [tip transfer]
+    let mut instructions: Vec<Instruction> = Vec::with_capacity(base_instructions.len() + 2);
+    if let Some(info) = nonce {
+        use solana_system_interface::instruction::advance_nonce_account;
+        debug_assert_eq!(
+            info.authority,
+            signer.pubkey(),
+            "nonce authority must match signer for single-signer cexdex bundles",
+        );
+        instructions.push(advance_nonce_account(&info.account, &info.authority));
+    }
+    instructions.extend_from_slice(base_instructions);
     instructions.push(system_instruction::transfer(
         &signer.pubkey(),
         tip_account,
@@ -453,7 +472,7 @@ mod tests {
         };
 
         let result = build_signed_bundle_tx(
-            "test", &[base_ix], 50_000, &tip_account, &signer, recent_blockhash, &[],
+            "test", &[base_ix], 50_000, &tip_account, &signer, recent_blockhash, &[], None,
         );
         assert!(result.is_ok(), "Should build successfully: {:?}", result.err());
 
@@ -473,7 +492,7 @@ mod tests {
         let recent_blockhash = Hash::new_unique();
 
         let result = build_signed_bundle_tx(
-            "test", &[], 0, &tip_account, &signer, recent_blockhash, &[],
+            "test", &[], 0, &tip_account, &signer, recent_blockhash, &[], None,
         );
         assert!(result.is_err(), "Should reject zero tip");
         let err = result.unwrap_err();
@@ -615,5 +634,72 @@ mod tests {
         let limiter = RateLimiter::new(Duration::from_secs(10));
         assert!(limiter.check("test").is_ok());
         assert!(limiter.check("test").is_err());
+    }
+
+    #[test]
+    fn builder_prepends_advance_nonce_when_nonce_info_given() {
+        use crate::cexdex::NonceInfo;
+
+        let signer = Keypair::new();
+        let tip_account = Pubkey::new_unique();
+        let nonce_account = Pubkey::new_unique();
+        let nonce_hash = Hash::new_unique();
+        let base_ix = system_instruction::transfer(&signer.pubkey(), &Pubkey::new_unique(), 100);
+
+        let tx_bytes = build_signed_bundle_tx(
+            "test",
+            &[base_ix],
+            50_000,
+            &tip_account,
+            &signer,
+            nonce_hash,
+            &[],
+            Some(NonceInfo {
+                account: nonce_account,
+                authority: signer.pubkey(),
+            }),
+        )
+        .expect("tx should build");
+
+        // Decode the signed versioned tx
+        let tx: solana_sdk::transaction::VersionedTransaction =
+            bincode::deserialize(&tx_bytes).expect("decode");
+
+        // ix[0] must be AdvanceNonceAccount (System Program discriminator 4)
+        let (ix0_data, actual_bh) = match &tx.message {
+            solana_sdk::message::VersionedMessage::Legacy(m) => {
+                (m.instructions[0].data.clone(), m.recent_blockhash)
+            }
+            solana_sdk::message::VersionedMessage::V0(m) => {
+                (m.instructions[0].data.clone(), m.recent_blockhash)
+            }
+            _ => panic!("unexpected message version"),
+        };
+        let disc = u32::from_le_bytes(ix0_data[0..4].try_into().unwrap());
+        assert_eq!(disc, 4, "ix[0] must be System::AdvanceNonceAccount");
+        assert_eq!(actual_bh, nonce_hash, "recent_blockhash must be the nonce hash");
+    }
+
+    #[test]
+    fn builder_unchanged_when_nonce_info_none() {
+        let signer = Keypair::new();
+        let tip_account = Pubkey::new_unique();
+        let hash = Hash::new_unique();
+        let base_ix = system_instruction::transfer(&signer.pubkey(), &Pubkey::new_unique(), 100);
+
+        let tx_bytes = build_signed_bundle_tx(
+            "test", &[base_ix], 50_000, &tip_account, &signer, hash, &[], None,
+        )
+        .expect("tx should build");
+
+        let tx: solana_sdk::transaction::VersionedTransaction =
+            bincode::deserialize(&tx_bytes).expect("decode");
+        let ix0_data = match &tx.message {
+            solana_sdk::message::VersionedMessage::Legacy(m) => m.instructions[0].data.clone(),
+            solana_sdk::message::VersionedMessage::V0(m) => m.instructions[0].data.clone(),
+            _ => panic!("unexpected message version"),
+        };
+        let disc = u32::from_le_bytes(ix0_data[0..4].try_into().unwrap());
+        assert_eq!(disc, 2, "ix[0] must be System::Transfer (the base_ix we passed)");
     }
 }
