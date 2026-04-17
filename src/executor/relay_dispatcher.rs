@@ -40,6 +40,7 @@ impl RelayDispatcher {
         tip_lamports: u64,
         recent_blockhash: Hash,
         rt: &tokio::runtime::Handle,
+        nonce: Option<crate::cexdex::NonceInfo>,
     ) -> tokio::sync::mpsc::Receiver<super::relays::RelayResult> {
         let configured_count = self.relays.iter().filter(|r| r.is_configured()).count();
         let (tx, rx) = tokio::sync::mpsc::channel(configured_count.max(1));
@@ -55,9 +56,10 @@ impl RelayDispatcher {
             let bh = recent_blockhash;
             let alts = self.alts.clone();
             let result_tx = tx.clone();
+            let nonce_for_task = nonce;
             rt.spawn(async move {
                 let alt_refs: Vec<&AddressLookupTableAccount> = alts.iter().map(|a| a.as_ref()).collect();
-                let result = relay.submit(&ixs, tip, &signer, bh, &alt_refs).await;
+                let result = relay.submit(&ixs, tip, &signer, bh, &alt_refs, nonce_for_task).await;
                 if result.success {
                     info!(
                         "Bundle accepted by {}: id={:?} latency={}us",

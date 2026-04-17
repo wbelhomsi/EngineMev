@@ -146,6 +146,7 @@ impl super::Relay for AstralaneRelay {
         signer: &Keypair,
         recent_blockhash: Hash,
         alts: &[&AddressLookupTableAccount],
+        nonce: Option<crate::cexdex::NonceInfo>,
     ) -> RelayResult {
         let url = match &self.endpoint {
             Some(url) => url.clone(),
@@ -165,7 +166,7 @@ impl super::Relay for AstralaneRelay {
         let tip_account = self.next_tip_account();
 
         let serialized = match common::build_signed_bundle_tx(
-            "astralane", base_instructions, tip_lamports, &tip_account, signer, recent_blockhash, alts,
+            "astralane", base_instructions, tip_lamports, &tip_account, signer, recent_blockhash, alts, nonce,
         ) {
             Ok(bytes) => bytes,
             Err(mut r) => {

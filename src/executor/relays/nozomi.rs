@@ -50,6 +50,7 @@ impl super::Relay for NozomiRelay {
         signer: &Keypair,
         recent_blockhash: Hash,
         alts: &[&AddressLookupTableAccount],
+        nonce: Option<crate::cexdex::NonceInfo>,
     ) -> RelayResult {
         let url = match &self.endpoint {
             Some(url) => url.clone(),
@@ -69,7 +70,7 @@ impl super::Relay for NozomiRelay {
         let tip_account = common::random_jito_tip_account();
 
         let serialized = match common::build_signed_bundle_tx(
-            "nozomi", base_instructions, tip_lamports, &tip_account, signer, recent_blockhash, alts,
+            "nozomi", base_instructions, tip_lamports, &tip_account, signer, recent_blockhash, alts, nonce,
         ) {
             Ok(bytes) => bytes,
             Err(mut r) => {

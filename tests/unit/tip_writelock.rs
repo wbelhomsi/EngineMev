@@ -174,6 +174,7 @@ fn test_build_signed_bundle_tx_tip_writable() {
         &signer,
         blockhash,
         &[],
+        None,
     )
     .expect("build_signed_bundle_tx should succeed");
 
@@ -259,6 +260,7 @@ fn test_build_signed_bundle_tx_with_alt_tip_writable() {
         &signer,
         blockhash,
         &[&alt],
+        None,
     )
     .expect("build_signed_bundle_tx with ALT should succeed");
 
@@ -433,6 +435,7 @@ fn test_base58_roundtrip_preserves_tip_writability() {
         &signer,
         blockhash,
         &[],
+        None,
     )
     .expect("build_signed_bundle_tx should succeed");
 

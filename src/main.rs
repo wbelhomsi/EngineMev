@@ -561,6 +561,7 @@ async fn main() -> Result<()> {
                                 // Dispatch to all relays concurrently
                                 let relay_rx = relay_dispatcher.dispatch(
                                     &instructions, tip_lamports, blockhash, &rt,
+                                    None, // main engine uses ephemeral blockhash, not nonce
                                 );
                                 bundles_submitted += 1;
                                 solana_mev_bot::metrics::counters::inc_bundles_submitted();
@@ -592,6 +593,7 @@ async fn main() -> Result<()> {
                                         config.rpc_url.clone(),
                                         pool_address.to_string(),
                                         change.slot,
+                                        None,
                                     );
                                 }
                             }

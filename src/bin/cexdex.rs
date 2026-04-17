@@ -423,7 +423,6 @@ async fn fetch_initial_balances(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 async fn run_detector_loop(
     detector: Detector,
     simulator: CexDexSimulator,
@@ -479,6 +478,10 @@ async fn run_detector_loop(
         let detected_output = route.expected_output;
         let detected_output_mint = route.output_mint.to_string();
 
+        // Every detector hit before sim — "opportunity" means the divergence
+        // survived all detector gates (inventory, spread, min profit pre-sim).
+        solana_mev_bot::metrics::counters::inc_cexdex_opportunities();
+
         let sim_result = simulator.simulate(&route);
         let (route, tip_lamports, min_final_output, net_profit_usd, will_submit) = match sim_result {
             SimulationResult::Profitable {
@@ -488,6 +491,23 @@ async fn run_detector_loop(
                 net_profit_usd,
             } => (route, tip_lamports, min_final_output, net_profit_usd, !config.dry_run),
             SimulationResult::Unprofitable { reason } => {
+                // Bucket the reject by leading keyword so the counter stays low-cardinality.
+                let bucket = if reason.starts_with("below threshold") {
+                    "below_min_profit"
+                } else if reason.starts_with("non-positive") {
+                    "non_positive_net"
+                } else if reason.starts_with("not profitable") {
+                    "no_gross_profit"
+                } else if reason.starts_with("zero output") {
+                    "zero_output"
+                } else if reason.starts_with("invalid CEX") {
+                    "invalid_cex_price"
+                } else if reason.contains("not found") {
+                    "pool_not_cached"
+                } else {
+                    "other"
+                };
+                solana_mev_bot::metrics::counters::inc_cexdex_sim_rejected(bucket);
                 tracing::debug!("sim unprofitable: {}", reason);
                 stats.record(OpportunityRecord {
                     ts_ms: now_ms(),
@@ -606,7 +626,14 @@ async fn run_detector_loop(
         inventory.reserve(route.direction, route.input_amount, route.expected_output);
 
         // Submit via multi-relay fan-out.
-        let _relay_rx = dispatcher.dispatch(&instructions, tip_lamports, blockhash, &rt);
+        let relay_rx = dispatcher.dispatch(&instructions, tip_lamports, blockhash, &rt, None);
+
+        // Every bundle we hand to the relay — NOT a land count. Gap vs the
+        // confirmed counter shows how many were rate-limited / auction-lost /
+        // tx-failed. Attempted profit is the "money left on the table" if
+        // nothing actually lands.
+        solana_mev_bot::metrics::counters::inc_cexdex_bundles_attempted();
+        solana_mev_bot::metrics::counters::add_cexdex_attempted_profit_usd(net_profit_usd);
 
         // Mark this (pool, direction) + global as just-dispatched. Gates the
         // detector from firing again on the same opportunity until the
@@ -614,12 +641,35 @@ async fn run_detector_loop(
         // multiple back-to-back submissions against the same pool.
         detector.mark_dispatched(route.pool_address, route.direction);
 
-        // Realized P&L: count this bundle's net profit at dispatch time. This
-        // is optimistic — in the absence of a bundle confirmation tracker for
-        // cexdex, dispatch is our best proxy for "closed trade." Inventory
-        // drift in `unrealized_pnl_usd` will absorb any variance between the
-        // sim estimate and actual landed profit once confirmation is wired.
-        inventory.add_realized_pnl_usd(net_profit_usd);
+        // Spawn a confirmation tracker that credits realized P&L ONLY when the
+        // bundle is confirmed landed on-chain. Previous behavior credited at
+        // dispatch time, which was optimistic and produced false positives
+        // whenever bundles were rate-limited or lost the Jito auction.
+        {
+            let inv_cb = inventory.clone();
+            let net = net_profit_usd;
+            let on_landed: solana_mev_bot::executor::confirmation::OnLandedCallback =
+                Box::new(move || {
+                    inv_cb.add_realized_pnl_usd(net);
+                    solana_mev_bot::metrics::counters::inc_cexdex_bundles_confirmed();
+                });
+            let confirm_jito = format!(
+                "{}/api/v1/bundles",
+                config.jito_block_engine_url.trim_end_matches('/')
+            );
+            let profit_lamports = (net_profit_usd / (cex_bid + cex_ask) * 2.0 * 1e9) as u64;
+            solana_mev_bot::executor::spawn_confirmation_tracker(
+                http_client.clone(),
+                confirm_jito,
+                profit_lamports,
+                tip_lamports,
+                relay_rx,
+                config.rpc_url.clone(),
+                route.pool_address.to_string(),
+                route.observed_slot,
+                Some(on_landed),
+            );
+        }
 
         // Fast on-chain balance refresh ~3s after dispatch. Gives the Grafana
         // `inventory_ratio` + MTM gauges a timely update when a bundle lands

@@ -39,5 +39,6 @@ pub trait Relay: Send + Sync {
         signer: &Keypair,
         recent_blockhash: Hash,
         alts: &[&AddressLookupTableAccount],
+        nonce: Option<crate::cexdex::NonceInfo>,
     ) -> RelayResult;
 }

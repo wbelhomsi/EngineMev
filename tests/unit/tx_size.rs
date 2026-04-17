@@ -156,6 +156,7 @@ fn test_build_signed_bundle_tx_rejects_oversized() {
         &signer,
         blockhash,
         &[],
+        None,
     );
 
     assert!(result.is_err(), "oversized tx must return Err");
@@ -198,6 +199,7 @@ fn test_build_signed_bundle_tx_accepts_small() {
         &signer,
         blockhash,
         &[],
+        None,
     );
 
     assert!(result.is_ok(), "small tx must succeed");
