@@ -795,6 +795,7 @@ async fn run_detector_loop(
                 route.observed_slot,
                 Some(on_landed),
                 Some(on_settle),
+                Some(relay_name.clone()),
             );
         }
 

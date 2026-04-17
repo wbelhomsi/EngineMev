@@ -59,10 +59,15 @@ pub fn spawn_confirmation_tracker(
     // exhaustion. Used by cexdex to release the nonce pool slot regardless
     // of outcome (prevents nonce leaks when bundles don't land).
     on_settle: Option<OnLandedCallback>,
+    // When Some, non-landing terminal paths increment the per-relay
+    // cexdex_bundles_dropped_total{relay} counter so Grafana shows
+    // per-relay drop rate. Main engine passes None (uses unlabelled counter).
+    relay_name: Option<String>,
 ) {
     tokio::spawn(async move {
         let mut on_landed = on_landed;
         let mut on_settle = on_settle;
+        let relay_name = relay_name;
         // Phase 1: Collect bundle IDs from relay results (with short timeout).
         // Relays typically respond within 1-5 seconds.
         let mut bundle_ids: Vec<String> = Vec::new();
@@ -90,6 +95,9 @@ pub fn spawn_confirmation_tracker(
 
         if bundle_ids.is_empty() {
             debug!("No accepted bundle IDs to track -- all relays rejected or failed");
+            if let Some(ref name) = relay_name {
+                counters::inc_cexdex_bundles_dropped(name);
+            }
             // Release any nonce held by the caller even when we never had a bundle
             // to track. Otherwise the nonce pool leaks slots on all-relay-rejection.
             if let Some(cb) = on_settle.take() {
@@ -132,6 +140,9 @@ pub fn spawn_confirmation_tracker(
                     trigger_slot,
                 );
                 counters::inc_bundles_dropped();
+                if let Some(ref name) = relay_name {
+                    counters::inc_cexdex_bundles_dropped(name);
+                }
 
                 // Competitor analysis: check who transacted on this pool in the next few slots
                 check_competitor(
@@ -166,6 +177,9 @@ pub fn spawn_confirmation_tracker(
                         pool_address, trigger_slot
                     );
                     counters::inc_bundles_dropped();
+                    if let Some(ref name) = relay_name {
+                        counters::inc_cexdex_bundles_dropped(name);
+                    }
 
                     check_competitor(
                         &http_client, &rpc_url, &pool_address, trigger_slot, tip_lamports,
@@ -186,6 +200,9 @@ pub fn spawn_confirmation_tracker(
                             rpc_errors
                         );
                         counters::inc_bundles_dropped();
+                        if let Some(ref name) = relay_name {
+                            counters::inc_cexdex_bundles_dropped(name);
+                        }
                         if let Some(cb) = on_settle.take() {
                             cb();
                         }
@@ -583,6 +600,7 @@ mod tests {
             0,
             None,
             None,
+            None,
         );
         // Give the spawned task a moment to complete
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -615,6 +633,7 @@ mod tests {
             0,
             None,
             Some(on_settle),
+            None,
         );
 
         // Give the spawned task a moment to enter + exit the early return path.
