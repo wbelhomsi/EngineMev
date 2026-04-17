@@ -153,11 +153,14 @@ async fn main() -> Result<()> {
         bounded::<solana_mev_bot::mempool::PoolStateChange>(1024);
     let monitored_pool_pubkeys: Vec<solana_sdk::pubkey::Pubkey> =
         config.pools.iter().map(|(_, pk)| *pk).collect();
+    let nonce_pool = solana_mev_bot::cexdex::NoncePool::new(config.nonce_accounts.clone());
     let _geyser_handle = start_geyser(
         bot_config_geyser,
         store.clone(),
         http_client.clone(),
         monitored_pool_pubkeys,
+        nonce_pool.clone(),
+        searcher_pubkey,
         change_tx,
         shutdown_rx.clone(),
     )

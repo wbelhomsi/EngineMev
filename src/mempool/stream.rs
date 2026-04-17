@@ -83,6 +83,13 @@ pub struct GeyserStream {
     /// Tracks CLMM pools whose tick arrays have been fetched.
     /// Keyed by (pool_address, tick_array_start_index) to re-fetch when tick crosses array boundary.
     tick_arrays_checked: Arc<DashMap<Pubkey, i32>>,
+    /// If Some, account updates matching these pubkeys (80 bytes, System
+    /// Program-owned) are parsed as nonce accounts and update the pool
+    /// instead of falling through to DEX parsers.
+    nonce_pool: Option<crate::cexdex::NoncePool>,
+    /// Expected authority for managed nonces. Updates with a different
+    /// authority are logged and skipped (defense-in-depth).
+    nonce_authority: Option<solana_sdk::pubkey::Pubkey>,
 }
 
 impl GeyserStream {
@@ -97,12 +104,27 @@ impl GeyserStream {
             vault_last_fetch: Arc::new(DashMap::new()),
             bin_arrays_checked: Arc::new(DashMap::new()),
             tick_arrays_checked: Arc::new(DashMap::new()),
+            nonce_pool: None,
+            nonce_authority: None,
         }
     }
 
     /// Override the subscription mode. Default is `WideByOwner` (main engine).
     pub fn with_subscription_mode(mut self, mode: SubscriptionMode) -> Self {
         self.subscription_mode = mode;
+        self
+    }
+
+    /// Register a `NoncePool` whose accounts should be short-circuited to the
+    /// nonce parser instead of the DEX parsers when Geyser delivers updates.
+    /// The authority is used as a sanity check on each parsed nonce.
+    pub fn with_nonce_pool(
+        mut self,
+        pool: crate::cexdex::NoncePool,
+        authority: solana_sdk::pubkey::Pubkey,
+    ) -> Self {
+        self.nonce_pool = Some(pool);
+        self.nonce_authority = Some(authority);
         self
     }
 
@@ -255,6 +277,31 @@ impl GeyserStream {
                     Err(_) => return,
                 };
                 let pool_address = Pubkey::new_from_array(pubkey_bytes);
+
+                // Nonce short-circuit: 80 bytes, System Program owner, registered pubkey.
+                // Handled before pool-parser dispatch and returns without forwarding
+                // a PoolStateChange event (nonces aren't pool state).
+                if data.len() == 80 {
+                    if let (Some(np), Some(auth)) = (&self.nonce_pool, &self.nonce_authority) {
+                        if account_info.owner == solana_system_interface::program::id().to_bytes().to_vec()
+                            && np.contains(&pool_address)
+                        {
+                            if let Some((parsed_auth, hash)) =
+                                crate::mempool::parsers::parse_nonce(data)
+                            {
+                                if &parsed_auth == auth {
+                                    np.update_cached_hash(pool_address, hash);
+                                } else {
+                                    tracing::warn!(
+                                        "Nonce {} authority mismatch: parsed={} expected={}",
+                                        pool_address, parsed_auth, auth,
+                                    );
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
 
                 // Check for stake pool account updates (LST rate changes)
                 let jito_pool = crate::config::jito_stake_pool();

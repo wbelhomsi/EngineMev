@@ -77,6 +77,10 @@ pub fn narrow_bot_config(
 /// account pubkeys — cexdex does not need the wide DEX-program-owner
 /// subscription that the main engine uses for lazy pool discovery.
 ///
+/// `nonce_pool` adds the managed nonce accounts to the subscription list so
+/// Geyser delivers real-time hash updates; `searcher_pubkey` is used as a
+/// sanity-check authority on each parsed nonce update.
+///
 /// Returns a `JoinHandle` for the spawned task.  The task exits when
 /// `shutdown_rx` fires or the stream encounters a fatal error.
 pub async fn start_geyser(
@@ -84,18 +88,27 @@ pub async fn start_geyser(
     store: PriceStore,
     http_client: reqwest::Client,
     monitored_pools: Vec<Pubkey>,
+    nonce_pool: crate::cexdex::NoncePool,
+    searcher_pubkey: solana_sdk::pubkey::Pubkey,
     change_tx: Sender<PoolStateChange>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Result<tokio::task::JoinHandle<()>> {
+    // Combined subscription list: pools + nonces.
+    let mut subscription: Vec<Pubkey> = monitored_pools.clone();
+    subscription.extend(nonce_pool.pubkeys());
+
     let pool_count = store.pools.len();
     info!(
-        "Starting narrow Geyser (cexdex), {} pools already in cache, {} monitored accounts",
+        "Starting narrow Geyser (cexdex): {} pools in cache, {} pool accounts + {} nonce accounts = {} monitored total",
         pool_count,
-        monitored_pools.len()
+        monitored_pools.len(),
+        nonce_pool.len(),
+        subscription.len(),
     );
 
     let stream = GeyserStream::new(Arc::new(config), store.pools.clone(), http_client)
-        .with_subscription_mode(SubscriptionMode::SpecificAccounts(monitored_pools));
+        .with_subscription_mode(SubscriptionMode::SpecificAccounts(subscription))
+        .with_nonce_pool(nonce_pool, searcher_pubkey);
 
     let handle = tokio::spawn(async move {
         if let Err(e) = stream.start(change_tx, shutdown_rx).await {
