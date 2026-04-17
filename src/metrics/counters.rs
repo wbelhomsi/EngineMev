@@ -148,6 +148,65 @@ pub fn set_cexdex_sol_price_usd(usd: f64) {
     gauge!("cexdex_sol_price_usd").set(usd);
 }
 
+/// Total detector hits (routes returned from check_all()).
+pub fn inc_cexdex_opportunities() {
+    counter!("cexdex_opportunities_total").increment(1);
+}
+
+/// Detector-level skip diagnostic. Labels why check_all() returned None at
+/// each decision point. High-cardinality-safe — labels are a fixed set of
+/// reason strings. Use to answer "why no opportunities?" without log diving.
+pub fn inc_cexdex_detector_skip(reason: &'static str) {
+    counter!("cexdex_detector_skip_total", "reason" => reason).increment(1);
+}
+
+/// Total simulator rejections (grouped by reason label).
+pub fn inc_cexdex_sim_rejected(reason: &str) {
+    counter!("cexdex_sim_rejected_total", "reason" => reason.to_string()).increment(1);
+}
+
+/// Every bundle we handed off to the relay dispatcher. NOT a land count.
+pub fn inc_cexdex_bundles_attempted() {
+    counter!("cexdex_bundles_attempted_total").increment(1);
+}
+
+/// Bundles confirmed on-chain via getBundleStatuses.
+pub fn inc_cexdex_bundles_confirmed() {
+    counter!("cexdex_bundles_confirmed_total").increment(1);
+}
+
+/// Bundles that never landed (timed out or rejected by Jito).
+pub fn inc_cexdex_bundles_dropped() {
+    counter!("cexdex_bundles_dropped_total").increment(1);
+}
+
+/// Sum of simulator net_profit_usd for every dispatched bundle. "Money we'd
+/// have earned if everything landed" — gap vs cexdex_realized_pnl_usd = loss
+/// to rate-limits, auction losses, and CEX drift.
+pub fn add_cexdex_attempted_profit_usd(usd: f64) {
+    // metrics crate counters accept u64; scale usd * 1_000_000 for 6-decimal precision.
+    if usd > 0.0 {
+        counter!("cexdex_attempted_profit_usd_micros_total").increment((usd * 1_000_000.0) as u64);
+    }
+}
+
+/// Fires when checkout returned an in-flight nonce — signal we need
+/// more nonce accounts.
+pub fn inc_cexdex_nonce_collision_total() {
+    counter!("cexdex_nonce_collision_total").increment(1);
+}
+
+/// Gauge (0..N) of the number of nonces currently in-flight.
+pub fn set_cexdex_nonce_in_flight(count: usize) {
+    gauge!("cexdex_nonce_in_flight").set(count as f64);
+}
+
+/// Increments on every Geyser-driven nonce state update. Used to
+/// sanity-check that Geyser is keeping the cache current.
+pub fn inc_cexdex_nonce_hash_refresh_total() {
+    counter!("cexdex_nonce_hash_refresh_total").increment(1);
+}
+
 // ── Histograms ────────────────────────────────────────────────────────────
 
 pub fn record_route_calc_duration_us(us: u64) {
