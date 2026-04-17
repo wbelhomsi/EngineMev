@@ -22,7 +22,13 @@ pub fn parse_nonce(data: &[u8]) -> Option<(Pubkey, Hash)> {
     if data.len() < 72 {
         return None;
     }
-    // Accept both Versions::Legacy (0) and Versions::Current (1) — same Data layout.
+    // Accept both Versions::Legacy (0) and Versions::Current (1). Both have
+    // identical Data layout. Any other value (e.g. a hypothetical future
+    // Versions::V2) would likely shift offsets; reject rather than misparse.
+    let versions_tag = u32::from_le_bytes(data[0..4].try_into().ok()?);
+    if versions_tag > 1 {
+        return None;
+    }
     let state_tag = u32::from_le_bytes(data[4..8].try_into().ok()?);
     if state_tag != 1 {
         return None; // not Initialized
@@ -92,5 +98,12 @@ mod tests {
             authority,
             Pubkey::from_str("6T3hyzTz59ZCj18P9LQ6VKEVA2x7xT5jEPV7394b3Hxt").unwrap()
         );
+    }
+
+    #[test]
+    fn rejects_unknown_versions_tag() {
+        let mut data = initialized_bytes();
+        data[0] = 2; // tag=2 is not Legacy(0) or Current(1) — reject
+        assert!(parse_nonce(&data).is_none());
     }
 }
