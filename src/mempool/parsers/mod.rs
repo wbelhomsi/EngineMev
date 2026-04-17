@@ -1,3 +1,4 @@
+pub mod nonce;
 pub mod orca;
 pub mod raydium_clmm;
 pub mod raydium_amm;
@@ -8,6 +9,7 @@ pub mod phoenix;
 pub mod manifest;
 pub mod pumpswap;
 
+pub use nonce::parse_nonce;
 pub use orca::parse_orca_whirlpool;
 pub use raydium_clmm::parse_raydium_clmm;
 pub use raydium_amm::parse_raydium_amm_v4;
