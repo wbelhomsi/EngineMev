@@ -1,0 +1,44 @@
+[
+  {
+    "ticker": "AAPLx",
+    "pool": "CKwJZwm7oj3nu4653N1EpDrqXbXAYXoPFiPeEnLouF8y",
+    "dex": "RaydiumClmm",
+    "token_decimals": 8
+  },
+  {
+    "ticker": "MSFTx",
+    "pool": "CLu4kFM4nb67xrdN7vJnMxXXir8Z5hA4HJUzPFccXjsL",
+    "dex": "RaydiumClmm",
+    "token_decimals": 8
+  },
+  {
+    "ticker": "NVDAx",
+    "pool": "4KqQN6u1pFKroFE2jVEhoepAMRKPcuAzWVDCgm9zRBYN",
+    "dex": "RaydiumClmm",
+    "token_decimals": 8
+  },
+  {
+    "ticker": "GOOGLx",
+    "pool": "B8YAwjGYk6qidWzGBXMAxP7nYfG8g74EZ3Y4gFSsobRw",
+    "dex": "RaydiumClmm",
+    "token_decimals": 8
+  },
+  {
+    "ticker": "METAx",
+    "pool": "3L7KbPVaAQA4UTecaGQYsm6UCq5F3sZM9zAYkxqYt63j",
+    "dex": "RaydiumClmm",
+    "token_decimals": 8
+  },
+  {
+    "ticker": "AMZNx",
+    "pool": "6m5aXAve4uh6Kt4ytKyCLWNMjd8PYP5vujwNCtycrUiD",
+    "dex": "RaydiumClmm",
+    "token_decimals": 8
+  },
+  {
+    "ticker": "TSLAx",
+    "pool": "HHQUnUbmWLrYzkscDY1C3deEFbGtiGBGoHjpANogmvum",
+    "dex": "RaydiumClmm",
+    "token_decimals": 8
+  }
+]

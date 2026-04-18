@@ -106,6 +106,10 @@ path = "src/bin/cexdex.rs"
 name = "solana-mev-bot"
 path = "src/main.rs"
 
+[[bin]]
+name = "xstocks_probe"
+path = "src/bin/xstocks_probe.rs"
+
 [lints.clippy]
 # Allow these in a fast-moving MEV bot codebase
 too_many_arguments = "allow"

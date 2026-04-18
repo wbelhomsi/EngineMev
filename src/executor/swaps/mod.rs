@@ -1,4 +1,5 @@
 pub mod manifest;
+pub mod manifest_mm;
 pub mod meteora_damm_v2;
 pub mod meteora_dlmm;
 pub mod orca;
