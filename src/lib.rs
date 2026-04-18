@@ -5,6 +5,7 @@ pub mod executor;
 pub mod feed;
 pub mod mempool;
 pub mod metrics;
+pub mod mm;
 pub mod router;
 pub mod rpc_helpers;
 pub mod sanctum;
