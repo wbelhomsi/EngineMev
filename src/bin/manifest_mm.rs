@@ -24,10 +24,11 @@
 //!   MM_DRY_RUN=true cargo run --release --bin manifest_mm
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use serde::Serialize;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use tracing::{info, warn};
@@ -37,7 +38,16 @@ use solana_mev_bot::executor::swaps::manifest_mm::{
     build_batch_update_ix, order_type, CancelOrderParams, PlaceOrderParams,
 };
 use solana_mev_bot::feed::binance::run_solusdc_loop;
+use solana_mev_bot::mempool::parsers::parse_manifest_market;
 use solana_mev_bot::mm::{BookState, MmConfig, Quoter, QuoterConfig};
+
+/// Lightweight snapshot of the Manifest market's top-of-book.
+#[derive(Debug, Clone, Copy)]
+struct BookSnapshot {
+    best_bid_ui: Option<f64>,
+    best_ask_ui: Option<f64>,
+    fetched_at_ms: u64,
+}
 
 #[derive(Debug, Serialize)]
 struct QuoteLogEntry {
@@ -58,6 +68,16 @@ struct QuoteLogEntry {
     would_cancel_count: usize,
     would_place_count: usize,
     dry_run: bool,
+    // Live Manifest book snapshot (background-polled every 2s). Lets us
+    // see whether our quoter sits inside, at, or outside the existing book.
+    book_best_bid_ui: Option<f64>,
+    book_best_ask_ui: Option<f64>,
+    book_snapshot_age_ms: Option<u64>,
+    /// Positive = our bid is *above* the book's best bid (inside the spread).
+    /// Negative = below (outside, safer but no fills).
+    our_bid_inside_bps: Option<f64>,
+    /// Positive = our ask is *below* the book's best ask (inside).
+    our_ask_inside_bps: Option<f64>,
 }
 
 #[tokio::main]
@@ -113,6 +133,58 @@ async fn main() -> Result<()> {
     let binance_shutdown = shutdown_rx.clone();
     let binance_handle =
         tokio::spawn(async move { run_solusdc_loop(binance_store, binance_shutdown).await });
+
+    // Manifest book snapshot poller — every 2s, fetch the market account
+    // and decode top-of-book so the quote log can compare our target
+    // prices to the live book.
+    let book_snapshot: Arc<RwLock<Option<BookSnapshot>>> = Arc::new(RwLock::new(None));
+    let snap_writer = book_snapshot.clone();
+    let book_rpc_url = cfg.rpc_url.clone();
+    let book_market = cfg.market;
+    let book_base_dec = cfg.base_decimals;
+    let book_quote_dec = cfg.quote_decimals;
+    let book_shutdown = shutdown_rx.clone();
+    tokio::spawn(async move {
+        let http = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("book poller: failed to build http client: {}", e);
+                return;
+            }
+        };
+        let mut tick = tokio::time::interval(Duration::from_secs(2));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    match fetch_book_snapshot(&http, &book_rpc_url, &book_market, book_base_dec, book_quote_dec).await {
+                        Ok(Some(snap)) => {
+                            if let Ok(mut g) = snap_writer.write() {
+                                *g = Some(snap);
+                            }
+                        }
+                        Ok(None) => {
+                            // Market fetched but no best bid/ask — empty book.
+                        }
+                        Err(e) => {
+                            warn!("book poller: fetch failed: {}", e);
+                        }
+                    }
+                }
+                _ = async {
+                    let mut rx = book_shutdown.clone();
+                    rx.changed().await.ok();
+                } => {
+                    if *book_shutdown.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
 
     // Quoter.
     let quoter = Quoter::new(QuoterConfig {
@@ -221,10 +293,35 @@ async fn main() -> Result<()> {
                     new_orders.clone(),
                 );
 
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)?
+                    .as_millis() as u64;
+                // Cross-reference our quote against the latest Manifest book
+                // snapshot. Values all `None` when the book has no orders
+                // or the background poller hasn't produced a snapshot yet.
+                let snap = book_snapshot.read().ok().and_then(|g| *g);
+                let (book_bid, book_ask, snap_age_ms, our_bid_bps, our_ask_bps) =
+                    if let Some(s) = snap {
+                        let age = now_ms.saturating_sub(s.fetched_at_ms);
+                        let our_bid_bps = match s.best_bid_ui {
+                            Some(b) if b > 0.0 => {
+                                Some((decision.bid_price - b) / b * 10_000.0)
+                            }
+                            _ => None,
+                        };
+                        let our_ask_bps = match s.best_ask_ui {
+                            Some(a) if a > 0.0 => {
+                                Some((a - decision.ask_price) / a * 10_000.0)
+                            }
+                            _ => None,
+                        };
+                        (s.best_bid_ui, s.best_ask_ui, Some(age), our_bid_bps, our_ask_bps)
+                    } else {
+                        (None, None, None, None, None)
+                    };
+
                 let entry = QuoteLogEntry {
-                    ts_ms: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)?
-                        .as_millis() as u64,
+                    ts_ms: now_ms,
                     cex_mid: cex.mid(),
                     cex_bid: cex.best_bid_usd,
                     cex_ask: cex.best_ask_usd,
@@ -239,6 +336,11 @@ async fn main() -> Result<()> {
                     would_cancel_count: cancels.len(),
                     would_place_count: new_orders.len(),
                     dry_run: cfg.dry_run,
+                    book_best_bid_ui: book_bid,
+                    book_best_ask_ui: book_ask,
+                    book_snapshot_age_ms: snap_age_ms,
+                    our_bid_inside_bps: our_bid_bps,
+                    our_ask_inside_bps: our_ask_bps,
                 };
                 {
                     let line = serde_json::to_string(&entry)?;
@@ -299,6 +401,55 @@ async fn main() -> Result<()> {
     let _ = binance_handle.await;
     info!("manifest_mm exited cleanly");
     Ok(())
+}
+
+/// Fetch the Manifest market account, decode top-of-book best bid/ask into
+/// UI price units. Returns `Ok(None)` if the account was fetched but both
+/// sides are empty (no resting orders).
+async fn fetch_book_snapshot(
+    http: &reqwest::Client,
+    rpc_url: &str,
+    market: &solana_sdk::pubkey::Pubkey,
+    base_decimals: u8,
+    quote_decimals: u8,
+) -> Result<Option<BookSnapshot>> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getAccountInfo",
+        "params": [market.to_string(), {"encoding": "base64", "commitment": "confirmed"}],
+    });
+    let resp: serde_json::Value = http.post(rpc_url).json(&body).send().await?.json().await?;
+    if let Some(err) = resp.get("error") {
+        anyhow::bail!("getAccountInfo error: {}", err);
+    }
+    let b64 = match resp["result"]["value"]["data"][0].as_str() {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    let data = base64::engine::general_purpose::STANDARD.decode(b64)?;
+    let slot = resp["result"]["context"]["slot"].as_u64().unwrap_or(0);
+    let pool = match parse_manifest_market(market, &data, slot) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    // Manifest prices: D18 fixed-point, quote_atoms per base_atom.
+    // UI price = price_d18 / 1e18 * 10^(base_dec - quote_dec).
+    let scale = 10f64.powi(base_decimals as i32 - quote_decimals as i32) / 1e18;
+    let best_bid_ui = pool.best_bid_price.map(|p| p as f64 * scale);
+    let best_ask_ui = pool.best_ask_price.map(|p| p as f64 * scale);
+    if best_bid_ui.is_none() && best_ask_ui.is_none() {
+        return Ok(None);
+    }
+    let fetched_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Ok(Some(BookSnapshot {
+        best_bid_ui,
+        best_ask_ui,
+        fetched_at_ms,
+    }))
 }
 
 /// Pick a (mantissa, exponent) such that `value ≈ mantissa * 10^exponent`
