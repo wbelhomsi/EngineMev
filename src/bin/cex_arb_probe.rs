@@ -117,10 +117,13 @@ async fn main() -> Result<()> {
 
     let binance_pairs = pairs.clone();
     let bybit_pairs = pairs.clone();
+    let gate_pairs = pairs.clone();
     let bx_log = log.clone();
     let by_log = log.clone();
+    let gt_log = log.clone();
     let bx_shutdown = shutdown_rx.clone();
     let by_shutdown = shutdown_rx.clone();
+    let gt_shutdown = shutdown_rx.clone();
 
     let bx = tokio::spawn(async move {
         run_binance(binance_pairs, bx_log, bx_shutdown).await;
@@ -128,9 +131,13 @@ async fn main() -> Result<()> {
     let by = tokio::spawn(async move {
         run_bybit(bybit_pairs, by_log, by_shutdown).await;
     });
+    let gt = tokio::spawn(async move {
+        run_gate(gate_pairs, gt_log, gt_shutdown).await;
+    });
 
     let _ = bx.await;
     let _ = by.await;
+    let _ = gt.await;
     info!("cex_arb_probe exited cleanly");
     Ok(())
 }
@@ -436,4 +443,193 @@ fn parse_bybit_level(v: Option<&serde_json::Value>) -> (f64, f64) {
     let px: f64 = lvl[0].as_str().unwrap_or("0").parse().unwrap_or(0.0);
     let qty: f64 = lvl[1].as_str().unwrap_or("0").parse().unwrap_or(0.0);
     (px, qty)
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Gate.io v4 spot — spot.book_ticker channel (L1 top-of-book).
+// Endpoint: wss://api.gateio.ws/ws/v4/
+// Subscribe: {"time":<unix>,"channel":"spot.book_ticker","event":"subscribe",
+//             "payload":["BTC_USDT","ETH_USDT"]}
+// Payload: {"time":...,"channel":"spot.book_ticker","event":"update",
+//           "result":{"t":...,"u":...,"s":"BTC_USDT","b":"75000","B":"0.5",
+//                     "a":"75001","A":"0.3"}}
+// Symbols use underscore delimiter (BTC_USDT); output re-normalizes back
+// to the Binance/Bybit form (BTCUSDT) so cross-venue analysis aligns.
+
+async fn run_gate(
+    pairs: Vec<String>,
+    log: LogHandle,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    let url = "wss://api.gateio.ws/ws/v4/";
+    // Convert "BTCUSDT" → "BTC_USDT". Only USDT-quoted pairs supported here.
+    let gate_syms: Vec<String> = pairs
+        .iter()
+        .filter_map(|p| {
+            if let Some(base) = p.strip_suffix("USDT") {
+                Some(format!("{}_USDT", base))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if gate_syms.is_empty() {
+        warn!("gate: no USDT pairs in list, exiting task");
+        return;
+    }
+
+    loop {
+        if *shutdown_rx.borrow() {
+            return;
+        }
+        info!("gate: connecting, subscribing {} pairs", gate_syms.len());
+        let conn = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio_tungstenite::connect_async(url),
+        )
+        .await;
+        let (ws, _) = match conn {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                warn!("gate: connect failed: {}", e);
+                tokio::time::sleep(RECONNECT_DELAY).await;
+                continue;
+            }
+            Err(_) => {
+                warn!("gate: connect timeout");
+                tokio::time::sleep(RECONNECT_DELAY).await;
+                continue;
+            }
+        };
+        info!("gate: connected");
+        let (mut write, mut read) = ws.split();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let sub = serde_json::json!({
+            "time": now,
+            "channel": "spot.book_ticker",
+            "event": "subscribe",
+            "payload": gate_syms,
+        })
+        .to_string();
+        if futures::SinkExt::send(&mut write, Message::Text(sub.into()))
+            .await
+            .is_err()
+        {
+            warn!("gate: subscribe send failed");
+            tokio::time::sleep(RECONNECT_DELAY).await;
+            continue;
+        }
+
+        // Gate expects a client ping every ~30s via a spot.ping channel.
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(25));
+        ping_interval.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() { return; }
+                }
+                _ = ping_interval.tick() => {
+                    let ts = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let p = serde_json::json!({
+                        "time": ts,
+                        "channel": "spot.ping",
+                    }).to_string();
+                    if futures::SinkExt::send(&mut write, Message::Text(p.into())).await.is_err() {
+                        warn!("gate: ping failed, reconnecting");
+                        break;
+                    }
+                }
+                msg = tokio::time::timeout(WS_TIMEOUT, read.next()) => {
+                    match msg {
+                        Ok(Some(Ok(Message::Text(txt)))) => {
+                            if let Err(e) = handle_gate_msg(&txt, &log) {
+                                warn!("gate: parse failed: {}", e);
+                            }
+                        }
+                        Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
+                            warn!("gate: stream closed, reconnecting");
+                            break;
+                        }
+                        Ok(Some(Err(e))) => {
+                            warn!("gate: ws error: {}", e);
+                            break;
+                        }
+                        Err(_) => {
+                            warn!("gate: idle timeout, reconnecting");
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(RECONNECT_DELAY).await;
+    }
+}
+
+fn handle_gate_msg(txt: &str, log: &LogHandle) -> Result<()> {
+    let v: serde_json::Value = serde_json::from_str(txt)?;
+    let event = v.get("event").and_then(|x| x.as_str()).unwrap_or("");
+    if event != "update" {
+        // subscribe ack, pong, or error — skip.
+        return Ok(());
+    }
+    let channel = v.get("channel").and_then(|x| x.as_str()).unwrap_or("");
+    if channel != "spot.book_ticker" {
+        return Ok(());
+    }
+    let result = v.get("result").ok_or_else(|| anyhow!("no result"))?;
+    let sym_raw = result
+        .get("s")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| anyhow!("no symbol"))?;
+    // Normalize "BTC_USDT" → "BTCUSDT".
+    let symbol = sym_raw.replace('_', "");
+    let bid: f64 = result
+        .get("b")
+        .and_then(|x| x.as_str())
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0.0);
+    let bid_qty: f64 = result
+        .get("B")
+        .and_then(|x| x.as_str())
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0.0);
+    let ask: f64 = result
+        .get("a")
+        .and_then(|x| x.as_str())
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0.0);
+    let ask_qty: f64 = result
+        .get("A")
+        .and_then(|x| x.as_str())
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0.0);
+    if bid == 0.0 || ask == 0.0 {
+        return Ok(());
+    }
+    write_tick(
+        log,
+        &Tick {
+            ts_ms: now_ms(),
+            venue: "gate",
+            symbol,
+            bid,
+            bid_qty,
+            ask,
+            ask_qty,
+        },
+    );
+    Ok(())
 }
