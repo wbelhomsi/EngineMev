@@ -109,6 +109,10 @@ path = "src/bin/manifest_mm.rs"
 name = "manifest_discover"
 path = "src/bin/manifest_discover.rs"
 
+[[bin]]
+name = "cex_arb_probe"
+path = "src/bin/cex_arb_probe.rs"
+
 [lints.clippy]
 # Allow these in a fast-moving MEV bot codebase
 too_many_arguments = "allow"
