@@ -240,6 +240,27 @@ fail the nonce check atomically).
 
 See `docs/superpowers/specs/2026-04-17-cexdex-nonce-fanout-design.md`.
 
+### Manifest Market Discovery Binary
+
+One-shot tool that enumerates every Manifest CLOB market via
+`getProgramAccounts` (256-byte header dataSlice), cross-references against
+a hardcoded halal mint allowlist (stablecoins + SOL + major LSTs:
+jitoSOL, mSOL, bSOL, JupSOL, INF, bonkSOL), and for matches refetches
+full data to surface live best bid/ask + vault depth.
+
+```bash
+RPC_URL=https://mainnet.helius-rpc.com/?api-key=...
+cargo run --release --bin manifest_discover
+# Output: stdout table + /tmp/manifest_markets.json
+```
+
+**First run (2026-04-19):** 1285 Manifest accounts → 25 halal-compatible
+markets. Top MM candidates by depth: jitoSOL/SOL, mSOL/SOL, JupSOL/SOL
+(all 1-bp spreads — already competitively market-made) and SOL/USDC
+(20-bp spread but only $21K depth — we'd *be* the market). Stablecoin
+pairs (PYUSD/USDC, USDT/USDC) have most depth but zero spread for MM
+to capture. Full snapshot: `docs/manifest-markets-2026-04-19.md`.
+
 ## Critical Rules for Development
 
 1. **ALWAYS web-search to verify any external API, SDK, or crate is current before using it.** We lost a full session building on the dead Jito mempool API. Training data goes stale.

@@ -114,6 +114,10 @@ path = "src/bin/xstocks_probe.rs"
 name = "manifest_mm"
 path = "src/bin/manifest_mm.rs"
 
+[[bin]]
+name = "manifest_discover"
+path = "src/bin/manifest_discover.rs"
+
 [lints.clippy]
 # Allow these in a fast-moving MEV bot codebase
 too_many_arguments = "allow"
