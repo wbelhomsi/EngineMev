@@ -33,7 +33,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use solana_mev_bot::cexdex::price_store::PriceStore;
+use solana_mev_bot::feed::PriceStore;
 use solana_mev_bot::executor::swaps::manifest_mm::{
     build_batch_update_ix, order_type, CancelOrderParams, PlaceOrderParams,
 };

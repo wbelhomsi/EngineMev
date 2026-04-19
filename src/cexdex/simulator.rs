@@ -10,9 +10,9 @@
 
 use tracing::debug;
 
-use crate::cexdex::price_store::PriceStore;
 use crate::cexdex::route::{ArbDirection, CexDexRoute};
 use crate::cexdex::units::{atoms_to_usdc, lamports_to_sol, sol_to_lamports, usdc_to_atoms};
+use crate::feed::PriceStore;
 
 /// Configuration for the CEX-DEX profit simulator.
 #[derive(Debug, Clone)]

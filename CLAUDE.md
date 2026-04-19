@@ -76,14 +76,14 @@ src/
 ├── config.rs            # Env config, relay endpoints, redact_url()
 ├── sanctum.rs           # Sanctum bootstrap: virtual pools, LST indices, rates, update_virtual_pool
 ├── rpc_helpers.rs       # load_keypair, load_alt, simulate_bundle_tx, send_public_tx
-├── feed/                # CEX price feeds
-│   ├── mod.rs           # PriceSnapshot (best_bid/ask + local receive time)
-│   └── binance.rs       # Binance bookTicker WS with auto-reconnect
-├── cexdex/              # CEX-DEX arbitrage module
-│   ├── mod.rs           # Re-exports CexDexConfig, Inventory, PriceStore, ArbDirection, CexDexRoute
+├── feed/                # CEX price feeds (strategy-neutral infra)
+│   ├── mod.rs           # PriceSnapshot, PriceStore (shared CEX snapshots + pool StateCache)
+│   ├── binance.rs       # Binance bookTicker WS with auto-reconnect
+│   └── price_store.rs   # Shared across cexdex, manifest_mm, and any future CEX-consuming strategy
+├── cexdex/              # CEX-DEX arbitrage strategy
+│   ├── mod.rs           # Re-exports CexDexConfig, Inventory, ArbDirection, CexDexRoute
 │   ├── config.rs        # CEXDEX_* env var parsing
 │   ├── units.rs         # Decimal conversions (SOL lamports, USDC atoms, bps)
-│   ├── price_store.rs   # Shared CEX snapshots + pool StateCache
 │   ├── inventory.rs     # Balance tracking, ratio gates, reservation lifecycle
 │   ├── route.rs         # CexDexRoute + ArbDirection
 │   ├── detector.rs      # Divergence detection, trade sizing (pool-depth-bounded)

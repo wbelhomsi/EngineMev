@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use crate::addresses;
 use crate::cexdex::inventory::Inventory;
-use crate::cexdex::price_store::PriceStore;
 use crate::cexdex::route::{ArbDirection, CexDexRoute};
+use crate::feed::PriceStore;
 use crate::cexdex::units::{
     atoms_to_usdc, lamports_to_sol, sol_to_lamports, spread_bps, usdc_to_atoms,
 };

@@ -1,6 +1,9 @@
 //! CEX price feeds (currently Binance only).
 
 pub mod binance;
+pub mod price_store;
+
+pub use price_store::PriceStore;
 
 /// Snapshot of a CEX top-of-book at a specific instant.
 /// All prices in USD per base unit (e.g., USD per SOL).

@@ -1,8 +1,8 @@
 use solana_mev_bot::addresses;
 use solana_mev_bot::cexdex::detector::{Detector, DetectorConfig};
 use solana_mev_bot::cexdex::route::ArbDirection;
-use solana_mev_bot::cexdex::{Inventory, PriceStore};
-use solana_mev_bot::feed::PriceSnapshot;
+use solana_mev_bot::cexdex::Inventory;
+use solana_mev_bot::feed::{PriceSnapshot, PriceStore};
 use solana_mev_bot::router::pool::{DexType, PoolExtra, PoolState};
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;

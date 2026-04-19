@@ -8,7 +8,8 @@ use solana_mev_bot::cexdex::detector::{Detector, DetectorConfig};
 use solana_mev_bot::cexdex::geyser::{narrow_bot_config, start_geyser};
 use solana_mev_bot::cexdex::simulator::{CexDexSimulator, CexDexSimulatorConfig, SimulationResult};
 use solana_mev_bot::cexdex::stats::{now_ms, OpportunityRecord, StatsCollector};
-use solana_mev_bot::cexdex::{CexDexConfig, Inventory, PriceStore};
+use solana_mev_bot::cexdex::{CexDexConfig, Inventory};
+use solana_mev_bot::feed::PriceStore;
 use solana_mev_bot::config::{BotConfig, RelayEndpoints};
 use solana_mev_bot::executor::relays::{
     astralane::AstralaneRelay, jito::JitoRelay, Relay,

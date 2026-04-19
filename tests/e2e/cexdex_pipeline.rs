@@ -5,9 +5,9 @@
 use solana_mev_bot::addresses;
 use solana_mev_bot::cexdex::detector::{Detector, DetectorConfig};
 use solana_mev_bot::cexdex::simulator::{CexDexSimulator, CexDexSimulatorConfig, SimulationResult};
-use solana_mev_bot::cexdex::{ArbDirection, Inventory, PriceStore};
+use solana_mev_bot::cexdex::{ArbDirection, Inventory};
 use solana_mev_bot::executor::BundleBuilder;
-use solana_mev_bot::feed::PriceSnapshot;
+use solana_mev_bot::feed::{PriceSnapshot, PriceStore};
 use solana_mev_bot::router::pool::{DexType, PoolExtra, PoolState};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Keypair;

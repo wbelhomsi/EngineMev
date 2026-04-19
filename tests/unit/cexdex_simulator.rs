@@ -1,5 +1,5 @@
 use solana_mev_bot::addresses;
-use solana_mev_bot::cexdex::price_store::PriceStore;
+use solana_mev_bot::feed::PriceStore;
 use solana_mev_bot::cexdex::route::{ArbDirection, CexDexRoute};
 use solana_mev_bot::cexdex::simulator::{CexDexSimulator, CexDexSimulatorConfig, SimulationResult};
 use solana_mev_bot::feed::PriceSnapshot;

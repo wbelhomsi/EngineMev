@@ -9,8 +9,7 @@ use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
-use crate::feed::PriceSnapshot;
-use crate::cexdex::PriceStore;
+use crate::feed::{PriceSnapshot, PriceStore};
 
 /// Default Binance WebSocket endpoint.
 pub const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/ws";

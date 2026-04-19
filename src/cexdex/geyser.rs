@@ -16,7 +16,7 @@ use tracing::info;
 
 use crate::config::{BotConfig, RelayEndpoints};
 use crate::mempool::{GeyserStream, PoolStateChange, SubscriptionMode};
-use crate::cexdex::price_store::PriceStore;
+use crate::feed::PriceStore;
 
 /// Build a `BotConfig` suitable for the cexdex Geyser subscription.
 ///

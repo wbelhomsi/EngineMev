@@ -1,5 +1,4 @@
-use solana_mev_bot::cexdex::PriceStore;
-use solana_mev_bot::feed::PriceSnapshot;
+use solana_mev_bot::feed::{PriceSnapshot, PriceStore};
 use std::time::Instant;
 
 fn mk_snapshot(bid: f64, ask: f64) -> PriceSnapshot {
