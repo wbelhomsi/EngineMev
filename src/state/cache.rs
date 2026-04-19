@@ -34,7 +34,9 @@ fn normalize_pair(a: &Pubkey, b: &Pubkey) -> (Pubkey, Pubkey) {
 /// Every pool we've seen gets cached here. The TTL determines how long
 /// we trust a cached state before requiring a refresh. For backrun arb,
 /// stale state = wrong profit calculation = missed opportunity (or worse,
-/// a bundle that reverts). Keep TTL tight — 1 slot (~400ms) is ideal.
+/// a bundle that reverts). Current TTL is driven by `pool_state_ttl`
+/// in config (default 2s); see "Tunable Constraints" in CLAUDE.md for
+/// the latency-vs-coverage trade-off.
 #[derive(Clone)]
 pub struct StateCache {
     pools: Arc<DashMap<PoolKey, CacheEntry>>,

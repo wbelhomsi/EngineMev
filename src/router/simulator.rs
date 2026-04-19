@@ -160,7 +160,6 @@ impl ProfitSimulator {
 
         let gross_profit_u64 = gross_profit as u64;
 
-        // Sanity cap: any single arb showing > 1 SOL net profit is almost
         // Sanity cap: any route showing > 10 SOL profit is almost certainly
         // an approximation artifact. Arb-guard catches these on-chain, but
         // rejecting them here avoids wasting relay submissions.

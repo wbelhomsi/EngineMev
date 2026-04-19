@@ -36,14 +36,21 @@ pub struct PoolStateChange {
 /// OLD (dead): Jito subscribe_mempool → see pending tx → backrun in same bundle
 /// NEW (current): Geyser account stream → see vault balance change → submit arb next slot
 ///
-/// Yellowstone gRPC streams account updates directly from validator memory
-/// at sub-50ms latency vs 100-300ms for standard WebSocket.
+/// Helius LaserStream (Yellowstone gRPC) streams account updates directly
+/// from validator memory at sub-50ms latency vs 100-300ms for standard
+/// WebSocket.
 ///
 /// Flow:
-/// 1. Subscribe to token vault accounts owned by target DEX programs
-/// 2. When vault balances change (someone swapped), emit PoolStateChange
-/// 3. Downstream router detects price dislocation across DEXes
-/// 4. Bundle submitted for next slot via multi-relay fan-out
+/// 1. Subscribe by DEX program owner (Raydium, Orca, Meteora, …). We
+///    receive updates for every account those programs own — i.e. pool
+///    state accounts. NEVER subscribe to SPL Token — that streams every
+///    token transfer on Solana.
+/// 2. Per-DEX parser in this file decodes the pool state and emits
+///    `PoolStateChange`. Raydium AMM v4 / CP are a special case: their
+///    pool state doesn't hold reserves, so we do a lazy `getMultipleAccounts`
+///    against the vaults (dataSlice 64..72) when those pools change.
+/// 3. Downstream router detects price dislocation across DEXes.
+/// 4. Bundle submitted for next slot via multi-relay fan-out.
 ///
 /// Max concurrent RPC calls to prevent flooding Helius.
 const MAX_CONCURRENT_RPC: usize = 10;

@@ -36,7 +36,6 @@ pub fn narrow_bot_config(
 
         // Relay / keypair fields — unused by cexdex binary
         jito_block_engine_url: String::new(),
-        jito_auth_keypair_path: String::new(),
         searcher_keypair_path: String::new(),
         relay_endpoints: RelayEndpoints {
             jito: String::new(),

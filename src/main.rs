@@ -11,7 +11,6 @@ use executor::{BundleBuilder, RelayDispatcher};
 use executor::relays::{Relay, jito::JitoRelay, astralane::AstralaneRelay,
     nozomi::NozomiRelay, bloxroute::BloxrouteRelay, zeroslot::ZeroSlotRelay};
 use mempool::{GeyserStream, PoolStateChange};
-// DetectedSwap no longer used — routes found via find_routes_for_base(SOL, pool)
 use router::{RouteCalculator, ProfitSimulator};
 use router::simulator::SimulationResult;
 use state::StateCache;
@@ -398,7 +397,7 @@ async fn main() -> Result<()> {
                         warn!("SKIP_SIMULATOR: sanity cap — estimated profit {} > 10 SOL, skipping",
                               best_route.estimated_profit_lamports);
                         SimulationResult::Unprofitable {
-                            reason: format!("sanity cap: estimated profit {} > 1 SOL",
+                            reason: format!("sanity cap: estimated profit {} > 10 SOL",
                                             best_route.estimated_profit_lamports),
                         }
                     } else {

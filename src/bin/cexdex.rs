@@ -223,7 +223,6 @@ async fn main() -> Result<()> {
     // the MVP — other relays can be added by extending `RelayEndpoints` below.
     let bot_config_relays = Arc::new(BotConfig {
         jito_block_engine_url: config.jito_block_engine_url.clone(),
-        jito_auth_keypair_path: String::new(),
         geyser_grpc_url: String::new(),
         geyser_auth_token: String::new(),
         rpc_url: config.rpc_url.clone(),

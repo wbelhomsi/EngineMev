@@ -16,10 +16,6 @@ pub fn inc_geyser_parse_errors(dex_type: &str) {
     counter!("geyser_parse_errors_total", "dex_type" => dex_type.to_string()).increment(1);
 }
 
-pub fn inc_geyser_reconnections() {
-    counter!("geyser_reconnections_total").increment(1);
-}
-
 pub fn inc_routes_found(hops: usize) {
     counter!("routes_found_total", "hops" => hops.to_string()).increment(1);
 }

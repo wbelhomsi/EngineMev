@@ -178,8 +178,6 @@ pub fn sanctum_sol_value_calculator(mint: &Pubkey) -> Option<Pubkey> {
 pub struct BotConfig {
     /// Jito block engine endpoint
     pub jito_block_engine_url: String,
-    /// Jito gRPC auth keypair path
-    pub jito_auth_keypair_path: String,
     /// Yellowstone gRPC endpoint for Geyser streaming
     pub geyser_grpc_url: String,
     /// Geyser auth token
@@ -259,8 +257,6 @@ impl BotConfig {
         Ok(Self {
             jito_block_engine_url: std::env::var("JITO_BLOCK_ENGINE_URL")
                 .unwrap_or_else(|_| "https://mainnet.block-engine.jito.wtf".to_string()),
-            jito_auth_keypair_path: std::env::var("JITO_AUTH_KEYPAIR")
-                .unwrap_or_else(|_| "keypair.json".to_string()),
             geyser_grpc_url: std::env::var("GEYSER_GRPC_URL")
                 .unwrap_or_else(|_| "http://localhost:10000".to_string()),
             geyser_auth_token: std::env::var("GEYSER_AUTH_TOKEN")
