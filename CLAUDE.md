@@ -232,7 +232,11 @@ fail the nonce check atomically).
 - Simulator rejects if worst-case net (highest tip fraction) is unprofitable
 - Metrics: `cexdex_nonce_collision_total`, `cexdex_nonce_in_flight`,
   `cexdex_bundles_attempted_total{relay}`, `cexdex_bundles_confirmed_total{relay}`,
-  `cexdex_tip_paid_usd_micros_total{relay}`
+  `cexdex_tip_paid_usd_micros_total{relay}`,
+  `cexdex_detector_skip_total{reason}` (reasons: `global_cooldown`, `cex_stale`,
+  `no_cex_snapshot`, `pool_not_cached`, `dedup_window`, `inventory_gate`,
+  `try_route_none`, `below_min_profit_detector`, `not_sol_usdc_pool`,
+  `zero_reserves`, `wrong_side_buy`, `wrong_side_sell`, `spread_too_tight`)
 
 See `docs/superpowers/specs/2026-04-17-cexdex-nonce-fanout-design.md`.
 

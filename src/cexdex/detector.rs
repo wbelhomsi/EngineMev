@@ -111,6 +111,7 @@ impl Detector {
             if let Ok(last) = self.last_global_emit.read() {
                 if let Some(t) = *last {
                     if t.elapsed() < std::time::Duration::from_millis(self.config.global_submit_cooldown_ms) {
+                        crate::metrics::counters::inc_cexdex_detector_skip("global_cooldown");
                         return None;
                     }
                 }
@@ -119,16 +120,26 @@ impl Detector {
 
         // Gate 1: reject stale CEX data
         if self.store.is_stale("SOLUSDC", self.config.cex_staleness_ms) {
+            crate::metrics::counters::inc_cexdex_detector_skip("cex_stale");
             return None;
         }
-        let cex = self.store.get_cex("SOLUSDC")?;
+        let cex = match self.store.get_cex("SOLUSDC") {
+            Some(c) => c,
+            None => {
+                crate::metrics::counters::inc_cexdex_detector_skip("no_cex_snapshot");
+                return None;
+            }
+        };
 
         let mut best: Option<CexDexRoute> = None;
 
         for &(_dex, pool_addr) in &self.pools {
             let pool = match self.store.pools.get_any(&pool_addr) {
                 Some(p) => p,
-                None => continue,
+                None => {
+                    crate::metrics::counters::inc_cexdex_detector_skip("pool_not_cached");
+                    continue;
+                }
             };
 
             for direction in [ArbDirection::BuyOnDex, ArbDirection::SellOnDex] {
@@ -136,6 +147,7 @@ impl Detector {
                 if self.config.dedup_window_ms > 0 {
                     if let Some(t) = self.last_emit.get(&(pool_addr, direction)) {
                         if t.elapsed() < std::time::Duration::from_millis(self.config.dedup_window_ms) {
+                            crate::metrics::counters::inc_cexdex_detector_skip("dedup_window");
                             continue;
                         }
                     }
@@ -143,18 +155,23 @@ impl Detector {
 
                 // Gate 2: inventory hard cap
                 if !self.inventory.allows_direction(direction) {
+                    crate::metrics::counters::inc_cexdex_detector_skip("inventory_gate");
                     continue;
                 }
 
                 let route = match self.try_route(&pool, direction, &cex) {
                     Some(r) => r,
-                    None => continue,
+                    None => {
+                        crate::metrics::counters::inc_cexdex_detector_skip("try_route_none");
+                        continue;
+                    }
                 };
 
                 // Gate 3: minimum profit, scaled by inventory skew multiplier
                 let required_profit = self.config.min_profit_usd
                     * self.inventory.profit_multiplier(direction);
                 if route.expected_profit_usd < required_profit {
+                    crate::metrics::counters::inc_cexdex_detector_skip("below_min_profit_detector");
                     continue;
                 }
 
@@ -197,10 +214,12 @@ impl Detector {
             } else if pool.token_b_mint == wsol && pool.token_a_mint == usdc {
                 (false, pool.token_b_reserve, pool.token_a_reserve)
             } else {
-                return None; // not a SOL/USDC pool
+                crate::metrics::counters::inc_cexdex_detector_skip("not_sol_usdc_pool");
+                return None;
             };
 
         if sol_reserve == 0 || usdc_reserve == 0 {
+            crate::metrics::counters::inc_cexdex_detector_skip("zero_reserves");
             return None;
         }
 
@@ -212,6 +231,7 @@ impl Detector {
             ArbDirection::BuyOnDex => {
                 // Profitable only if DEX is cheaper than CEX bid
                 if dex_spot >= cex.best_bid_usd {
+                    crate::metrics::counters::inc_cexdex_detector_skip("wrong_side_buy");
                     return None;
                 }
                 (cex.best_bid_usd, spread_bps(cex.best_bid_usd, dex_spot))
@@ -219,6 +239,7 @@ impl Detector {
             ArbDirection::SellOnDex => {
                 // Profitable only if DEX is more expensive than CEX ask
                 if dex_spot <= cex.best_ask_usd {
+                    crate::metrics::counters::inc_cexdex_detector_skip("wrong_side_sell");
                     return None;
                 }
                 (cex.best_ask_usd, spread_bps(cex.best_ask_usd, dex_spot))
@@ -226,6 +247,7 @@ impl Detector {
         };
 
         if edge_bps < self.config.min_spread_bps {
+            crate::metrics::counters::inc_cexdex_detector_skip("spread_too_tight");
             return None;
         }
 
