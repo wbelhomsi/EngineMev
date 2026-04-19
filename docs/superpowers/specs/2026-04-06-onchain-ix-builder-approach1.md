@@ -48,7 +48,7 @@ for hop in params.hops {
 
 ## Per-DEX Instruction Data Layouts
 
-From a reference router analysis (lib.rs:881-1308):
+Per-DEX layouts observed across reference implementations:
 
 | DEX | Discriminator | Layout after disc |
 |-----|--------------|-------------------|
@@ -103,4 +103,4 @@ Consider migrating from Approach 2 to Approach 1 when:
 
 ## Reference Implementation
 
-The a reference router `build_swap_ix` function (lib.rs:881-1308) is the reference. Each `PoolType` match arm constructs the full instruction data from scratch. The main swap loop (lib.rs:2254-2298) feeds `interim_amount_in` through the chain.
+A reference router's `build_swap_ix` is the pattern here. Each `PoolType` match arm constructs the full instruction data from scratch. A main swap loop then feeds `interim_amount_in` through the chain.
